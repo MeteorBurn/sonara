@@ -42,6 +42,18 @@ pub fn beat_track(
         return Ok((start_bpm, vec![]));
     }
 
+    let (min_onset, max_onset) = oenv.iter().copied().fold(
+        (Float::INFINITY, Float::NEG_INFINITY),
+        |(min_v, max_v), v| (min_v.min(v), max_v.max(v)),
+    );
+    if !min_onset.is_finite()
+        || !max_onset.is_finite()
+        || max_onset <= 1e-10
+        || (max_onset - min_onset) <= 1e-10
+    {
+        return Ok((start_bpm, vec![]));
+    }
+
     // Estimate tempo
     let tempo = estimate_tempo(&oenv, sr, hop_length, start_bpm)?;
     let frames_per_beat = (60.0 * frame_rate / tempo).round() as usize;
@@ -103,22 +115,64 @@ fn estimate_tempo(
     }
 
     // Weight by log-normal prior centered at start_bpm
-    let mut best_lag = min_lag;
-    let mut best_score = Float::NEG_INFINITY;
+    let mut candidates = Vec::with_capacity(max_lag - min_lag + 1);
 
     for lag in min_lag..=max_lag {
         let bpm = 60.0 * frame_rate / lag as Float;
         let log_prior = -0.5 * ((bpm.log2() - start_bpm.log2()) / 1.0).powi(2);
         let score = acf[lag] * (1.0 + log_prior.exp());
+        candidates.push((lag, bpm, score));
+    }
 
-        if score > best_score {
-            best_score = score;
-            best_lag = lag;
+    let (_lag, tempo, _score) = select_preferred_tempo_candidate(&candidates).unwrap_or((min_lag, start_bpm, 0.0));
+    Ok(tempo.clamp(30.0, 320.0))
+}
+
+fn select_preferred_tempo_candidate(candidates: &[(usize, Float, Float)]) -> Option<(usize, Float, Float)> {
+    let best = candidates
+        .iter()
+        .copied()
+        .filter(|(_, bpm, score)| bpm.is_finite() && score.is_finite())
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    if best.1 < 75.0 {
+        if let Some(candidate) = best_supported_metrical_candidate(candidates, best, 115.0, 150.0, 1.80, 2.20, 0.50) {
+            return Some(candidate);
+        }
+    } else if best.1 < 90.0 {
+        if let Some(candidate) = best_supported_metrical_candidate(candidates, best, 120.0, 145.0, 1.42, 1.62, 0.75) {
+            return Some(candidate);
+        }
+    } else if best.1 < 95.0 && best.2 >= 4.0 {
+        if let Some(candidate) = best_supported_metrical_candidate(candidates, best, 120.0, 145.0, 1.42, 1.62, 0.85) {
+            return Some(candidate);
         }
     }
 
-    let tempo = 60.0 * frame_rate / best_lag as Float;
-    Ok(tempo.clamp(30.0, 320.0))
+    Some(best)
+}
+
+fn best_supported_metrical_candidate(
+    candidates: &[(usize, Float, Float)],
+    best: (usize, Float, Float),
+    min_bpm: Float,
+    max_bpm: Float,
+    min_multiple: Float,
+    max_multiple: Float,
+    min_score_ratio: Float,
+) -> Option<(usize, Float, Float)> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let multiple = candidate.1 / best.1;
+            candidate.1 >= min_bpm
+                && candidate.1 <= max_bpm
+                && multiple >= min_multiple
+                && multiple <= max_multiple
+                && candidate.2 >= best.2 * min_score_ratio
+        })
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 /// Compute local beat score via Gaussian convolution.
@@ -392,6 +446,58 @@ mod tests {
         let y = click_train(22050, 4.0, 120.0);
         let (tempo, _) = beat_track(Some(y.view()), None, 22050, 512, 120.0, 100.0, true).unwrap();
         assert!((tempo - 120.0).abs() < 30.0, "tempo {tempo} should be ~120 BPM");
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_lifts_supported_half_tempo() {
+        let selected = select_preferred_tempo_candidate(&[
+            (41, 63.024010, 11.464),
+            (31, 83.354332, 9.647),
+            (21, 123.046875, 7.414),
+            (20, 129.199219, 7.407),
+        ]).unwrap();
+        assert_eq!(selected.0, 21);
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_lifts_supported_three_halves_tempo() {
+        let selected = select_preferred_tempo_candidate(&[
+            (29, 89.102913, 9.025),
+            (19, 135.999176, 8.613),
+            (39, 66.256012, 7.820),
+            (20, 129.199219, 6.865),
+        ]).unwrap();
+        assert_eq!(selected.0, 19);
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_keeps_weakly_supported_true_90_bpm() {
+        let selected = select_preferred_tempo_candidate(&[
+            (29, 89.102913, 2.050),
+            (20, 129.199219, 1.338),
+            (19, 135.999176, 0.939),
+            (39, 66.256012, 0.747),
+        ]).unwrap();
+        assert_eq!(selected.0, 29);
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_keeps_low_confidence_92_bpm() {
+        let selected = select_preferred_tempo_candidate(&[
+            (28, 92.285156, 2.170),
+            (37, 69.837418, 2.145),
+            (18, 143.554688, 2.144),
+            (19, 135.999176, 2.082),
+        ]).unwrap();
+        assert_eq!(selected.0, 28);
+    }
+
+    #[test]
+    fn test_beat_track_flat_onset_envelope_falls_back_without_beats() {
+        let env = Array1::<Float>::zeros(128);
+        let (tempo, beats) = beat_track(None, Some(env.view()), 22050, 512, 120.0, 100.0, true).unwrap();
+        assert!((tempo - 120.0).abs() < 1e-6, "flat onset envelope should fall back to start BPM, got {tempo}");
+        assert!(beats.is_empty(), "flat onset envelope should not produce beats, got {}", beats.len());
     }
 
     #[test]
