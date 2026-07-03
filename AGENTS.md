@@ -15,6 +15,13 @@ These instructions apply to work inside `E:\Projects\Sonara`.
   - optional project BPM range (`bpm_min`, `bpm_max`) doubles or halves values outside the range.
 - Current fork package version is `0.1.8`.
 - On the first 1000 labeled rows, current optimized logic produced 998 successful analyses, 2 decode errors, 1 remaining x2-like result without BPM range, and 0 x2-like results after applying the 79-192 BPM range.
+- Next focus is the second BPM problem after the x2 fix:
+  - x2 octave errors are largely handled, but corrected BPM values can still miss Mixed In Key by roughly 1-3 BPM.
+  - A separate HIGH/LOW dataset was created at `benchmarks\bpm\label_low_high\mik_bpm_and_sonara_bpm_low_high.xlsx`.
+  - That dataset uses the same 9-column structure as the x2 workbook and contains only `HIGH` and `LOW` labels after excluding `X2`, `x0.5`, `OK`, and rows with empty BPM values.
+  - Current counts in that workbook: `HIGH` = 1501, `LOW` = 1307, total = 2808.
+  - The likely next investigation is not another octave-folding fix, but candidate scoring/refinement accuracy: HIGH contains many large `x1.5`-like misses, while LOW is mostly small 1-3 BPM drift with some larger inverse-ratio cases.
+  - Before changing code for this second problem, benchmark and inspect candidate behavior on the HIGH/LOW workbook and ask the user for confirmation before edits.
 
 ## Workflow Rules
 
