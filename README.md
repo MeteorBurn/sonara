@@ -59,11 +59,70 @@ Pre-built wheels for Linux, macOS (Intel & Apple Silicon), and Windows. Requires
 This fork contains BPM-focused changes relative to upstream `v0.1.7`:
 
 - **Tempo candidate selection tweak** — improves beat-tracker candidate choice for tracks where `v0.1.7` could report roughly half of the BPM shown by DJ library tools such as Mixed In Key.
-- **Optional project BPM range** — `bpm_min` and `bpm_max` can be passed to the analysis and beat-tracking APIs. Values outside the range are doubled or halved by octaves, matching the "lowest/highest BPM" behavior used by DJ metadata tools.
+- **Optional project BPM range** — `bpm_min` and `bpm_max` can be passed to the analysis and beat-tracking APIs. Values outside the range are doubled or halved by octaves, matching the "lowest/highest BPM" behavior used by DJ metadata tools. This is opt-in: installing `0.1.8` does not enable range alignment unless the caller passes these parameters.
+- **Fractional BPM refinement** — autocorrelation BPM peak selection now uses parabolic lag refinement, reducing the 1-3 BPM quantization drift seen in HIGH/LOW near-miss benchmark rows.
 
 Local benchmark status on the labeled x2 dataset: in the first 1000 rows, the current optimized code produced 998 successful analyses, 2 decode errors, and 1 remaining x2-like result before range alignment. With the 79-192 BPM range applied, x2-like results dropped to 0 in those 998 successful analyses.
 
 Versioning note: this fork is now tracked as `0.1.8`. Avoid `0.1.7.1` for the Rust crates because Cargo expects SemVer-style `major.minor.patch` versions.
+
+## BPM Range Alignment
+
+`bpm_min` and `bpm_max` are for host applications that have a project-level
+tempo window, for example a DJ library configured with a lowest/highest BPM.
+When both values are provided, Sonara folds the estimated tempo by octaves until
+it lands inside the requested range:
+
+- if the estimate is below `bpm_min`, it is doubled until it reaches the range;
+- if the estimate is above `bpm_max`, it is halved until it reaches the range.
+
+This is the behavior that removed the remaining x2-like result in the local
+79-192 BPM benchmark. It is not a global setting and it is not enabled just by
+installing Sonara `0.1.8`; every caller that wants this behavior must pass the
+range into the analysis or beat-tracking call.
+
+Use it from Python like this:
+
+```python
+import sonara
+
+result = sonara.analyze_file(
+    "track.flac",
+    mode="playlist",
+    bpm_min=79.0,
+    bpm_max=192.0,
+)
+
+print(result["bpm"])
+```
+
+For applications that decode audio themselves and call `analyze_signal`, pass
+the same parameters there:
+
+```python
+analysis = sonara.analyze_signal(
+    audio,
+    sr=22050,
+    mode="playlist",
+    bpm_min=79.0,
+    bpm_max=192.0,
+)
+```
+
+The lower-level beat tracker accepts the same range:
+
+```python
+tempo, beats = sonara.beat_track(
+    y=audio,
+    sr=22050,
+    bpm_min=79.0,
+    bpm_max=192.0,
+)
+```
+
+Both values must be provided together. They must be finite, positive numbers
+with `bpm_min < bpm_max`, and `bpm_max` must be at least double `bpm_min` so
+octave folding has a valid target window.
 
 ## Analysis Pipeline
 
@@ -97,8 +156,9 @@ r['zero_crossing_rate']     # Percussiveness proxy
 r['duration_sec']           # Track length
 ```
 
-To constrain BPM display like DJ library tools, pass a BPM range. Values outside
-the range are doubled or halved by octaves:
+To constrain BPM output like DJ library tools, pass a BPM range. See
+[BPM Range Alignment](#bpm-range-alignment) for the full behavior and
+integration notes:
 
 ```python
 r = sonara.analyze_file("track.mp3", mode="compact", bpm_min=79.0, bpm_max=192.0)
