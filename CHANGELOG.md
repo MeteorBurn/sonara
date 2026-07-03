@@ -7,7 +7,7 @@ All notable changes to sonara are documented in this file.
 ### Added
 
 - Add optional BPM range parameters (`bpm_min`, `bpm_max`) to analysis and beat-tracking APIs. Values outside the configured range are doubled or halved by octaves.
-- Document how host applications should pass `bpm_min` and `bpm_max` through `analyze_file`, `analyze_signal`, or `beat_track` when they want project-level BPM range alignment. The feature is opt-in; installing `0.1.8` does not enable range alignment unless the caller passes both parameters.
+- Document how host applications should pass `bpm_min` and `bpm_max` through `analyze_file`, `analyze_signal`, or `beat_track` when they want project-level BPM range alignment. The feature is opt-in; installing `0.1.8` does not enable range alignment unless the caller passes both parameters. The documented `79.0` / `192.0` example comes from the Mixed In Key reference/settings used for the BPM benchmark; callers can choose different values for other project ranges.
 - Add a labeled HIGH/LOW BPM benchmark workbook for investigating non-x2 BPM drift against Mixed In Key.
 - Document fork-specific BPM behavior compared with upstream `v0.1.7`.
 

@@ -77,7 +77,11 @@ it lands inside the requested range:
 - if the estimate is above `bpm_max`, it is halved until it reaches the range.
 
 This is the behavior that removed the remaining x2-like result in the local
-79-192 BPM benchmark. It is not a global setting and it is not enabled just by
+79-192 BPM benchmark. The example `bpm_min=79.0` and `bpm_max=192.0` values
+come from the Mixed In Key reference/settings used while improving the BPM
+algorithm against Mixed In Key-labeled data. They are not hard-coded Sonara
+defaults; use different values if your application needs a different BPM
+window. Range alignment is not a global setting and it is not enabled just by
 installing Sonara `0.1.8`; every caller that wants this behavior must pass the
 range into the analysis or beat-tracking call.
 
