@@ -23,6 +23,25 @@ pub fn beat_track(
     tightness: Float,
     trim: bool,
 ) -> Result<(Float, Vec<usize>)> {
+    beat_track_with_bpm_range(y, onset_envelope, sr, hop_length, start_bpm, tightness, trim, None, None)
+}
+
+/// Track beats in an audio signal with optional octave-folding BPM range.
+///
+/// If both `bpm_min` and `bpm_max` are provided, the estimated tempo is doubled
+/// or halved by octaves until it falls inside the requested range. This mirrors
+/// DJ-library workflows that constrain BPM display to a preferred range.
+pub fn beat_track_with_bpm_range(
+    y: Option<ArrayView1<Float>>,
+    onset_envelope: Option<ArrayView1<Float>>,
+    sr: u32,
+    hop_length: usize,
+    start_bpm: Float,
+    tightness: Float,
+    trim: bool,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<(Float, Vec<usize>)> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -55,7 +74,7 @@ pub fn beat_track(
     }
 
     // Estimate tempo
-    let tempo = estimate_tempo(&oenv, sr, hop_length, start_bpm)?;
+    let tempo = estimate_tempo(&oenv, sr, hop_length, start_bpm, bpm_min, bpm_max)?;
     let frames_per_beat = (60.0 * frame_rate / tempo).round() as usize;
 
     if frames_per_beat == 0 {
@@ -93,6 +112,8 @@ fn estimate_tempo(
     sr: u32,
     hop_length: usize,
     start_bpm: Float,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
 ) -> Result<Float> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
@@ -125,6 +146,7 @@ fn estimate_tempo(
     }
 
     let (_lag, tempo, _score) = select_preferred_tempo_candidate(&candidates).unwrap_or((min_lag, start_bpm, 0.0));
+    let tempo = align_tempo_to_bpm_range(tempo, bpm_min, bpm_max)?;
     Ok(tempo.clamp(30.0, 320.0))
 }
 
@@ -173,6 +195,47 @@ fn best_supported_metrical_candidate(
                 && candidate.2 >= best.2 * min_score_ratio
         })
         .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn align_tempo_to_bpm_range(
+    mut tempo: Float,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<Float> {
+    let (min_bpm, max_bpm) = match (bpm_min, bpm_max) {
+        (None, None) => return Ok(tempo),
+        (Some(min_bpm), Some(max_bpm)) => (min_bpm, max_bpm),
+        _ => {
+            return Err(SonaraError::InvalidParameter {
+                param: "bpm_range",
+                reason: "bpm_min and bpm_max must be provided together".into(),
+            });
+        }
+    };
+
+    if !min_bpm.is_finite() || !max_bpm.is_finite() || min_bpm <= 0.0 || max_bpm <= min_bpm {
+        return Err(SonaraError::InvalidParameter {
+            param: "bpm_range",
+            reason: "expected finite values with 0 < bpm_min < bpm_max".into(),
+        });
+    }
+    if max_bpm < min_bpm * 2.0 {
+        return Err(SonaraError::InvalidParameter {
+            param: "bpm_range",
+            reason: "bpm_max must be at least double bpm_min for octave folding".into(),
+        });
+    }
+    if !tempo.is_finite() || tempo <= 0.0 {
+        return Ok(tempo);
+    }
+
+    while tempo < min_bpm {
+        tempo *= 2.0;
+    }
+    while tempo > max_bpm {
+        tempo /= 2.0;
+    }
+    Ok(tempo)
 }
 
 /// Compute local beat score via Gaussian convolution.
@@ -490,6 +553,27 @@ mod tests {
             (19, 135.999176, 2.082),
         ]).unwrap();
         assert_eq!(selected.0, 28);
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_doubles_low_values() {
+        assert_eq!(align_tempo_to_bpm_range(63.02401, Some(79.0), Some(192.0)).unwrap(), 126.04802);
+        assert_eq!(align_tempo_to_bpm_range(66.25601, Some(79.0), Some(192.0)).unwrap(), 132.51202);
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_halves_high_values() {
+        assert!((align_tempo_to_bpm_range(250.0, Some(79.0), Some(192.0)).unwrap() - 125.0).abs() < 1e-6);
+        assert!((align_tempo_to_bpm_range(401.0, Some(79.0), Some(192.0)).unwrap() - 100.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_requires_complete_valid_range() {
+        assert!(align_tempo_to_bpm_range(120.0, None, None).is_ok());
+        assert!(align_tempo_to_bpm_range(120.0, Some(79.0), None).is_err());
+        assert!(align_tempo_to_bpm_range(120.0, None, Some(192.0)).is_err());
+        assert!(align_tempo_to_bpm_range(120.0, Some(192.0), Some(79.0)).is_err());
+        assert!(align_tempo_to_bpm_range(120.0, Some(100.0), Some(150.0)).is_err());
     }
 
     #[test]

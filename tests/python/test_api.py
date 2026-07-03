@@ -109,6 +109,7 @@ test("hybrid_cqt(y)", lambda: sonara.hybrid_cqt(y_1s, sr=22050, n_bins=36))
 print("\n--- Pattern 6: Beat Tracking ---")
 
 test("beat_track(y=y)", lambda: sonara.beat_track(y=y_5s, sr=22050))
+test("beat_track accepts bpm range", lambda: sonara.beat_track(y=y_clicks, sr=22050, bpm_min=79.0, bpm_max=192.0))
 tempo, beats = sonara.beat_track(y=y_clicks, sr=22050)
 test("beat_track returns tempo", lambda: (None if tempo > 0 else (_ for _ in ()).throw(ValueError("bad tempo"))))
 test("beat_track returns beats", lambda: (None if len(beats) > 0 else (_ for _ in ()).throw(ValueError("no beats"))))
@@ -283,6 +284,14 @@ try:
     plt.close('all')
 except ImportError:
     test("display (matplotlib not available)", lambda: None)
+
+# ============================================================
+# Pattern 21: Fused Analysis
+# ============================================================
+print("\n--- Pattern 21: Fused Analysis ---")
+
+test("analyze_signal compact", lambda: sonara.analyze_signal(y_clicks, sr=22050))
+test("analyze_signal accepts bpm range", lambda: sonara.analyze_signal(y_clicks, sr=22050, bpm_min=79.0, bpm_max=192.0))
 
 # ============================================================
 # Summary

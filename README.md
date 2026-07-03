@@ -86,6 +86,13 @@ r['zero_crossing_rate']     # Percussiveness proxy
 r['duration_sec']           # Track length
 ```
 
+To constrain BPM display like DJ library tools, pass a BPM range. Values outside
+the range are doubled or halved by octaves:
+
+```python
+r = sonara.analyze_file("track.mp3", mode="compact", bpm_min=79.0, bpm_max=192.0)
+```
+
 ### Playlist mode
 
 Everything for playlist generation: spectral features, MFCCs (timbre fingerprint), chroma (harmony), tonal analysis (chords, dissonance), plus perceptual features:

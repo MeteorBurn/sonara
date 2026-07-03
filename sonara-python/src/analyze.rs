@@ -65,54 +65,65 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     Ok(d)
 }
 
-fn parse_config(mode: &str, features: Option<Vec<String>>) -> PyResult<rs::AnalysisConfig> {
+fn parse_config(
+    mode: &str,
+    features: Option<Vec<String>>,
+    bpm_min: Option<f32>,
+    bpm_max: Option<f32>,
+) -> PyResult<rs::AnalysisConfig> {
     let mode = rs::AnalysisMode::from_str(mode).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
             "Invalid mode '{}'. Valid modes: 'compact', 'playlist', 'full'", mode
         ))
     })?;
     let features = features.map(|f| f.into_iter().map(|s| s.to_lowercase()).collect::<HashSet<_>>());
-    Ok(rs::AnalysisConfig { mode, features })
+    Ok(rs::AnalysisConfig { mode, features, bpm_min, bpm_max })
 }
 
 #[pyfunction]
-#[pyo3(name = "analyze_file", signature = (path, *, sr=22050, mode="compact", features=None))]
+#[pyo3(name = "analyze_file", signature = (path, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None))]
 pub fn py_analyze_file<'py>(
     py: Python<'py>,
     path: &str,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,
+    bpm_min: Option<f32>,
+    bpm_max: Option<f32>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let config = parse_config(mode, features)?;
+    let config = parse_config(mode, features, bpm_min, bpm_max)?;
     let result = rs::analyze_file(Path::new(path), sr, &config).into_pyresult()?;
     result_to_dict(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(name = "analyze_signal", signature = (y, *, sr=22050, mode="compact", features=None))]
+#[pyo3(name = "analyze_signal", signature = (y, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None))]
 pub fn py_analyze_signal<'py>(
     py: Python<'py>,
     y: PyReadonlyArray1<'py, f32>,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,
+    bpm_min: Option<f32>,
+    bpm_max: Option<f32>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let config = parse_config(mode, features)?;
+    let config = parse_config(mode, features, bpm_min, bpm_max)?;
     let result = rs::analyze_signal(y.as_array(), sr, &config).into_pyresult()?;
     result_to_dict(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(name = "analyze_batch", signature = (paths, *, sr=22050, mode="compact", features=None))]
+#[pyo3(name = "analyze_batch", signature = (paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None))]
 pub fn py_analyze_batch<'py>(
     py: Python<'py>,
     paths: Vec<String>,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,
+    bpm_min: Option<f32>,
+    bpm_max: Option<f32>,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let config = parse_config(mode, features)?;
+    let config = parse_config(mode, features, bpm_min, bpm_max)?;
     let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
     let results = rs::analyze_batch(&path_refs, sr, &config);
     results

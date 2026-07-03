@@ -11,19 +11,25 @@ from sonara._result import TrackAnalysis
 from sonara import display  # noqa: F401
 
 
-def analyze_file(path, *, sr=22050, mode="compact", features=None):
+def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None):
     """Analyze an audio file and return a `TrackAnalysis` (dict subclass with `.print()`)."""
-    return TrackAnalysis(_analyze_file(path, sr=sr, mode=mode, features=features))
+    return TrackAnalysis(_analyze_file(
+        path, sr=sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
+    ))
 
 
-def analyze_signal(y, *, sr=22050, mode="compact", features=None):
+def analyze_signal(y, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None):
     """Analyze a signal array and return a `TrackAnalysis` (dict subclass with `.print()`)."""
-    return TrackAnalysis(_analyze_signal(y, sr=sr, mode=mode, features=features))
+    return TrackAnalysis(_analyze_signal(
+        y, sr=sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
+    ))
 
 
-def analyze_batch(paths, *, sr=22050, mode="compact", features=None):
+def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None):
     """Analyze a list of audio files in parallel; returns a `list[TrackAnalysis]`."""
     return [
         TrackAnalysis(r)
-        for r in _analyze_batch(paths, sr=sr, mode=mode, features=features)
+        for r in _analyze_batch(
+            paths, sr=sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
+        )
     ]

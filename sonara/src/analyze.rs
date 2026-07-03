@@ -105,6 +105,13 @@ pub struct AnalysisConfig {
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
     /// are resolved automatically.
     pub features: Option<HashSet<String>>,
+    /// Optional lower bound for octave-folding tempo normalization.
+    ///
+    /// When both `bpm_min` and `bpm_max` are set, BPM values outside the range
+    /// are doubled or halved by octaves until they fit the requested range.
+    pub bpm_min: Option<Float>,
+    /// Optional upper bound for octave-folding tempo normalization.
+    pub bpm_max: Option<Float>,
 }
 
 impl Default for AnalysisConfig {
@@ -112,6 +119,8 @@ impl Default for AnalysisConfig {
         Self {
             mode: AnalysisMode::Compact,
             features: None,
+            bpm_min: None,
+            bpm_max: None,
         }
     }
 }
@@ -699,8 +708,9 @@ fn analyze_signal_inner(
     // BEAT TRACKING + ONSET DETECTION
     // ================================================================
 
-    let (bpm, beats) = crate::beat::beat_track(
+    let (bpm, beats) = crate::beat::beat_track_with_bpm_range(
         None, Some(oenv_padded.view()), sr, hop_length, 120.0, 100.0, true,
+        config.bpm_min, config.bpm_max,
     )?;
 
     let onset_frames = crate::onset::onset_detect(
@@ -969,17 +979,17 @@ fn analyze_signal_inner(
 
 /// Shorthand for compact mode analysis.
 pub fn compact() -> AnalysisConfig {
-    AnalysisConfig { mode: AnalysisMode::Compact, features: None }
+    AnalysisConfig { mode: AnalysisMode::Compact, ..Default::default() }
 }
 
 /// Shorthand for playlist mode analysis.
 pub fn playlist() -> AnalysisConfig {
-    AnalysisConfig { mode: AnalysisMode::Playlist, features: None }
+    AnalysisConfig { mode: AnalysisMode::Playlist, ..Default::default() }
 }
 
 /// Shorthand for full mode analysis.
 pub fn full() -> AnalysisConfig {
-    AnalysisConfig { mode: AnalysisMode::Full, features: None }
+    AnalysisConfig { mode: AnalysisMode::Full, ..Default::default() }
 }
 
 #[cfg(test)]
@@ -1039,6 +1049,7 @@ mod tests {
         let config = AnalysisConfig {
             mode: AnalysisMode::Compact,
             features: Some(["energy", "key", "chroma"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
         };
         let result = analyze_signal(y.view(), 22050, &config).unwrap();
         // Requested features should be present
@@ -1048,6 +1059,18 @@ mod tests {
         // Non-requested extended features should be absent
         assert!(result.danceability.is_none());
         assert!(result.acousticness.is_none());
+    }
+
+    #[test]
+    fn test_analyze_config_accepts_runtime_bpm_range() {
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: None,
+            bpm_min: Some(79.0),
+            bpm_max: Some(192.0),
+        };
+        assert_eq!(config.bpm_min, Some(79.0));
+        assert_eq!(config.bpm_max, Some(192.0));
     }
 
     #[test]
