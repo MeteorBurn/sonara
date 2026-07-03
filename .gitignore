@@ -41,6 +41,7 @@ Thumbs.db
 desktop.ini
 
 # Benchmarks (generated, not committed)
+/benchmarks/
 benchmark_results.json
 benchmark_phases1_4.json
 
