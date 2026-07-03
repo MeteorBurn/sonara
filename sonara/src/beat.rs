@@ -145,9 +145,48 @@ fn estimate_tempo(
         candidates.push((lag, bpm, score));
     }
 
-    let (_lag, tempo, _score) = select_preferred_tempo_candidate(&candidates).unwrap_or((min_lag, start_bpm, 0.0));
+    let (lag, _tempo, _score) =
+        select_preferred_tempo_candidate(&candidates).unwrap_or((min_lag, start_bpm, 0.0));
+    let tempo = refine_tempo_from_acf_peak(acf.view(), lag, frame_rate);
     let tempo = align_tempo_to_bpm_range(tempo, bpm_min, bpm_max)?;
     Ok(tempo.clamp(30.0, 320.0))
+}
+
+fn refine_tempo_from_acf_peak(acf: ArrayView1<Float>, lag: usize, frame_rate: Float) -> Float {
+    let integer_tempo = if lag > 0 {
+        60.0 * frame_rate / lag as Float
+    } else {
+        return 0.0;
+    };
+
+    if lag + 1 >= acf.len() || !frame_rate.is_finite() || frame_rate <= 0.0 {
+        return integer_tempo;
+    }
+
+    let left = acf[lag - 1];
+    let center = acf[lag];
+    let right = acf[lag + 1];
+    if !left.is_finite()
+        || !center.is_finite()
+        || !right.is_finite()
+        || center < left
+        || center < right
+    {
+        return integer_tempo;
+    }
+
+    let denominator = left - 2.0 * center + right;
+    if denominator.abs() <= 1e-12 {
+        return integer_tempo;
+    }
+
+    let offset = (0.5 * (left - right) / denominator).clamp(-0.5, 0.5);
+    let refined_lag = lag as Float + offset;
+    if refined_lag <= 0.0 || !refined_lag.is_finite() {
+        integer_tempo
+    } else {
+        60.0 * frame_rate / refined_lag
+    }
 }
 
 fn select_preferred_tempo_candidate(candidates: &[(usize, Float, Float)]) -> Option<(usize, Float, Float)> {
@@ -553,6 +592,23 @@ mod tests {
             (19, 135.999176, 2.082),
         ]).unwrap();
         assert_eq!(selected.0, 28);
+    }
+
+    #[test]
+    fn test_tempo_refinement_uses_fractional_acf_peak() {
+        let mut acf = Array1::<Float>::zeros(24);
+        acf[19] = 7.0;
+        acf[20] = 10.0;
+        acf[21] = 10.0;
+
+        let frame_rate = 22050.0 / 512.0;
+        let refined = refine_tempo_from_acf_peak(acf.view(), 20, frame_rate);
+
+        let expected = 60.0 * frame_rate / 20.5;
+        assert!(
+            (refined - expected).abs() < 1e-5,
+            "expected fractional-lag tempo {expected}, got {refined}"
+        );
     }
 
     #[test]
