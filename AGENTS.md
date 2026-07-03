@@ -10,6 +10,11 @@ These instructions apply to work inside `E:\Projects\Sonara`.
   - `bpm_mik` and `bpm_mik_raw` are target BPM values.
   - `bpm_sonara` is the previously recorded Sonara BPM from the `E:\Projects\dj-track-similarity` project database.
   - `path` points to the audio file to re-analyze with Sonara.
+- Current fork changes compared with original `v0.1.7`:
+  - tempo candidate selection in the beat tracker reduces the half-BPM/x2 mismatch substantially;
+  - optional project BPM range (`bpm_min`, `bpm_max`) doubles or halves values outside the range.
+- Current fork package version is `0.1.8`.
+- On the first 1000 labeled rows, current optimized logic produced 998 successful analyses, 2 decode errors, 1 remaining x2-like result without BPM range, and 0 x2-like results after applying the 79-192 BPM range.
 
 ## Workflow Rules
 
@@ -22,16 +27,23 @@ These instructions apply to work inside `E:\Projects\Sonara`.
 
 ## BPM Benchmark Procedure
 
-- Start with batches of 100 files from `benchmarks\bpm\label_x2\mik_bpm_and_sonara_bpm_x2.xlsx`.
+- Future benchmark runs for this label should use the current optimized code only unless the user explicitly asks to compare against original `v0.1.7` again.
+- Continue with batches of 200 files from `benchmarks\bpm\label_x2\mik_bpm_and_sonara_bpm_x2.xlsx` now that release-mode analysis has proven fast enough.
 - For each batch:
-  - Run Sonara with the baseline/current logic without the new x2 optimization.
+  - Run Sonara with the current optimized logic.
   - Compare output against `bpm_mik_raw` and `bpm_mik`.
-  - Run the same files with the proposed x2 optimization.
-  - Compare again against the same targets.
-- If x2 optimization brings results close to target, continue with the next batch of 100.
+  - Also evaluate the deterministic BPM range post-process for the project range under discussion, currently 79-192 BPM.
+- If the current x2 behavior remains clean, continue with the next batch.
 - If remaining errors are around 2-3 BPM after x2 correction, treat that as a potentially separate optimization problem.
 - During iterative work, keep at most one consolidated working report, preferably TSV or CSV.
 - Produce a user-facing `.xlsx` report only at the end, unless the user asks for an intermediate workbook.
+- Do not expand or modify the source workbook. Add analysis-only columns to the working/final report instead.
+- For BPM values in reports:
+  - `bpm_mik` is the UI-formatted target and should display with two decimals.
+  - `bpm_mik_raw` is the raw audit value from the MIK/database source.
+  - Keep analyzed Sonara values as both raw and UI forms, e.g. `bpm_sonara_run_raw` and `bpm_sonara_run`.
+  - If carrying original database Sonara values into a report, keep both raw and UI forms, e.g. `bpm_sonara_db_raw` and `bpm_sonara_db`.
+  - Primary error metrics should compare the UI-formatted Sonara run value against `bpm_mik`; raw metrics may be retained for audit.
 
 ## Data Handling
 

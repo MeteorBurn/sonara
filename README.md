@@ -54,6 +54,17 @@ results = sonara.analyze_batch(files, mode="playlist")
 
 Pre-built wheels for Linux, macOS (Intel & Apple Silicon), and Windows. Requires Python 3.9+.
 
+## Fork Notes vs v0.1.7
+
+This fork contains BPM-focused changes relative to upstream `v0.1.7`:
+
+- **Tempo candidate selection tweak** — improves beat-tracker candidate choice for tracks where `v0.1.7` could report roughly half of the BPM shown by DJ library tools such as Mixed In Key.
+- **Optional project BPM range** — `bpm_min` and `bpm_max` can be passed to the analysis and beat-tracking APIs. Values outside the range are doubled or halved by octaves, matching the "lowest/highest BPM" behavior used by DJ metadata tools.
+
+Local benchmark status on the labeled x2 dataset: in the first 1000 rows, the current optimized code produced 998 successful analyses, 2 decode errors, and 1 remaining x2-like result before range alignment. With the 79-192 BPM range applied, x2-like results dropped to 0 in those 998 successful analyses.
+
+Versioning note: this fork is now tracked as `0.1.8`. Avoid `0.1.7.1` for the Rust crates because Cargo expects SemVer-style `major.minor.patch` versions.
+
 ## Analysis Pipeline
 
 sonara includes a fused analysis pipeline that extracts all features in a single optimized pass. Three modes control the depth of analysis:
@@ -91,6 +102,12 @@ the range are doubled or halved by octaves:
 
 ```python
 r = sonara.analyze_file("track.mp3", mode="compact", bpm_min=79.0, bpm_max=192.0)
+```
+
+The same BPM range parameters are available on the lower-level beat tracker:
+
+```python
+tempo, beats = sonara.beat_track(y=y, sr=sr, bpm_min=79.0, bpm_max=192.0)
 ```
 
 ### Playlist mode

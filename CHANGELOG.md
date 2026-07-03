@@ -2,6 +2,21 @@
 
 All notable changes to sonara are documented in this file.
 
+## [0.1.8] - 2026-07-03
+
+### Added
+
+- Add optional BPM range parameters (`bpm_min`, `bpm_max`) to analysis and beat-tracking APIs. Values outside the configured range are doubled or halved by octaves.
+- Document fork-specific BPM behavior compared with upstream `v0.1.7`.
+
+### Fixed
+
+- Improve tempo candidate selection for tracks where upstream `v0.1.7` could report roughly half of the target BPM shown by DJ library tools.
+
+### Validation
+
+- On the first 1000 labeled x2 benchmark rows, current optimized logic produced 998 successful analyses, 2 decode errors, and 1 remaining x2-like result before BPM range alignment. Applying the 79-192 BPM range reduced x2-like results to 0 in those 998 successful analyses.
+
 ## [0.1.6] - 2026-04-14
 
 ### Added
