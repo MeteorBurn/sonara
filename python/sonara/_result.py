@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+
+Row = tuple[str, str]
+
 
 def _fmt_duration(sec: float) -> str:
     total = int(round(sec))
@@ -10,6 +15,83 @@ def _fmt_duration(sec: float) -> str:
         h, m = divmod(m, 60)
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+def _fmt_confidence(value: object, confidence: object | None) -> str:
+    if confidence is None:
+        return str(value)
+    return f"{value}  (conf {confidence:.2f})"
+
+
+def _append_if_present(
+    rows: list[Row],
+    data: dict,
+    key: str,
+    label: str,
+    formatter: Callable[[object], str] = str,
+) -> None:
+    if key in data:
+        rows.append((label, formatter(data[key])))
+
+
+def _build_rhythm_rows(data: dict) -> list[Row]:
+    rows: list[Row] = []
+    _append_if_present(rows, data, "bpm", "BPM", lambda v: f"{v:.1f}")
+    _append_if_present(rows, data, "n_beats", "Beats", str)
+    _append_if_present(rows, data, "onset_density", "Onset density", lambda v: f"{v:.2f}/sec")
+    _append_if_present(rows, data, "tempo_variability", "Tempo variability", lambda v: f"{v:.3f}")
+    if "time_signature" in data:
+        rows.append((
+            "Time signature",
+            _fmt_confidence(data["time_signature"], data.get("time_signature_confidence")),
+        ))
+    return rows
+
+
+def _build_tonal_rows(data: dict) -> list[Row]:
+    rows: list[Row] = []
+    if "key" in data:
+        rows.append(("Key", _fmt_confidence(data["key"], data.get("key_confidence"))))
+    _append_if_present(rows, data, "predominant_chord", "Predominant chord", str)
+    _append_if_present(rows, data, "chord_change_rate", "Chord changes", lambda v: f"{v:.2f}/sec")
+    _append_if_present(rows, data, "dissonance", "Dissonance", lambda v: f"{v:.3f}")
+    return rows
+
+
+def _build_perceptual_rows(data: dict) -> list[Row]:
+    rows: list[Row] = []
+    for key, label in (
+        ("energy", "Energy"),
+        ("danceability", "Danceability"),
+        ("valence", "Valence"),
+        ("acousticness", "Acousticness"),
+        ("instrumentalness", "Instrumentalness"),
+    ):
+        _append_if_present(rows, data, key, label, lambda v: f"{v:.2f}")
+    _append_if_present(rows, data, "loudness_lufs", "Loudness", lambda v: f"{v:.1f} LUFS")
+    _append_if_present(rows, data, "dynamic_range_db", "Dynamic range", lambda v: f"{v:.1f} dB")
+    return rows
+
+
+def _build_spectral_rows(data: dict) -> list[Row]:
+    rows: list[Row] = []
+    _append_if_present(rows, data, "spectral_centroid_mean", "Centroid", lambda v: f"{v:.0f} Hz")
+    _append_if_present(rows, data, "spectral_bandwidth_mean", "Bandwidth", lambda v: f"{v:.0f} Hz")
+    _append_if_present(rows, data, "spectral_rolloff_mean", "Rolloff", lambda v: f"{v:.0f} Hz")
+    _append_if_present(rows, data, "spectral_flatness_mean", "Flatness", lambda v: f"{v:.3f}")
+    _append_if_present(rows, data, "zero_crossing_rate", "ZCR", lambda v: f"{v:.3f}")
+    return rows
+
+
+def _append_section(lines: list[str], name: str, rows: list[Row]) -> None:
+    if not rows:
+        return
+
+    lines.append("")
+    lines.append(f"  {name}")
+    width = max(len(label) for label, _ in rows)
+    for label, value in rows:
+        lines.append(f"    {label:<{width}}  {value}")
 
 
 class TrackAnalysis(dict):
@@ -35,70 +117,12 @@ class TrackAnalysis(dict):
         else:
             lines.append("TrackAnalysis")
 
-        rhythm: list[tuple[str, str]] = []
-        if "bpm" in self:
-            rhythm.append(("BPM", f"{self['bpm']:.1f}"))
-        if "n_beats" in self:
-            rhythm.append(("Beats", str(self["n_beats"])))
-        if "onset_density" in self:
-            rhythm.append(("Onset density", f"{self['onset_density']:.2f}/sec"))
-        if "tempo_variability" in self:
-            rhythm.append(("Tempo variability", f"{self['tempo_variability']:.3f}"))
-        if "time_signature" in self:
-            ts = self["time_signature"]
-            conf = self.get("time_signature_confidence")
-            rhythm.append(("Time signature", f"{ts}  (conf {conf:.2f})" if conf is not None else str(ts)))
-
-        tonal: list[tuple[str, str]] = []
-        if "key" in self:
-            conf = self.get("key_confidence")
-            tonal.append(("Key", f"{self['key']}  (conf {conf:.2f})" if conf is not None else str(self["key"])))
-        if "predominant_chord" in self:
-            tonal.append(("Predominant chord", str(self["predominant_chord"])))
-        if "chord_change_rate" in self:
-            tonal.append(("Chord changes", f"{self['chord_change_rate']:.2f}/sec"))
-        if "dissonance" in self:
-            tonal.append(("Dissonance", f"{self['dissonance']:.3f}"))
-
-        perceptual: list[tuple[str, str]] = []
-        for key, label in (
-            ("energy", "Energy"),
-            ("danceability", "Danceability"),
-            ("valence", "Valence"),
-            ("acousticness", "Acousticness"),
-            ("instrumentalness", "Instrumentalness"),
-        ):
-            if key in self:
-                perceptual.append((label, f"{self[key]:.2f}"))
-        if "loudness_lufs" in self:
-            perceptual.append(("Loudness", f"{self['loudness_lufs']:.1f} LUFS"))
-        if "dynamic_range_db" in self:
-            perceptual.append(("Dynamic range", f"{self['dynamic_range_db']:.1f} dB"))
-
-        spectral: list[tuple[str, str]] = []
-        if "spectral_centroid_mean" in self:
-            spectral.append(("Centroid", f"{self['spectral_centroid_mean']:.0f} Hz"))
-        if "spectral_bandwidth_mean" in self:
-            spectral.append(("Bandwidth", f"{self['spectral_bandwidth_mean']:.0f} Hz"))
-        if "spectral_rolloff_mean" in self:
-            spectral.append(("Rolloff", f"{self['spectral_rolloff_mean']:.0f} Hz"))
-        if "spectral_flatness_mean" in self:
-            spectral.append(("Flatness", f"{self['spectral_flatness_mean']:.3f}"))
-        if "zero_crossing_rate" in self:
-            spectral.append(("ZCR", f"{self['zero_crossing_rate']:.3f}"))
-
         for name, rows in (
-            ("Rhythm", rhythm),
-            ("Tonal", tonal),
-            ("Perceptual", perceptual),
-            ("Spectral", spectral),
+            ("Rhythm", _build_rhythm_rows(self)),
+            ("Tonal", _build_tonal_rows(self)),
+            ("Perceptual", _build_perceptual_rows(self)),
+            ("Spectral", _build_spectral_rows(self)),
         ):
-            if not rows:
-                continue
-            lines.append("")
-            lines.append(f"  {name}")
-            width = max(len(label) for label, _ in rows)
-            for label, value in rows:
-                lines.append(f"    {label:<{width}}  {value}")
+            _append_section(lines, name, rows)
 
         print("\n".join(lines))
