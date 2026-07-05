@@ -228,3 +228,19 @@ def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
 # Similarity in [0, 1] between two fingerprints, robust to gain / re-encoding /
 # small leading-silence differences. Accepts base64 `fingerprint` strings or
 # analysis dicts containing one. A score above ~0.30 means "same recording".
+def analyze_file(path: str, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050) -> List[Dict[str, Union[float, int, List[int]]]]: ...
+
+# ============================================================
+# Similarity & embeddings
+# ============================================================
+# The similarity vector is OPT-IN: analyze with features=["embedding"] to add
+# "embedding" (List[float], EMBEDDING_DIM long) and "embedding_version" (int) to
+# the result. It is never produced by a bare mode (compact/playlist/full).
+
+SIMILARITY_VERSION: int
+EMBEDDING_DIM: int
+
+def similarity(a: Union[Dict, List[float], NDArray[np.float32]], b: Union[Dict, List[float], NDArray[np.float32]]) -> float: ...
+def embedding_distance(a: List[float], b: List[float]) -> float: ...

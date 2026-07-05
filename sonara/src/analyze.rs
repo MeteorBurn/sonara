@@ -106,6 +106,9 @@ pub struct AnalysisConfig {
     /// **Opt-in only (never enabled by any mode; request explicitly):**
     /// `silence` (leading/trailing silence offsets), `key_candidates`
     /// (top-3 keys), `vocalness` (vocal-presence heuristic)
+    /// **Similarity (opt-in):**
+    /// `embedding` — hand-crafted similarity vector; automatically pulls in the
+    /// features it is assembled from. Never produced by a bare mode.
     ///
     /// Note: `duration` is always included. Some features depend on others
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
@@ -134,9 +137,29 @@ impl Default for AnalysisConfig {
 impl AnalysisConfig {
     /// Check if a feature should be computed.
     fn wants(&self, name: &str) -> bool {
+        // --- similarity ---
+        // The similarity embedding is always OPT-IN: it is never produced by a
+        // bare mode (compact/playlist/full), only when "embedding" is explicitly
+        // listed in `features`. When requested, it also pulls in the underlying
+        // features it is assembled from (see EMBEDDING_DEPS).
+        if name == "embedding" {
+            return self
+                .features
+                .as_ref()
+                .map(|f| f.contains("embedding"))
+                .unwrap_or(false);
+        }
+
         if let Some(ref features) = self.features {
             // Explicit feature list — check if requested
-            features.contains(name)
+            if features.contains(name) {
+                return true;
+            }
+            // --- similarity ---: requesting "embedding" implies its dependencies
+            if features.contains("embedding") && EMBEDDING_DEPS.contains(&name) {
+                return true;
+            }
+            false
         } else {
             // --- loudness ---
             // Extended loudness/gain metrics ("loudness" group) are strictly
@@ -190,6 +213,8 @@ impl AnalysisConfig {
                 // silence + vocalness derive from always-computed RMS / mel data
                 // and do NOT require the extended pass.
                 "key_candidates",
+                // --- similarity ---: embedding needs the playlist-level features
+                "embedding",
             ];
             EXTENDED_FEATURES.iter().any(|&f| features.contains(f))
         } else {
@@ -226,6 +251,15 @@ impl AnalysisConfig {
 /// `features=[...]`, never enabled by an analysis mode's defaults.
 const OPT_IN_ONLY_FEATURES: &[&str] = &["loudness"];
 // --- end loudness ---
+// --- similarity ---
+/// Feature names the similarity embedding is assembled from. Requesting
+/// "embedding" implies each of these (see `AnalysisConfig::wants`). The spectral
+/// timbre features (mfcc/chroma/contrast/bandwidth/rolloff/flatness) are computed
+/// automatically whenever extended analysis runs, so only the wants-gated tonal
+/// and perceptual features need to be listed here.
+const EMBEDDING_DEPS: &[&str] = &[
+    "energy", "danceability", "key", "valence", "dissonance", "chords",
+];
 
 /// Number of spectral contrast bands.
 const N_CONTRAST_BANDS: usize = 6;
@@ -388,6 +422,11 @@ pub struct TrackAnalysis {
     /// explicitly requested; `None` in every mode by default. See
     /// [`crate::fingerprint`]. Compare two with [`crate::fingerprint::match_score`].
     pub fingerprint: Option<Vec<u32>>,
+    // --- similarity ---
+    /// Version of the `embedding` layout + normalization (see
+    /// `crate::similarity::SIMILARITY_VERSION`). `Some` iff `embedding` is `Some`.
+    /// Present only when the `"embedding"` feature is explicitly requested.
+    pub embedding_version: Option<u32>,
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -1197,7 +1236,7 @@ fn analyze_signal_inner(
         None
     };
 
-    Ok(TrackAnalysis {
+    let mut result = TrackAnalysis {
         duration_sec,
         bpm,
         bpm_raw,
@@ -1270,6 +1309,22 @@ fn analyze_signal_inner(
         // --- fingerprint ---
         fingerprint,
     })
+        // --- similarity ---
+        embedding_version: None,
+    };
+
+    // --- similarity ---
+    // Populate the hand-crafted similarity vector only when explicitly opted in
+    // via `features=["embedding"]`. This keeps compact/playlist/full unchanged
+    // and adds near-zero cost (the vector is assembled from features already
+    // computed above). A future ML embedding can replace `embed` behind the same
+    // version field.
+    if config.wants("embedding") {
+        result.embedding = Some(crate::similarity::embed(&result));
+        result.embedding_version = Some(crate::similarity::SIMILARITY_VERSION);
+    }
+
+    Ok(result)
 }
 
 // ============================================================

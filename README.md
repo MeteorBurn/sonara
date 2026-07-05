@@ -346,6 +346,7 @@ is harmonic → low flatness), and the 4–8 Hz modulation energy of the vocal-b
 envelope (the syllabic rate), gating harmonicity and syllabic modulation together
 so sustained pads and percussion score low while modulated harmonic content
 scores high. Treat it as a soft hint.
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `embedding`
 
 ### Batch analysis
 
@@ -385,6 +386,11 @@ tempo- or pitch-shifted versions.
 The fingerprint is **opt-in** (performance-first: no analysis mode computes it by
 default). Request it with `features=["fingerprint"]`; the result then carries a
 base64 `fingerprint` string and an integer `fingerprint_version`:
+## Similarity & embeddings
+
+sonara can produce a fixed-length **similarity vector** (a hand-crafted, 48-dimension embedding) for nearest-neighbor search over a music library — no ML dependency. It is assembled from features the pipeline already computes (MFCC timbre, chroma harmony, spectral shape, rhythm, dynamics, and tonal descriptors), each with **fixed, documented normalization** so vectors are comparable across tracks, machines, and library runs.
+
+The vector is **opt-in** — it is never produced by a bare mode. Request it explicitly with `features=["embedding"]` (this also pulls in the playlist-level features it is built from):
 
 ```python
 import sonara
@@ -406,6 +412,22 @@ sonara.fingerprint_match(a, b)   # e.g. 0.98 → same recording
 ```
 
 Find duplicates across a whole folder:
+r = sonara.analyze_file("track.mp3", features=["embedding"])
+r["embedding"]          # list of 48 floats, each in [0, 1]
+r["embedding_version"]  # layout version (int); compare only same-version vectors
+```
+
+Compare two tracks with `sonara.similarity(a, b)` — it returns a score in `0..1` (higher = more similar) and accepts either `TrackAnalysis` results or raw vectors:
+
+```python
+a = sonara.analyze_file("a.mp3", features=["embedding"])
+b = sonara.analyze_file("b.mp3", features=["embedding"])
+sonara.similarity(a, b)          # e.g. 0.87
+sonara.similarity(a, a)          # 1.0 (identical)
+sonara.similarity(a["embedding"], b["embedding"])  # raw vectors also work
+```
+
+### Nearest-neighbor search over a library
 
 ```python
 import sonara
@@ -433,6 +455,23 @@ for dup, original in duplicates:
 
 The pairwise scan above is `O(n²)`; for very large libraries, bucket candidates
 first (e.g. by rounded `duration_sec`) and only fingerprint-match within a bucket.
+library = sonara.analyze_batch(files, features=["embedding"])
+
+def most_similar(query, library, k=5):
+    scored = [
+        (path, sonara.similarity(query, cand))
+        for path, cand in zip(files, library)
+        if cand is not query
+    ]
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return scored[:k]
+
+seed = library[0]
+for path, score in most_similar(seed, library):
+    print(f"{score:.3f}  {path}")
+```
+
+The metric is a **weighted, normalized Euclidean distance** (not cosine): all dimensions are non-negative and bounded to `[0, 1]`, where cosine is biased toward 1 — Euclidean stays discriminative, and per-dimension weights let timbre, harmony and tempo dominate over incidental dimensions like absolute loudness. Because loudness contributes little, the *same* track at a different gain still scores as highly similar. The hand-crafted vector sits behind `embedding_version`, so a learned (e.g. ONNX) embedding can later replace it behind the same field and API.
 
 ## Tonal Analysis
 

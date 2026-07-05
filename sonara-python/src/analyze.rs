@@ -67,6 +67,8 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
 
     // Embedding (future)
     if let Some(ref v) = r.embedding { d.set_item("embedding", v.clone())?; }
+    // --- similarity ---
+    if let Some(v) = r.embedding_version { d.set_item("embedding_version", v)?; }
 
     // Tier 3 placeholders (only included when not None)
     if let Some(v) = r.mood_happy { d.set_item("mood_happy", v)?; }

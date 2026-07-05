@@ -132,6 +132,10 @@ class TrackAnalysis(dict):
         # --- vocalness ---
         if "vocalness" in self:
             perceptual.append(("Vocalness", f"{self['vocalness']:.2f}"))
+        # --- similarity ---
+        if "embedding" in self:
+            ver = self.get("embedding_version", "?")
+            perceptual.append(("Embedding", f"{len(self['embedding'])}-dim v{ver}"))
 
         spectral: list[tuple[str, str]] = []
         if "spectral_centroid_mean" in self:

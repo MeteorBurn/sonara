@@ -18,6 +18,7 @@ pub mod perceptual;
 pub mod segment;
 pub mod sequence;
 pub mod structure;
+pub mod similarity;
 pub mod tonal;
 pub mod types;
 pub mod util;

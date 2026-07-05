@@ -8,6 +8,7 @@ mod error;
 mod feature;
 mod filters;
 mod onset;
+mod similarity;
 mod tonal;
 mod util;
 
@@ -24,6 +25,7 @@ fn _sonara(m: &Bound<'_, PyModule>) -> PyResult<()> {
     feature::register(m)?;
     filters::register(m)?;
     onset::register(m)?;
+    similarity::register(m)?;
     tonal::register(m)?;
     util::register(m)?;
 
