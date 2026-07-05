@@ -407,6 +407,51 @@ pub fn format_key(result: &KeyResult) -> String {
     format!("{} {}", result.key, result.mode)
 }
 
+// ============================================================
+// Camelot wheel notation (DJ harmonic mixing)
+// ============================================================
+
+// Camelot codes indexed by pitch class (C, C#, D, D#, E, F, F#, G, G#, A, A#, B).
+// Minor keys form the "A" ring, major keys the "B" ring. Used by DJs
+// (Mixed In Key / Rekordbox) for harmonic mixing.
+const CAMELOT_MINOR: [&str; 12] =
+    ["5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A"];
+const CAMELOT_MAJOR: [&str; 12] =
+    ["8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B"];
+
+/// Map a note name to its pitch class (0-11), accepting sharp or flat spellings.
+fn pitch_class(tonic: &str) -> Option<usize> {
+    Some(match tonic {
+        "C" | "B#" => 0,
+        "C#" | "Db" => 1,
+        "D" => 2,
+        "D#" | "Eb" => 3,
+        "E" | "Fb" => 4,
+        "F" | "E#" => 5,
+        "F#" | "Gb" => 6,
+        "G" => 7,
+        "G#" | "Ab" => 8,
+        "A" => 9,
+        "A#" | "Bb" => 10,
+        "B" | "Cb" => 11,
+        _ => return None,
+    })
+}
+
+/// Map a detected key `(tonic, mode)` to its Camelot wheel code.
+///
+/// Minor keys map to the "A" ring (e.g. A minor -> "8A"), major keys to the
+/// "B" ring (e.g. C major -> "8B"). `tonic` accepts sharp or flat spellings;
+/// `mode` is "major"/"maj" or "minor"/"min". Returns `None` for unrecognized input.
+pub fn camelot(tonic: &str, mode: &str) -> Option<&'static str> {
+    let pc = pitch_class(tonic)?;
+    match mode {
+        "minor" | "min" => Some(CAMELOT_MINOR[pc]),
+        "major" | "maj" => Some(CAMELOT_MAJOR[pc]),
+        _ => None,
+    }
+}
+
 /// Pearson correlation between chroma (12 values) and a profile rotated by `shift`.
 fn pearson_correlation(chroma: &[Float], profile: &[Float; 12], shift: usize) -> Float {
     let n = 12;
@@ -613,6 +658,68 @@ mod tests {
     fn test_format_key() {
         let result = KeyResult { key: "F#", mode: "minor", confidence: 0.7 };
         assert_eq!(format_key(&result), "F# minor");
+    }
+
+    #[test]
+    fn test_camelot_all_minor_keys() {
+        // (tonic, expected Camelot code) for the full "A" ring.
+        let cases = [
+            ("G#", "1A"), ("D#", "2A"), ("A#", "3A"), ("F", "4A"),
+            ("C", "5A"), ("G", "6A"), ("D", "7A"), ("A", "8A"),
+            ("E", "9A"), ("B", "10A"), ("F#", "11A"), ("C#", "12A"),
+        ];
+        for (tonic, code) in cases {
+            assert_eq!(camelot(tonic, "minor"), Some(code), "{tonic} minor");
+        }
+    }
+
+    #[test]
+    fn test_camelot_all_major_keys() {
+        // (tonic, expected Camelot code) for the full "B" ring.
+        let cases = [
+            ("B", "1B"), ("F#", "2B"), ("C#", "3B"), ("G#", "4B"),
+            ("D#", "5B"), ("A#", "6B"), ("F", "7B"), ("C", "8B"),
+            ("G", "9B"), ("D", "10B"), ("A", "11B"), ("E", "12B"),
+        ];
+        for (tonic, code) in cases {
+            assert_eq!(camelot(tonic, "major"), Some(code), "{tonic} major");
+        }
+    }
+
+    #[test]
+    fn test_camelot_enharmonic_spellings() {
+        // Flat spellings must resolve to the same code as their sharp equivalent.
+        assert_eq!(camelot("Ab", "minor"), Some("1A")); // = G# minor
+        assert_eq!(camelot("Eb", "minor"), Some("2A")); // = D# minor
+        assert_eq!(camelot("Bb", "minor"), Some("3A")); // = A# minor
+        assert_eq!(camelot("Gb", "minor"), Some("11A")); // = F# minor
+        assert_eq!(camelot("Db", "minor"), Some("12A")); // = C# minor
+        assert_eq!(camelot("Gb", "major"), Some("2B")); // = F# major
+        assert_eq!(camelot("Db", "major"), Some("3B")); // = C# major
+        assert_eq!(camelot("Ab", "major"), Some("4B")); // = G# major
+        assert_eq!(camelot("Eb", "major"), Some("5B")); // = D# major
+        assert_eq!(camelot("Bb", "major"), Some("6B")); // = A# major
+    }
+
+    #[test]
+    fn test_camelot_accepts_short_mode_names() {
+        assert_eq!(camelot("A", "min"), Some("8A"));
+        assert_eq!(camelot("C", "maj"), Some("8B"));
+    }
+
+    #[test]
+    fn test_camelot_rejects_invalid_input() {
+        assert_eq!(camelot("H", "minor"), None);
+        assert_eq!(camelot("A", "dorian"), None);
+    }
+
+    #[test]
+    fn test_camelot_matches_detector_output() {
+        // Every note name the detector can emit must map to a Camelot code.
+        for name in NOTE_NAMES {
+            assert!(camelot(name, "minor").is_some(), "{name} minor");
+            assert!(camelot(name, "major").is_some(), "{name} major");
+        }
     }
 
     // ---- LUFS tests ----

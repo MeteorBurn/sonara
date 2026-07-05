@@ -52,6 +52,7 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     if let Some(v) = r.danceability { d.set_item("danceability", v)?; }
     if let Some(ref v) = r.key { d.set_item("key", v.as_str())?; }
     if let Some(v) = r.key_confidence { d.set_item("key_confidence", v)?; }
+    if let Some(ref v) = r.key_camelot { d.set_item("key_camelot", v.as_str())?; }
     if let Some(v) = r.valence { d.set_item("valence", v)?; }
     if let Some(v) = r.acousticness { d.set_item("acousticness", v)?; }
 

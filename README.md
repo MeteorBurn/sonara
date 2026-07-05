@@ -27,7 +27,7 @@ r.print()
 #     Onset density  3.21/sec
 #
 #   Tonal
-#     Key                A minor  (conf 0.81)
+#     Key                A minor (8A)  (conf 0.81)
 #     Predominant chord  Am
 #     Chord changes      1.42/sec
 #     Dissonance         0.183
@@ -103,6 +103,7 @@ r['acousticness']     # Acoustic vs electronic character
 
 # Musical key
 r['key']              # e.g. "C major", "A minor"
+r['key_camelot']      # Camelot wheel code for DJ harmonic mixing, e.g. "8B", "8A"
 r['key_confidence']   # How confident the key detection is (0.0 - 1.0)
 
 # Tonal analysis

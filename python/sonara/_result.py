@@ -70,8 +70,12 @@ class TrackAnalysis(dict):
 
         tonal: list[tuple[str, str]] = []
         if "key" in self:
+            key_str = str(self["key"])
+            camelot = self.get("key_camelot")
+            if camelot is not None:
+                key_str = f"{key_str} ({camelot})"
             conf = self.get("key_confidence")
-            tonal.append(("Key", f"{self['key']}  (conf {conf:.2f})" if conf is not None else str(self["key"])))
+            tonal.append(("Key", f"{key_str}  (conf {conf:.2f})" if conf is not None else key_str))
         if "predominant_chord" in self:
             tonal.append(("Predominant chord", str(self["predominant_chord"])))
         if "chord_change_rate" in self:

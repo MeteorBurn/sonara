@@ -238,6 +238,8 @@ pub struct TrackAnalysis {
     pub danceability: Option<Float>,
     pub key: Option<String>,
     pub key_confidence: Option<Float>,
+    /// Camelot wheel code for the detected key (e.g. "8A" for A minor), for DJ harmonic mixing.
+    pub key_camelot: Option<String>,
     pub valence: Option<Float>,
     pub acousticness: Option<Float>,
 
@@ -942,6 +944,10 @@ fn analyze_signal_inner(
 
     let key = key_result.as_ref().map(|kr| perceptual::format_key(kr));
     let key_confidence = key_result.as_ref().map(|kr| kr.confidence);
+    let key_camelot = key_result
+        .as_ref()
+        .and_then(|kr| perceptual::camelot(kr.key, kr.mode))
+        .map(|c| c.to_string());
 
     Ok(TrackAnalysis {
         duration_sec,
@@ -975,6 +981,7 @@ fn analyze_signal_inner(
         danceability,
         key,
         key_confidence,
+        key_camelot,
         valence,
         acousticness,
         // Embedding placeholder — future ONNX integration
