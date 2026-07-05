@@ -7,6 +7,7 @@ from sonara._sonara import (
     analyze_signal as _analyze_signal,
     analyze_batch as _analyze_batch,
 )
+from sonara._sonara import fingerprint_match  # noqa: F401 — duplicate detection
 from sonara._result import TrackAnalysis
 from sonara import display  # noqa: F401
 

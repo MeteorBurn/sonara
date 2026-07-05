@@ -374,6 +374,65 @@ input path, in input order. A file that fails to decode yields a failure entry
 container/codec and underlying cause) and `error_kind` — a short stable category:
 `"io"`, `"decode"`, `"unsupported_format"`, `"invalid_audio"`, `"insufficient_data"`,
 or `"compute"`. (`analyze_file` on a single path still raises as before.)
+### Duplicate detection
+
+sonara can compute a compact acoustic **fingerprint** that identifies the *same
+recording* across different encodings, bitrates and playback gains — the classic
+"find duplicate files in my library" problem. It survives MP3/AAC re-encoding,
+level normalization and a little extra leading silence, but is not meant to match
+tempo- or pitch-shifted versions.
+
+The fingerprint is **opt-in** (performance-first: no analysis mode computes it by
+default). Request it with `features=["fingerprint"]`; the result then carries a
+base64 `fingerprint` string and an integer `fingerprint_version`:
+
+```python
+import sonara
+
+r = sonara.analyze_file("track.mp3", features=["fingerprint"])
+r["fingerprint"]          # base64 string, ~8 sub-fingerprints/sec
+r["fingerprint_version"]  # format version (int)
+```
+
+Compare any two fingerprints with `sonara.fingerprint_match`, which accepts either
+the base64 strings or whole result dicts and returns a similarity in `[0, 1]`. A
+score above **0.30** means "same recording" (duplicates typically score > 0.7,
+unrelated tracks < 0.15):
+
+```python
+a = sonara.analyze_file("track.flac", features=["fingerprint"])
+b = sonara.analyze_file("track_v0.mp3", features=["fingerprint"])
+sonara.fingerprint_match(a, b)   # e.g. 0.98 → same recording
+```
+
+Find duplicates across a whole folder:
+
+```python
+import sonara
+from pathlib import Path
+
+files = [str(p) for p in Path("~/Music").expanduser().rglob("*.mp3")]
+results = sonara.analyze_batch(files, features=["fingerprint"])
+
+# Keep only successfully-analyzed tracks that have a fingerprint.
+fps = [(f, r["fingerprint"]) for f, r in zip(files, results)
+       if not r.failed and "fingerprint" in r]
+
+seen, duplicates = [], []
+for path, fp in fps:
+    match = next((p for p, other in seen
+                  if sonara.fingerprint_match(fp, other) > 0.30), None)
+    if match is not None:
+        duplicates.append((path, match))   # path is a duplicate of match
+    else:
+        seen.append((path, fp))
+
+for dup, original in duplicates:
+    print(f"DUPLICATE  {dup}\n     of     {original}")
+```
+
+The pairwise scan above is `O(n²)`; for very large libraries, bucket candidates
+first (e.g. by rounded `duration_sec`) and only fingerprint-match within a bucket.
 
 ## Tonal Analysis
 

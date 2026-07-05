@@ -174,4 +174,15 @@ class TrackAnalysis(dict):
             for label, value in rows:
                 lines.append(f"    {label:<{width}}  {value}")
 
+        # --- fingerprint ---
+        if "fingerprint" in self:
+            fp = self["fingerprint"]
+            ver = self.get("fingerprint_version", 1)
+            # Each sub-fingerprint is a little-endian u32 (4 bytes); recover the
+            # count from the base64 string length without decoding it.
+            n_bytes = (len(fp) // 4) * 3 - fp.count("=")
+            n_sub = n_bytes // 4
+            lines.append("")
+            lines.append(f"  Fingerprint  v{ver} ({n_sub} subprints)")
+
         print("\n".join(lines))

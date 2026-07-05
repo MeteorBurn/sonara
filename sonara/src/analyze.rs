@@ -208,6 +208,14 @@ impl AnalysisConfig {
             Some(f) => f.contains("structure"),
             None => false,
         }
+    // --- fingerprint ---
+    /// Whether to compute the acoustic fingerprint. Strictly opt-in: it is only
+    /// produced when the caller explicitly lists the `"fingerprint"` feature, so
+    /// no analysis mode ever computes it by default (performance-first policy).
+    fn wants_fingerprint(&self) -> bool {
+        self.features
+            .as_ref()
+            .is_some_and(|f| f.contains("fingerprint"))
     }
 }
 
@@ -372,6 +380,12 @@ pub struct TrackAnalysis {
     /// Vocal-presence heuristic in `[0, 1]` (rough indicator, not a classifier).
     /// Opt-in via `features=["vocalness"]`. `None` unless requested.
     pub vocalness: Option<Float>,
+    // --- fingerprint ---
+    /// Acoustic fingerprint (raw sub-fingerprint sequence, ~8 `u32`/sec) for
+    /// duplicate detection. `Some` only when the `"fingerprint"` feature is
+    /// explicitly requested; `None` in every mode by default. See
+    /// [`crate::fingerprint`]. Compare two with [`crate::fingerprint::match_score`].
+    pub fingerprint: Option<Vec<u32>>,
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -1104,6 +1118,17 @@ fn analyze_signal_inner(
         Some(perceptual::acousticness(fl_mean, ro_mean, onset_density))
     } else { None };
 
+    // --- fingerprint ---
+    // Strictly opt-in (see AnalysisConfig::wants_fingerprint): never runs unless
+    // the caller explicitly requested the "fingerprint" feature, so default modes
+    // pay exactly zero cost. Operates on its own downsampled mono copy of `y`.
+    let fingerprint = if config.wants_fingerprint() {
+        let fp = crate::fingerprint::compute(y, sr);
+        if fp.is_empty() { None } else { Some(fp) }
+    } else {
+        None
+    };
+
     let key = key_result.as_ref().map(|kr| perceptual::format_key(kr));
     let key_confidence = key_result.as_ref().map(|kr| kr.confidence);
     let key_camelot = key_result
@@ -1240,6 +1265,8 @@ fn analyze_signal_inner(
         key_candidates,
         // --- vocalness ---
         vocalness,
+        // --- fingerprint ---
+        fingerprint,
     })
 }
 

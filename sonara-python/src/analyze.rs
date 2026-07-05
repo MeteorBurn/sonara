@@ -112,6 +112,15 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     // --- vocalness --- (opt-in via features=["vocalness"])
     if let Some(v) = r.vocalness { d.set_item("vocalness", v)?; }
 
+    // --- fingerprint ---
+    // Opt-in acoustic fingerprint for duplicate detection. Serialized as a
+    // compact base64 string plus an integer format version. Present only when
+    // the "fingerprint" feature was requested.
+    if let Some(ref fp) = r.fingerprint {
+        d.set_item("fingerprint", sonara::fingerprint::encode_base64(fp))?;
+        d.set_item("fingerprint_version", sonara::fingerprint::FINGERPRINT_VERSION)?;
+    }
+
     Ok(d)
 }
 
@@ -212,9 +221,46 @@ pub fn py_analyze_batch<'py>(
         .collect()
 }
 
+// --- fingerprint ---
+/// Pull a base64 fingerprint string out of a Python object that is either the
+/// string itself or a mapping (TrackAnalysis/dict) carrying a `"fingerprint"` field.
+fn extract_fp_string(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(s);
+    }
+    if let Ok(item) = obj.get_item("fingerprint") {
+        if let Ok(s) = item.extract::<String>() {
+            return Ok(s);
+        }
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "fingerprint_match expects base64 fingerprint strings or analysis dicts \
+         containing a 'fingerprint' field (request it with features=['fingerprint'])",
+    ))
+}
+
+/// Similarity in [0, 1] between two acoustic fingerprints for duplicate detection.
+///
+/// Each argument may be a base64 `fingerprint` string or a `TrackAnalysis`/dict
+/// that contains one. A score above ~0.30 indicates the same recording (see the
+/// Rust `fingerprint` module docs for the BER→score mapping and threshold).
+#[pyfunction]
+#[pyo3(name = "fingerprint_match")]
+pub fn py_fingerprint_match(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<f32> {
+    let sa = extract_fp_string(a)?;
+    let sb = extract_fp_string(b)?;
+    let fa = sonara::fingerprint::decode_base64(&sa)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("invalid base64 fingerprint (first argument)"))?;
+    let fb = sonara::fingerprint::decode_base64(&sb)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("invalid base64 fingerprint (second argument)"))?;
+    Ok(sonara::fingerprint::match_score(&fa, &fb))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_analyze_file, m)?)?;
     m.add_function(wrap_pyfunction!(py_analyze_signal, m)?)?;
     m.add_function(wrap_pyfunction!(py_analyze_batch, m)?)?;
+    // --- fingerprint ---
+    m.add_function(wrap_pyfunction!(py_fingerprint_match, m)?)?;
     Ok(())
 }

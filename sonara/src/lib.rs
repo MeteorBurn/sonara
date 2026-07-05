@@ -12,6 +12,7 @@ pub mod error;
 pub mod feature;
 pub mod filters;
 pub mod loudness_ext;
+pub mod fingerprint;
 pub mod onset;
 pub mod perceptual;
 pub mod segment;

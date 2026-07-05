@@ -223,3 +223,14 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 #   "key_candidates": List[Tuple[str, str, float]]  # top-3 (key, camelot, score); [0] == "key"
 # --- vocalness --- features=["vocalness"]
 #   "vocalness": float             # vocal-presence heuristic in [0, 1] (rough, not a classifier)
+# ============================================================
+# Duplicate detection (acoustic fingerprint) — fingerprint
+# ============================================================
+
+# Opt-in only: pass features=["fingerprint"] to any analyze_* call to add two
+# fields to the result dict — `fingerprint` (a base64 string) and
+# `fingerprint_version` (int). No analysis mode computes them by default.
+def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
+# Similarity in [0, 1] between two fingerprints, robust to gain / re-encoding /
+# small leading-silence differences. Accepts base64 `fingerprint` strings or
+# analysis dicts containing one. A score above ~0.30 means "same recording".
