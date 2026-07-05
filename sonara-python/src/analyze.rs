@@ -23,6 +23,15 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     d.set_item("rms_max", r.rms_max)?;
     d.set_item("loudness_lufs", r.loudness_lufs)?;
     d.set_item("dynamic_range_db", r.dynamic_range_db)?;
+
+    // --- loudness ---
+    // Extended loudness / gain metrics (opt-in via features=["loudness"]).
+    if let Some(v) = r.true_peak_db { d.set_item("true_peak_db", v)?; }
+    if let Some(v) = r.replaygain_db { d.set_item("replaygain_db", v)?; }
+    if let Some(ref v) = r.loudness_curve { d.set_item("loudness_curve", v.clone())?; }
+    if let Some(v) = r.loudness_momentary_max_db { d.set_item("loudness_momentary_max_db", v)?; }
+    if let Some(v) = r.loudness_range_lu { d.set_item("loudness_range_lu", v)?; }
+    // --- end loudness ---
     d.set_item("spectral_centroid_mean", r.spectral_centroid_mean)?;
     d.set_item("zero_crossing_rate", r.zero_crossing_rate)?;
     d.set_item("onset_density", r.onset_density)?;

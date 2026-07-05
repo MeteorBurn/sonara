@@ -126,6 +126,47 @@ pub fn loudness_lufs(y: ArrayView1<Float>, sr: u32) -> Float {
     }
 }
 
+// --- loudness ---
+/// Apply the ITU-R BS.1770-4 K-weighting filter and return the filtered samples.
+///
+/// This shares the exact `KWeightCoeffs` biquad cascade that [`loudness_lufs`]
+/// uses, so block-based measurements built on top of it (momentary / short-term
+/// loudness, loudness range) are filtered identically to the integrated value —
+/// no duplicated filter definition. It does not gate or aggregate; callers window
+/// the returned mean-square energy themselves. Returns an empty vec for empty input.
+///
+/// (Appended in a marked block so parallel edits to this file stay isolated.)
+pub(crate) fn k_weighted_signal(y: ArrayView1<Float>, sr: u32) -> Vec<Float> {
+    let n = y.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let c = KWeightCoeffs::for_sample_rate(sr);
+    let mut out = vec![0.0 as Float; n];
+
+    // Two cascaded biquad sections (Direct Form II Transposed), single pass.
+    let mut s1_z1: Float = 0.0;
+    let mut s1_z2: Float = 0.0;
+    let mut s2_z1: Float = 0.0;
+    let mut s2_z2: Float = 0.0;
+
+    for (i, &x) in y.iter().enumerate() {
+        // Stage 1: high shelf
+        let y1 = c.s1_b[0] * x + s1_z1;
+        s1_z1 = c.s1_b[1] * x - c.s1_a[0] * y1 + s1_z2;
+        s1_z2 = c.s1_b[2] * x - c.s1_a[1] * y1;
+
+        // Stage 2: high pass
+        let y2 = c.s2_b[0] * y1 + s2_z1;
+        s2_z1 = c.s2_b[1] * y1 - c.s2_a[0] * y2 + s2_z2;
+        s2_z2 = c.s2_b[2] * y1 - c.s2_a[1] * y2;
+
+        out[i] = y2;
+    }
+    out
+}
+// --- end loudness ---
+
 // ============================================================
 // Key detection types
 // ============================================================

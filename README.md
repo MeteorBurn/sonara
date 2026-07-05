@@ -180,6 +180,52 @@ The three keys appear **only** when `beatgrid` is requested; they are absent oth
 
 You can combine it with other features, e.g. `features=["bpm", "beatgrid"]` or `features=["beatgrid", "time_signature"]` (the latter lets the grid honour a detected non-4/4 meter).
 
+### Loudness & gain (opt-in)
+
+Broadcast-standard loudness and gain metrics — what players and mix software
+consume for auto-gain and clip protection. These are **opt-in**: they are never
+computed by any mode's defaults (for performance), only when you explicitly
+request the `loudness` feature group. They extend the always-on
+`loudness_lufs` (integrated LUFS, ITU-R BS.1770-4) and `dynamic_range_db`.
+
+```python
+r = sonara.analyze_file("track.mp3", features=["loudness"])
+
+r['true_peak_db']                # True peak (dBTP), 4x oversampled per BS.1770-4
+r['replaygain_db']               # Track gain to reach -18 LUFS: -18 - loudness_lufs
+r['loudness_curve']              # Short-term LUFS per window (3 s window, 1 s hop)
+r['loudness_momentary_max_db']   # Max momentary loudness (400 ms window), dB
+r['loudness_range_lu']           # EBU R128 loudness range (LRA), LU
+```
+
+- **`true_peak_db`** — the highest inter-sample peak, computed on a 4x oversampled
+  signal (windowed-sinc polyphase interpolation, per BS.1770-4 Annex 2). A value
+  above `0.0` dBTP means the waveform overshoots full scale between samples and
+  can clip a downstream reconstruction filter / DAC.
+- **`replaygain_db`** — ReplayGain-style track gain to the -18 LUFS reference,
+  `-18 - loudness_lufs`. Add it to the signal (or set the player's gain) for
+  consistent perceived level across tracks.
+- **`loudness_curve`** — the short-term loudness trajectory: one LUFS value per
+  3-second window at a 1-second hop (empty for tracks under one window).
+- **`loudness_range_lu`** — EBU R128 LRA: the gated 95th-10th percentile spread
+  of the short-term distribution (with the -20 LU relative gate). This is the
+  standardized counterpart to the approximate `dynamic_range_db`.
+
+**Gain staging example** — normalize levels and guard against clipping:
+
+```python
+r = sonara.analyze_file("track.mp3", features=["loudness"])
+
+gain = r['replaygain_db']            # dB to apply for a -18 LUFS target
+# Applying `gain` shifts the true peak by the same amount; check for clipping:
+projected_peak = r['true_peak_db'] + gain
+if projected_peak > -1.0:            # keep ~1 dB of true-peak headroom
+    gain -= (projected_peak + 1.0)   # back off so the peak lands at -1 dBTP
+
+linear_gain = 10 ** (gain / 20.0)
+y_out = y * linear_gain
+```
+
 ### Custom feature selection
 
 Cherry-pick specific features regardless of mode:
@@ -243,6 +289,7 @@ where the energy curve crosses the midpoint between its 10th and 90th
 percentiles, snapped to a nearby boundary. `energy_level` stretches the observed
 0.30-0.85 energy band across 1-10 so real music spreads out instead of
 clustering at 5-6.
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `loudness` (opt-in loudness/gain group: true peak, ReplayGain, short-term curve, momentary max, LRA)
 
 ### Batch analysis
 
@@ -426,6 +473,7 @@ sonara is a two-crate Rust workspace:
 sonara/src/
   analyze.rs      — Fused analysis pipeline (compact/playlist/full modes)
   perceptual.rs   — LUFS, energy, danceability, key detection, valence, acousticness
+  loudness_ext.rs — True peak (dBTP), ReplayGain, short-term curve, momentary max, EBU R128 LRA
   tonal.rs        — HPCP, chord detection, dissonance (Sethares 1998)
   beat.rs         — Beat tracking (Ellis 2007 DP algorithm)
   onset.rs        — Onset detection (spectral flux + peak picking)

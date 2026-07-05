@@ -202,3 +202,11 @@ def analyze_batch(paths: List[str], *, sr: int = 22050) -> List[Dict[str, Union[
 #   intro_end_sec:        float        # end of intro / pre-first-drop region
 #   outro_start_sec:      float        # start of outro / final fade
 #   energy_level:         int          # coarse 1-10 level
+# Extended loudness / gain metrics are opt-in via features=["loudness"] (never
+# computed by any mode's defaults, for performance). When requested, the result
+# dict also carries:
+#   "true_peak_db"                — true peak in dBTP (4x oversampled, ITU-R BS.1770-4)
+#   "replaygain_db"               — track gain to reach -18 LUFS (-18 - loudness_lufs)
+#   "loudness_curve"              — List[float] short-term LUFS (3 s window, 1 s hop)
+#   "loudness_momentary_max_db"   — max momentary (400 ms) loudness, dB
+#   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU

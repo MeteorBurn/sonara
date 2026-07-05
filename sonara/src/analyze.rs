@@ -135,6 +135,15 @@ impl AnalysisConfig {
             // Explicit feature list — check if requested
             features.contains(name)
         } else {
+            // --- loudness ---
+            // Extended loudness/gain metrics ("loudness" group) are strictly
+            // opt-in: never enabled by mode defaults (performance-first), only by
+            // an explicit `features=["loudness"]`. Keep this guard above the
+            // mode match so Playlist/Full defaults don't pull it in.
+            if OPT_IN_ONLY_FEATURES.contains(&name) {
+                return false;
+            }
+            // --- end loudness ---
             // Mode-based defaults
             match self.mode {
                 AnalysisMode::Compact => false,
@@ -189,6 +198,12 @@ impl AnalysisConfig {
     }
 }
 
+// --- loudness ---
+/// Feature-group names that are only ever computed when explicitly requested via
+/// `features=[...]`, never enabled by an analysis mode's defaults.
+const OPT_IN_ONLY_FEATURES: &[&str] = &["loudness"];
+// --- end loudness ---
+
 /// Number of spectral contrast bands.
 const N_CONTRAST_BANDS: usize = 6;
 /// Number of MFCC coefficients.
@@ -236,6 +251,27 @@ pub struct TrackAnalysis {
     pub rms_max: Float,
     pub loudness_lufs: Float,
     pub dynamic_range_db: Float,
+
+    // --- loudness ---
+    // Extended loudness / gain metrics (opt-in via `features=["loudness"]`).
+    // `Some` only when the "loudness" group was requested; `None` otherwise.
+    /// True peak in dBTP (4x oversampled, ITU-R BS.1770-4 Annex 2). ~0 dBTP is
+    /// full scale; > 0 dBTP means inter-sample overs that can clip on playback.
+    pub true_peak_db: Option<Float>,
+    /// ReplayGain-style track gain in dB to reach the -18 LUFS reference:
+    /// `-18 - loudness_lufs`.
+    pub replaygain_db: Option<Float>,
+    /// Short-term loudness curve: one LUFS value per 3 s window at a 1 s hop
+    /// (ITU-R BS.1770 short-term integration). Empty for tracks under one window.
+    pub loudness_curve: Option<Vec<Float>>,
+    /// Maximum momentary (400 ms window) loudness, dB (EBU R128 momentary).
+    pub loudness_momentary_max_db: Option<Float>,
+    /// EBU R128 loudness range (LRA) in LU: gated 95th-10th percentile spread of
+    /// the short-term loudness distribution. The standardized counterpart to the
+    /// approximate `dynamic_range_db` (which is a raw p95-p5 of RMS).
+    pub loudness_range_lu: Option<Float>,
+    // --- end loudness ---
+
     pub spectral_centroid_mean: Float,
     pub zero_crossing_rate: Float,
     pub onset_density: Float,
@@ -796,6 +832,27 @@ fn analyze_signal_inner(
 
     let loudness_lufs = perceptual::loudness_lufs(y, sr);
 
+    // --- loudness ---
+    // Extended loudness / gain metrics — strictly opt-in via `features=["loudness"]`.
+    // Default modes (compact/playlist/full) skip this entirely, so they pay nothing.
+    let (
+        true_peak_db,
+        replaygain_db,
+        loudness_curve,
+        loudness_momentary_max_db,
+        loudness_range_lu,
+    ) = if config.wants("loudness") {
+        let tp = crate::loudness_ext::true_peak_db(y);
+        let rg = crate::loudness_ext::replaygain_db(loudness_lufs);
+        // Short-term curve: 3 s window, 1 s hop (ITU-R BS.1770 short-term).
+        // One K-weighting pass feeds the curve, momentary max and LRA.
+        let m = crate::loudness_ext::loudness_metrics(y, sr, 3.0, 1.0);
+        (Some(tp), Some(rg), Some(m.curve), Some(m.momentary_max_db), Some(m.range_lu))
+    } else {
+        (None, None, None, None, None)
+    };
+    // --- end loudness ---
+
     // ================================================================
     // EXTENDED: MFCCs via pre-computed DCT matrix (no per-frame cos())
     // ================================================================
@@ -1056,6 +1113,13 @@ fn analyze_signal_inner(
         rms_max,
         loudness_lufs,
         dynamic_range_db,
+        // --- loudness ---
+        true_peak_db,
+        replaygain_db,
+        loudness_curve,
+        loudness_momentary_max_db,
+        loudness_range_lu,
+        // --- end loudness ---
         spectral_centroid_mean: centroid_mean,
         zero_crossing_rate: zcr,
         onset_density,

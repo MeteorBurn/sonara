@@ -106,6 +106,13 @@ class TrackAnalysis(dict):
             perceptual.append(("Loudness", f"{self['loudness_lufs']:.1f} LUFS"))
         if "dynamic_range_db" in self:
             perceptual.append(("Dynamic range", f"{self['dynamic_range_db']:.1f} dB"))
+        # Extended loudness / gain metrics (opt-in via features=["loudness"]).
+        if "true_peak_db" in self:
+            perceptual.append(("True peak", f"{self['true_peak_db']:.1f} dBTP"))
+        if "replaygain_db" in self:
+            perceptual.append(("ReplayGain", f"{self['replaygain_db']:+.1f} dB"))
+        if "loudness_range_lu" in self:
+            perceptual.append(("Loudness range", f"{self['loudness_range_lu']:.1f} LU"))
 
         spectral: list[tuple[str, str]] = []
         if "spectral_centroid_mean" in self:
