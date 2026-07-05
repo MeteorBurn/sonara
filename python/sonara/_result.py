@@ -67,6 +67,11 @@ class TrackAnalysis(dict):
             ts = self["time_signature"]
             conf = self.get("time_signature_confidence")
             rhythm.append(("Time signature", f"{ts}  (conf {conf:.2f})" if conf is not None else str(ts)))
+        # --- silence ---
+        if "leading_silence_sec" in self or "trailing_silence_sec" in self:
+            lead = self.get("leading_silence_sec", 0.0)
+            trail = self.get("trailing_silence_sec", 0.0)
+            rhythm.append(("Silence", f"{lead:.2f}s lead / {trail:.2f}s trail"))
 
         # --- beat grid ---
         beatgrid: list[tuple[str, str]] = []
@@ -91,6 +96,17 @@ class TrackAnalysis(dict):
             tonal.append(("Chord changes", f"{self['chord_change_rate']:.2f}/sec"))
         if "dissonance" in self:
             tonal.append(("Dissonance", f"{self['dissonance']:.3f}"))
+        # --- key candidates ---
+        if "key_candidates" in self and self["key_candidates"]:
+            def _short_key(name: str) -> str:
+                parts = str(name).split()
+                if len(parts) == 2 and parts[1] == "minor":
+                    return f"{parts[0]}m"
+                return parts[0] if parts else str(name)
+            cands = " · ".join(
+                f"{_short_key(k)} {float(s):.2f}" for k, _cam, s in self["key_candidates"][:3]
+            )
+            tonal.append(("Key candidates", cands))
 
         perceptual: list[tuple[str, str]] = []
         for key, label in (
@@ -113,6 +129,9 @@ class TrackAnalysis(dict):
             perceptual.append(("ReplayGain", f"{self['replaygain_db']:+.1f} dB"))
         if "loudness_range_lu" in self:
             perceptual.append(("Loudness range", f"{self['loudness_range_lu']:.1f} LU"))
+        # --- vocalness ---
+        if "vocalness" in self:
+            perceptual.append(("Vocalness", f"{self['vocalness']:.2f}"))
 
         spectral: list[tuple[str, str]] = []
         if "spectral_centroid_mean" in self:

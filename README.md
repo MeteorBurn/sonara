@@ -290,6 +290,62 @@ percentiles, snapped to a nearby boundary. `energy_level` stretches the observed
 0.30-0.85 energy band across 1-10 so real music spreads out instead of
 clustering at 5-6.
 Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `loudness` (opt-in loudness/gain group: true peak, ReplayGain, short-term curve, momentary max, LRA)
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `silence`, `key_candidates`, `vocalness`
+
+### Opt-in extras
+
+Three lightweight extras are **opt-in only** — they are never computed by any
+mode (performance-first policy) and appear in the result dict only when you
+request them explicitly via `features=[...]`. Request them alone or alongside a
+mode's features.
+
+#### Silence offsets — `features=["silence"]`
+
+Leading/trailing silence duration in seconds, derived from the per-frame RMS the
+pipeline already computes (pure arithmetic, effectively free — kept opt-in only
+so default modes stay byte-for-byte unchanged).
+
+```python
+r = sonara.analyze_file("track.mp3", features=["silence"])
+r['leading_silence_sec']    # e.g. 1.50  — silence at the start
+r['trailing_silence_sec']   # e.g. 2.25  — silence at the end
+```
+
+A frame counts as silent when its RMS is below **-60 dBFS** relative to full
+scale (amplitude `10^(-60/20) ≈ 0.001`). A small hysteresis rule (3 consecutive
+frames) means an isolated loud click in an otherwise-silent lead-in does **not**
+end the silence. Both values are clamped to `[0, duration_sec]`.
+
+#### Key candidates — `features=["key_candidates"]`
+
+Top-3 ranked key guesses as `(key, camelot, score)` tuples, mirroring the design
+of `bpm_candidates`. Same 24-profile correlation as `key`; this exposes the
+ranking instead of only the winner. The first entry always equals `key`.
+
+```python
+r = sonara.analyze_file("track.mp3", features=["key_candidates"])
+r['key_candidates']
+# [("A minor", "8A", 0.81), ("C major", "8B", 0.74), ("E minor", "9A", 0.52)]
+```
+
+`score` is the Pearson correlation against each key profile, clamped to `[0, 1]`
+and in descending order; `camelot` is the Camelot-wheel code for harmonic mixing.
+
+#### Vocal presence — `features=["vocalness"]`
+
+A single **heuristic** score in `[0, 1]` indicating how vocal-like the vocal band
+(~200–4000 Hz) looks. This is a rough indicator, **not** a trained classifier.
+
+```python
+r = sonara.analyze_file("track.mp3", features=["vocalness"])
+r['vocalness']   # e.g. 0.72
+```
+
+It combines the vocal-band energy ratio, spectral flatness there (voiced content
+is harmonic → low flatness), and the 4–8 Hz modulation energy of the vocal-band
+envelope (the syllabic rate), gating harmonicity and syllabic modulation together
+so sustained pads and percussion score low while modulated harmonic content
+scores high. Treat it as a soft hint.
 
 ### Batch analysis
 

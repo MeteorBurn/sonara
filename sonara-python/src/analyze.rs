@@ -98,6 +98,19 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     if let Some(v) = r.intro_end_sec { d.set_item("intro_end_sec", v)?; }
     if let Some(v) = r.outro_start_sec { d.set_item("outro_start_sec", v)?; }
     if let Some(v) = r.energy_level { d.set_item("energy_level", v)?; }
+    // --- silence --- (opt-in via features=["silence"])
+    if let Some(v) = r.leading_silence_sec { d.set_item("leading_silence_sec", v)?; }
+    if let Some(v) = r.trailing_silence_sec { d.set_item("trailing_silence_sec", v)?; }
+
+    // --- key candidates --- (opt-in via features=["key_candidates"])
+    // List of (key string, camelot code, score) tuples, ranked best-first.
+    if let Some(ref v) = r.key_candidates {
+        let items: Vec<(String, String, f32)> = v.clone();
+        d.set_item("key_candidates", items)?;
+    }
+
+    // --- vocalness --- (opt-in via features=["vocalness"])
+    if let Some(v) = r.vocalness { d.set_item("vocalness", v)?; }
 
     Ok(d)
 }

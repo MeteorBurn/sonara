@@ -493,6 +493,80 @@ pub fn camelot(tonic: &str, mode: &str) -> Option<&'static str> {
     }
 }
 
+// --- key candidates ---
+// Opt-in top-3 key detection. Mirrors the `bpm_candidates` design: a ranked
+// list of `(key string, Camelot code, score)`. This does NOT alter the existing
+// `detect_key` / `key` / `key_confidence` outputs — it re-runs the same 24
+// major/minor profile correlations and exposes the ranking rather than only the
+// argmax. The first candidate is guaranteed to equal `detect_key`'s result.
+
+/// One ranked key candidate.
+///
+/// `key` is a human string like `"A minor"`, `camelot` is the Camelot-wheel
+/// code (e.g. `"8A"`) for harmonic mixing, and `score` is the Pearson
+/// correlation of the chroma against that key profile, clamped to `[0, 1]`
+/// (higher = better match). Scores are comparable to `key_confidence` in scale.
+pub struct KeyCandidate {
+    /// Human-readable key, e.g. "A minor".
+    pub key: String,
+    /// Camelot-wheel code, e.g. "8A".
+    pub camelot: &'static str,
+    /// Correlation strength against this key profile, clamped to [0, 1].
+    pub score: Float,
+}
+
+/// Map a root note + mode to its Camelot-wheel code (used for harmonic mixing).
+///
+/// Root note names use the sharp spelling from `NOTE_NAMES`. Returns `"?"` for
+/// unrecognized input (should not happen for pipeline output).
+pub fn key_camelot(key: &str, mode: &str) -> &'static str {
+    let minor = mode == "minor";
+    match (key, minor) {
+        // Major keys (B side of the wheel)
+        ("C", false) => "8B",  ("C#", false) => "3B", ("D", false) => "10B",
+        ("D#", false) => "5B", ("E", false) => "12B", ("F", false) => "7B",
+        ("F#", false) => "2B", ("G", false) => "9B",  ("G#", false) => "4B",
+        ("A", false) => "11B", ("A#", false) => "6B", ("B", false) => "1B",
+        // Minor keys (A side of the wheel)
+        ("C", true) => "5A",   ("C#", true) => "12A", ("D", true) => "7A",
+        ("D#", true) => "2A",  ("E", true) => "9A",   ("F", true) => "4A",
+        ("F#", true) => "11A", ("G", true) => "6A",   ("G#", true) => "1A",
+        ("A", true) => "8A",   ("A#", true) => "3A",  ("B", true) => "10A",
+        _ => "?",
+    }
+}
+
+/// Detect the top-3 candidate keys from a 12-bin chroma vector.
+///
+/// Correlates the chroma against all 24 major/minor Temperley profiles (the same
+/// correlation used by [`detect_key`]), ranks them, and returns the best three as
+/// `(key string, Camelot code, score)`. `score` is the Pearson correlation
+/// clamped to `[0, 1]`; scores are in descending order. The first entry matches
+/// [`detect_key`]'s `key` / mode exactly.
+pub fn detect_key_candidates(chroma: &[Float]) -> Vec<KeyCandidate> {
+    if chroma.len() != 12 {
+        return Vec::new();
+    }
+    // (shift, mode, correlation). Push major before minor per shift, in shift
+    // order, so a *stable* descending sort breaks ties the same way `detect_key`
+    // does (first-encountered maximum wins) — guaranteeing candidate[0] == key.
+    let mut scored: Vec<(usize, &'static str, Float)> = Vec::with_capacity(24);
+    for shift in 0..12 {
+        scored.push((shift, "major", pearson_correlation(chroma, &KEY_PROFILE_MAJOR, shift)));
+        scored.push((shift, "minor", pearson_correlation(chroma, &KEY_PROFILE_MINOR, shift)));
+    }
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    scored.into_iter().take(3).map(|(shift, mode, corr)| {
+        let key = NOTE_NAMES[shift];
+        KeyCandidate {
+            key: format!("{} {}", key, mode),
+            camelot: key_camelot(key, mode),
+            score: corr.clamp(0.0, 1.0),
+        }
+    }).collect()
+}
+// --- end key candidates ---
+
 /// Pearson correlation between chroma (12 values) and a profile rotated by `shift`.
 fn pearson_correlation(chroma: &[Float], profile: &[Float; 12], shift: usize) -> Float {
     let n = 12;
@@ -711,6 +785,36 @@ mod tests {
         ];
         for (tonic, code) in cases {
             assert_eq!(camelot(tonic, "minor"), Some(code), "{tonic} minor");
+    // ---- key candidates ----
+
+    #[test]
+    fn test_key_candidates_a_minor_triad() {
+        // A-minor triad: A(9), C(0), E(4)
+        let mut chroma = [0.01_f32; 12];
+        chroma[9] = 1.0;
+        chroma[0] = 0.7;
+        chroma[4] = 0.5;
+        let cands = detect_key_candidates(&chroma);
+        // Exactly 3 entries
+        assert_eq!(cands.len(), 3);
+        // First candidate matches detect_key exactly
+        let dk = detect_key(&chroma);
+        assert_eq!(cands[0].key, format_key(&dk),
+            "first candidate {} should equal detect_key {}", cands[0].key, format_key(&dk));
+        assert_eq!(cands[0].key, "A minor");
+        // Scores strictly descending (non-increasing) and in [0,1]
+        for c in &cands {
+            assert!(c.score >= 0.0 && c.score <= 1.0 && c.score.is_finite());
+        }
+        assert!(cands[0].score >= cands[1].score);
+        assert!(cands[1].score >= cands[2].score);
+        // Camelot codes valid (match a known code table)
+        let valid: std::collections::HashSet<&str> = [
+            "1A","2A","3A","4A","5A","6A","7A","8A","9A","10A","11A","12A",
+            "1B","2B","3B","4B","5B","6B","7B","8B","9B","10B","11B","12B",
+        ].into_iter().collect();
+        for c in &cands {
+            assert!(valid.contains(c.camelot), "invalid camelot {}", c.camelot);
         }
     }
 
@@ -761,6 +865,17 @@ mod tests {
             assert!(camelot(name, "minor").is_some(), "{name} minor");
             assert!(camelot(name, "major").is_some(), "{name} major");
         }
+    fn test_key_candidates_camelot_relatives() {
+        // C major and A minor are relative keys → 8B / 8A
+        assert_eq!(key_camelot("C", "major"), "8B");
+        assert_eq!(key_camelot("A", "minor"), "8A");
+        assert_eq!(key_camelot("G", "major"), "9B");
+        assert_eq!(key_camelot("E", "minor"), "9A");
+    }
+
+    #[test]
+    fn test_key_candidates_empty_on_bad_len() {
+        assert!(detect_key_candidates(&[0.0; 5]).is_empty());
     }
 
     // ---- LUFS tests ----

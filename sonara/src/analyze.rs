@@ -103,6 +103,9 @@ pub struct AnalysisConfig {
     ///
     /// **Beat grid (opt-in only — never on by mode):**
     /// `beatgrid` (populates `grid_offset_sec`, `downbeats`, `grid_stability`)
+    /// **Opt-in only (never enabled by any mode; request explicitly):**
+    /// `silence` (leading/trailing silence offsets), `key_candidates`
+    /// (top-3 keys), `vocalness` (vocal-presence heuristic)
     ///
     /// Note: `duration` is always included. Some features depend on others
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
@@ -149,10 +152,16 @@ impl AnalysisConfig {
                 AnalysisMode::Compact => false,
                 AnalysisMode::Playlist => {
                     // Expensive rhythm analysis features are Full-only
-                    // (metrogram is O(n³) and costs ~445ms for a 3-min track)
-                    !matches!(name, "tempo_curve" | "time_signature")
+                    // (metrogram is O(n³) and costs ~445ms for a 3-min track).
+                    // Opt-in-only features (silence, key_candidates, vocalness)
+                    // are never computed by mode — they require an explicit
+                    // `features=[...]` request (performance-first policy).
+                    !matches!(name,
+                        "tempo_curve" | "time_signature"
+                        | "silence" | "key_candidates" | "vocalness")
                 }
-                AnalysisMode::Full => true,
+                // Opt-in-only features stay off even in Full mode.
+                AnalysisMode::Full => !matches!(name, "silence" | "key_candidates" | "vocalness"),
             }
         }
     }
@@ -177,6 +186,10 @@ impl AnalysisConfig {
                 "energy", "danceability", "key", "valence", "acousticness",
                 // --- structure ---
                 "structure",
+                // key_candidates needs the chroma filterbank (extended pass).
+                // silence + vocalness derive from always-computed RMS / mel data
+                // and do NOT require the extended pass.
+                "key_candidates",
             ];
             EXTENDED_FEATURES.iter().any(|&f| features.contains(f))
         } else {
@@ -341,6 +354,24 @@ pub struct TrackAnalysis {
     pub outro_start_sec: Option<Float>,
     /// Coarse 1-10 energy level derived from mean energy.
     pub energy_level: Option<u8>,
+    // --- silence ---
+    /// Leading silence duration in seconds — audio below the silence threshold
+    /// (-60 dBFS relative to full scale) at the very start. Opt-in via
+    /// `features=["silence"]`. `None` unless requested.
+    pub leading_silence_sec: Option<Float>,
+    /// Trailing silence duration in seconds — audio below the silence threshold
+    /// at the very end. Opt-in via `features=["silence"]`. `None` unless requested.
+    pub trailing_silence_sec: Option<Float>,
+
+    // --- key candidates ---
+    /// Top-3 ranked key candidates as `(key string, Camelot code, score)`.
+    /// Opt-in via `features=["key_candidates"]`. The first entry equals `key`.
+    pub key_candidates: Option<Vec<(String, String, Float)>>,
+
+    // --- vocalness ---
+    /// Vocal-presence heuristic in `[0, 1]` (rough indicator, not a classifier).
+    /// Opt-in via `features=["vocalness"]`. `None` unless requested.
+    pub vocalness: Option<Float>,
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -1102,6 +1133,43 @@ fn analyze_signal_inner(
         None
     };
 
+    // ================================================================
+    // OPT-IN FEATURES (only computed when explicitly requested via
+    // `features=[...]`; never enabled by mode — performance-first policy)
+    // ================================================================
+
+    // --- silence ---
+    // Nearly free: pure arithmetic over the RMS frames already computed above.
+    // Kept opt-in per the performance-first policy so default modes are unchanged.
+    let (leading_silence_sec, trailing_silence_sec) = if config.wants("silence") {
+        let rms_slice = rms_frames.as_slice().unwrap();
+        let (lead, trail) = silence_offsets(rms_slice, sr, hop_length, -60.0);
+        (Some(lead), Some(trail))
+    } else {
+        (None, None)
+    };
+
+    // --- key candidates ---
+    // Requires chroma (resolved as an extended-pass dependency).
+    let key_candidates = if config.wants("key_candidates") {
+        chroma_mean.as_ref().map(|c| {
+            perceptual::detect_key_candidates(c)
+                .into_iter()
+                .map(|kc| (kc.key, kc.camelot.to_string(), kc.score))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+
+    // --- vocalness ---
+    // Derived from the always-computed mel spectrogram (no extra FFT work).
+    let vocalness = if config.wants("vocalness") {
+        Some(crate::vocal::vocalness(mel_spec.view(), sr, hop_length))
+    } else {
+        None
+    };
+
     Ok(TrackAnalysis {
         duration_sec,
         bpm,
@@ -1165,7 +1233,79 @@ fn analyze_signal_inner(
         intro_end_sec: structure.as_ref().map(|s| s.intro_end_sec),
         outro_start_sec: structure.as_ref().map(|s| s.outro_start_sec),
         energy_level: structure.as_ref().map(|s| s.energy_level),
+        // --- silence ---
+        leading_silence_sec,
+        trailing_silence_sec,
+        // --- key candidates ---
+        key_candidates,
+        // --- vocalness ---
+        vocalness,
     })
+}
+
+// ============================================================
+// Silence offsets (opt-in)
+// ============================================================
+
+/// Leading/trailing silence duration (seconds) from per-frame RMS.
+///
+/// A frame counts as silent when its RMS is below `threshold_db` dBFS relative to
+/// full scale (amplitude `10^(threshold_db/20)`; default -60 dBFS ≈ 0.001).
+///
+/// Hysteresis rule: leading silence ends at the first frame that *begins a
+/// sustained run* of at least `HYST_FRAMES` consecutive above-threshold frames.
+/// A single loud click surrounded by silence is shorter than the run and is
+/// therefore ignored — it does not terminate the silence. Trailing silence is
+/// the symmetric quantity measured from the end.
+///
+/// Returns `(leading_sec, trailing_sec)`, each clamped to `[0, duration]`.
+fn silence_offsets(
+    rms: &[Float],
+    sr: u32,
+    hop_length: usize,
+    threshold_db: Float,
+) -> (Float, Float) {
+    /// Consecutive above-threshold frames required to count as real audio onset.
+    const HYST_FRAMES: usize = 3;
+
+    let n = rms.len();
+    let sec_per_frame = hop_length as Float / sr as Float;
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let thresh = 10.0_f32.powf(threshold_db / 20.0);
+    let need = HYST_FRAMES.min(n);
+
+    // Leading: first index that starts a sustained above-threshold run.
+    let mut lead_frames = n; // all-silence fallback
+    for i in 0..n {
+        if rms[i] >= thresh {
+            let end = (i + need).min(n);
+            if (end - i) >= need && (i..end).all(|k| rms[k] >= thresh) {
+                lead_frames = i;
+                break;
+            }
+        }
+    }
+
+    // Trailing: last index that ends a sustained above-threshold run.
+    let mut trail_frames = n; // all-silence fallback
+    for i in (0..n).rev() {
+        if rms[i] >= thresh {
+            let start = i + 1 - need; // i - (need-1)
+            // `start` underflow-safe because i >= need-1 is required for a run.
+            if i + 1 >= need && (i + 1 - need..=i).all(|k| rms[k] >= thresh) {
+                trail_frames = n - 1 - i;
+                break;
+            }
+            let _ = start;
+        }
+    }
+
+    let dur = n as Float * sec_per_frame;
+    let lead = (lead_frames as Float * sec_per_frame).clamp(0.0, dur);
+    let trail = (trail_frames as Float * sec_per_frame).clamp(0.0, dur);
+    (lead, trail)
 }
 
 // ============================================================
@@ -1348,6 +1488,92 @@ mod tests {
         AnalysisConfig {
             mode: AnalysisMode::Playlist,
             features: Some(["structure"].iter().map(|s| s.to_string()).collect()),
+    // ---- opt-in features: silence, key candidates, vocalness ----
+
+    fn feature_config(names: &[&str]) -> AnalysisConfig {
+        AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(names.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    const SR: u32 = 22050;
+    const HOP: usize = 512;
+    const SPF: Float = HOP as Float / SR as Float; // seconds per frame
+
+    #[test]
+    fn test_silence_offsets_leading_trailing() {
+        // 65 silent frames, 100 loud, 97 silent → 1.5s lead, 2.25s trail (approx).
+        let mut rms = vec![0.0_f32; 65];
+        rms.extend(std::iter::repeat(0.5).take(100));
+        rms.extend(std::iter::repeat(0.0).take(97));
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        assert!((lead - 65.0 * SPF).abs() < SPF, "lead {} vs {}", lead, 65.0 * SPF);
+        assert!((trail - 97.0 * SPF).abs() < SPF, "trail {} vs {}", trail, 97.0 * SPF);
+        assert!((lead - 1.5).abs() < 2.0 * SPF);
+        assert!((trail - 2.25).abs() < 2.0 * SPF);
+    }
+
+    #[test]
+    fn test_silence_offsets_no_silence() {
+        let rms = vec![0.5_f32; 200];
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        assert_eq!(lead, 0.0);
+        assert_eq!(trail, 0.0);
+    }
+
+    #[test]
+    fn test_silence_offsets_all_silence() {
+        let rms = vec![0.0_f32; 200];
+        let dur = 200.0 * SPF;
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        assert!((lead - dur).abs() < 1e-4, "leading {} should ~= duration {}", lead, dur);
+        assert!((trail - dur).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_silence_offsets_click_hysteresis() {
+        // 30 silent, 1 loud click, 30 silent, then 100 sustained loud, then silent.
+        let mut rms = vec![0.0_f32; 30];
+        rms.push(0.9); // isolated click
+        rms.extend(std::iter::repeat(0.0).take(30));
+        rms.extend(std::iter::repeat(0.5).take(100));
+        rms.extend(std::iter::repeat(0.0).take(20));
+        let (lead, _trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        // Sustained audio starts at frame 61, not at the click (frame 30).
+        assert!((lead - 61.0 * SPF).abs() < SPF,
+            "click should not end silence: lead {} expected ~{}", lead, 61.0 * SPF);
+    }
+
+    #[test]
+    fn test_silence_pipeline_optin_and_bounds() {
+        // Real pipeline: 1.5s leading + 2.25s trailing silence around a tone.
+        let sr = SR;
+        let lead_n = (1.5 * sr as Float) as usize;
+        let trail_n = (2.25 * sr as Float) as usize;
+        let mid_n = (3.0 * sr as Float) as usize;
+        let mut y = Array1::<Float>::zeros(lead_n + mid_n + trail_n);
+        for i in 0..mid_n {
+            y[lead_n + i] = 0.5 * (2.0 * PI * 440.0 * i as Float / sr as Float).sin();
+        }
+        let r = analyze_signal(y.view(), sr, &feature_config(&["silence"])).unwrap();
+        let lead = r.leading_silence_sec.unwrap();
+        let trail = r.trailing_silence_sec.unwrap();
+        assert!((lead - 1.5).abs() < 0.05, "lead {}", lead);
+        assert!((trail - 2.25).abs() < 0.05, "trail {}", trail);
+        assert!(lead >= 0.0 && lead <= r.duration_sec);
+        assert!(trail >= 0.0 && trail <= r.duration_sec);
+    }
+
+    #[test]
+    fn test_optin_absent_by_default() {
+        let y = sine(440.0, SR, 3.0);
+        for cfg in [compact(), playlist(), full()] {
+            let r = analyze_signal(y.view(), SR, &cfg).unwrap();
+            assert!(r.leading_silence_sec.is_none(), "silence must be opt-in");
+            assert!(r.trailing_silence_sec.is_none());
+            assert!(r.key_candidates.is_none(), "key_candidates must be opt-in");
+            assert!(r.vocalness.is_none(), "vocalness must be opt-in");
         }
     }
 
@@ -1420,5 +1646,43 @@ mod tests {
         // Middle (loud) segment has clearly higher mean energy than the ends.
         let mid = segs.iter().find(|s| s.0 < 60.0 && s.1 > 60.0).map(|s| s.2).unwrap_or(0.0);
         assert!(mid > segs.first().unwrap().2 + 0.15, "loud section should be more energetic");
+    fn test_key_candidates_pipeline_a_minor() {
+        // Synthesized A-minor triad: A(220), C(~261.6), E(~329.6).
+        let sr = SR;
+        let n = (4.0 * sr as Float) as usize;
+        let y = Array1::from_shape_fn(n, |i| {
+            let t = i as Float / sr as Float;
+            0.5 * (2.0 * PI * 220.0 * t).sin()
+                + 0.4 * (2.0 * PI * 261.63 * t).sin()
+                + 0.35 * (2.0 * PI * 329.63 * t).sin()
+        });
+        let r = analyze_signal(y.view(), sr, &feature_config(&["key_candidates"])).unwrap();
+        let cands = r.key_candidates.unwrap();
+        assert_eq!(cands.len(), 3, "exactly 3 candidates");
+        // Scores descending, finite, in [0,1].
+        for (_, _, s) in &cands {
+            assert!(*s >= 0.0 && *s <= 1.0 && s.is_finite());
+        }
+        assert!(cands[0].2 >= cands[1].2 && cands[1].2 >= cands[2].2);
+        // Camelot codes valid.
+        let valid: HashSet<&str> = [
+            "1A","2A","3A","4A","5A","6A","7A","8A","9A","10A","11A","12A",
+            "1B","2B","3B","4B","5B","6B","7B","8B","9B","10B","11B","12B",
+        ].into_iter().collect();
+        for (_, cam, _) in &cands {
+            assert!(valid.contains(cam.as_str()), "invalid camelot {}", cam);
+        }
+        // First candidate is A minor and matches the separately requested `key`.
+        assert_eq!(cands[0].0, "A minor", "got {}", cands[0].0);
+        let r2 = analyze_signal(y.view(), sr, &feature_config(&["key", "key_candidates"])).unwrap();
+        assert_eq!(r2.key_candidates.unwrap()[0].0, r2.key.unwrap());
+    }
+
+    #[test]
+    fn test_vocalness_pipeline_in_range() {
+        let y = sine(440.0, SR, 3.0);
+        let r = analyze_signal(y.view(), SR, &feature_config(&["vocalness"])).unwrap();
+        let v = r.vocalness.unwrap();
+        assert!(v >= 0.0 && v <= 1.0 && v.is_finite(), "vocalness {}", v);
     }
 }

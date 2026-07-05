@@ -20,6 +20,7 @@ pub mod structure;
 pub mod tonal;
 pub mod types;
 pub mod util;
+pub mod vocal;
 
 // Re-export commonly used items at crate root
 pub use error::{SonaraError, Result};

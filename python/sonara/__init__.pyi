@@ -210,3 +210,16 @@ def analyze_batch(paths: List[str], *, sr: int = 22050) -> List[Dict[str, Union[
 #   "loudness_curve"              — List[float] short-term LUFS (3 s window, 1 s hop)
 #   "loudness_momentary_max_db"   — max momentary (400 ms) loudness, dB
 #   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU
+def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None) -> List[Dict[str, Union[float, int, List[int]]]]: ...
+
+# Opt-in analysis keys (present only when requested via `features=[...]`; never
+# enabled by any mode). Values are plain Python types in the returned dict:
+# --- silence --- features=["silence"]
+#   "leading_silence_sec": float   # seconds of leading silence (>= 0, <= duration)
+#   "trailing_silence_sec": float  # seconds of trailing silence (>= 0, <= duration)
+# --- key candidates --- features=["key_candidates"]
+#   "key_candidates": List[Tuple[str, str, float]]  # top-3 (key, camelot, score); [0] == "key"
+# --- vocalness --- features=["vocalness"]
+#   "vocalness": float             # vocal-presence heuristic in [0, 1] (rough, not a classifier)
