@@ -119,6 +119,17 @@ class TrackAnalysis(dict):
         if "zero_crossing_rate" in self:
             spectral.append(("ZCR", f"{self['zero_crossing_rate']:.3f}"))
 
+        # --- structure ---
+        structure: list[tuple[str, str]] = []
+        if "energy_level" in self:
+            structure.append(("Energy level", f"{self['energy_level']}/10"))
+        if "segments" in self:
+            structure.append(("Segments", str(len(self["segments"]))))
+        if "intro_end_sec" in self:
+            structure.append(("Intro end", _fmt_duration(self["intro_end_sec"])))
+        if "outro_start_sec" in self:
+            structure.append(("Outro start", _fmt_duration(self["outro_start_sec"])))
+
         for name, rows in (
             ("Rhythm", rhythm),
             ("Tonal", tonal),
@@ -126,6 +137,8 @@ class TrackAnalysis(dict):
             ("Spectral", spectral),
             # --- beat grid ---
             ("Beat grid", beatgrid),
+            # --- structure ---
+            ("Structure", structure),
         ):
             if not rows:
                 continue

@@ -189,6 +189,60 @@ r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"]
 ```
 
 Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `beatgrid`
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `structure`
+
+### Structure & energy
+
+Where things happen in a track — a time-resolved energy curve, section
+boundaries, intro/outro, and a coarse 1-10 energy level. This is **opt-in**:
+it is *not* part of any mode (compact/playlist/full) and is only computed when
+you explicitly request `features=["structure"]`, so the default pipelines pay
+nothing for it.
+
+```python
+r = sonara.analyze_file("track.mp3", features=["structure"])
+
+r['energy_level']          # Coarse intensity, 1-10 (spread across the range)
+r['energy_curve']          # Per-window perceptual energy, 0-1
+r['energy_curve_hop_sec']  # Seconds between curve samples (map index -> time)
+r['intro_end_sec']         # End of the intro / pre-first-drop region
+r['outro_start_sec']       # Start of the outro / final fade
+
+for seg in r['segments']:  # Contiguous sections covering the whole track
+    print(f"{seg['start_sec']:6.1f} - {seg['end_sec']:6.1f}s  "
+          f"energy {seg['energy']:.2f}")
+
+# Map the energy curve to a timeline:
+hop = r['energy_curve_hop_sec']
+times = [i * hop for i in range(len(r['energy_curve']))]
+```
+
+Example output for a 3:42 electronic track:
+
+```
+Energy level 8/10
+Segments     6
+Intro end    0:18
+Outro start  3:19
+
+  12.4 -  30.1s  energy 0.41   (build)
+  30.1 -  78.6s  energy 0.79   (drop)
+  78.6 - 110.2s  energy 0.55   (breakdown)
+ 110.2 - 158.9s  energy 0.81   (drop)
+ ...
+```
+
+**How it works.** The energy curve reuses the per-frame RMS, spectral centroid,
+and bandwidth already computed by the pipeline (1 s windows, ~0.5 s hop) fed
+through the same 0-1 perceptual-energy model. Boundaries use classical
+self-similarity novelty (Foote): a per-window timbral descriptor (mean MFCC)
+builds a cosine self-similarity matrix, a Gaussian-tapered checkerboard kernel
+is slid down its diagonal to produce a novelty curve, and adaptive peak-picking
+(min 8 s spacing) yields the cuts. Intro/outro is an honest heuristic based on
+where the energy curve crosses the midpoint between its 10th and 90th
+percentiles, snapped to a nearby boundary. `energy_level` stretches the observed
+0.30-0.85 energy band across 1-10 so real music spreads out instead of
+clustering at 5-6.
 
 ### Batch analysis
 
@@ -378,6 +432,7 @@ sonara/src/
   decompose.rs    — HPSS, NMF
   effects.rs      — Time stretch, pitch shift, trim, split
   segment.rs      — Recurrence matrix, cross-similarity, path enhancement
+  structure.rs    — Energy curve + novelty segmentation (Foote), intro/outro
   sequence.rs     — DTW, RQA, Viterbi, transition matrices
   core/
     audio.rs      — Audio I/O, resampling, fast 2:1 decimation

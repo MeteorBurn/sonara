@@ -72,6 +72,23 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     if let Some(v) = r.grid_offset_sec { d.set_item("grid_offset_sec", v)?; }
     if let Some(ref v) = r.downbeats { d.set_item("downbeats", v.clone())?; }
     if let Some(v) = r.grid_stability { d.set_item("grid_stability", v)?; }
+    // --- structure --- (opt-in: features=["structure"])
+    if let Some(ref v) = r.energy_curve { d.set_item("energy_curve", v.clone())?; }
+    if let Some(v) = r.energy_curve_hop_sec { d.set_item("energy_curve_hop_sec", v)?; }
+    if let Some(ref segs) = r.segments {
+        let list = pyo3::types::PyList::empty(py);
+        for &(start, end, energy) in segs {
+            let sd = PyDict::new(py);
+            sd.set_item("start_sec", start)?;
+            sd.set_item("end_sec", end)?;
+            sd.set_item("energy", energy)?;
+            list.append(sd)?;
+        }
+        d.set_item("segments", list)?;
+    }
+    if let Some(v) = r.intro_end_sec { d.set_item("intro_end_sec", v)?; }
+    if let Some(v) = r.outro_start_sec { d.set_item("outro_start_sec", v)?; }
+    if let Some(v) = r.energy_level { d.set_item("energy_level", v)?; }
 
     Ok(d)
 }

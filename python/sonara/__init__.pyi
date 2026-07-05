@@ -187,3 +187,18 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 #   grid_offset_sec: float        — time (sec) of the first beat (grid anchor)
 #   downbeats:       List[int]    — frame indices of bar-starting beats
 #   grid_stability:  float        — 0..1, how rigidly beats fit a constant grid
+def analyze_file(path: str, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050) -> List[Dict[str, Union[float, int, List[int]]]]: ...
+
+# --- structure ---
+# Opt-in structural segmentation & energy curve. Requested via
+# `features=["structure"]`; absent from every default mode (compact/playlist/
+# full). When present, the result dict additionally contains:
+#   energy_curve:         List[float]  # per-window perceptual energy (0-1)
+#   energy_curve_hop_sec: float        # seconds between curve samples
+#   segments:             List[Dict[str, float]]
+#                                      # {"start_sec", "end_sec", "energy"}, contiguous, covering
+#   intro_end_sec:        float        # end of intro / pre-first-drop region
+#   outro_start_sec:      float        # start of outro / final fade
+#   energy_level:         int          # coarse 1-10 level

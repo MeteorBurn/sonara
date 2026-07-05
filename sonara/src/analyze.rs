@@ -166,6 +166,8 @@ impl AnalysisConfig {
                 "bandwidth", "rolloff", "flatness", "contrast", "mfcc", "chroma",
                 "chords", "dissonance",
                 "energy", "danceability", "key", "valence", "acousticness",
+                // --- structure ---
+                "structure",
             ];
             EXTENDED_FEATURES.iter().any(|&f| features.contains(f))
         } else {
@@ -173,6 +175,18 @@ impl AnalysisConfig {
         }
     }
 
+    // --- structure ---
+    /// Whether structural segmentation / energy curve is requested.
+    ///
+    /// Strictly opt-in: it is only computed when the caller explicitly lists
+    /// `"structure"` in `features`. No mode (compact/playlist/full) turns it on
+    /// by itself, so it never adds cost to the default pipelines.
+    fn wants_structure(&self) -> bool {
+        match &self.features {
+            Some(f) => f.contains("structure"),
+            None => false,
+        }
+    }
 }
 
 /// Number of spectral contrast bands.
@@ -278,6 +292,19 @@ pub struct TrackAnalysis {
     pub downbeats: Option<Vec<usize>>,
     /// How rigidly beats fit a constant-tempo grid, in `[0, 1]`.
     pub grid_stability: Option<Float>,
+    // --- structure ---
+    /// Time-resolved perceptual energy (0-1), one value per window.
+    pub energy_curve: Option<Vec<Float>>,
+    /// Seconds between successive `energy_curve` samples.
+    pub energy_curve_hop_sec: Option<Float>,
+    /// Structural sections as `(start_sec, end_sec, mean_energy)`.
+    pub segments: Option<Vec<(Float, Float, Float)>>,
+    /// End of the initial low-energy / pre-first-drop region (seconds).
+    pub intro_end_sec: Option<Float>,
+    /// Start of the final fade / low-energy region (seconds).
+    pub outro_start_sec: Option<Float>,
+    /// Coarse 1-10 energy level derived from mean energy.
+    pub energy_level: Option<u8>,
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -996,6 +1023,28 @@ fn analyze_signal_inner(
         .and_then(|kr| perceptual::camelot(kr.key, kr.mode))
         .map(|c| c.to_string());
 
+    // ================================================================
+    // STRUCTURE (opt-in): energy curve + novelty segmentation
+    // Reuses per-frame RMS/centroid/bandwidth and the mel dB spectrogram
+    // already computed above — no extra decode or FFT pass.
+    // ================================================================
+    // --- structure ---
+    let structure = if extended && config.wants_structure() && n_frames > 0 {
+        let fps = sr_f / hop_length as Float;
+        Some(crate::structure::analyze_structure(
+            rms_frames.as_slice().unwrap(),
+            centroids.as_slice().unwrap(),
+            bandwidths.as_slice().unwrap_or(&[]),
+            s_db.view(),
+            dct_matrix.view(),
+            &onset_frames,
+            fps,
+            duration_sec,
+        ))
+    } else {
+        None
+    };
+
     Ok(TrackAnalysis {
         duration_sec,
         bpm,
@@ -1045,6 +1094,13 @@ fn analyze_signal_inner(
         grid_offset_sec,
         downbeats,
         grid_stability,
+        // --- structure ---
+        energy_curve: structure.as_ref().map(|s| s.energy_curve.clone()),
+        energy_curve_hop_sec: structure.as_ref().map(|s| s.energy_curve_hop_sec),
+        segments: structure.as_ref().map(|s| s.segments.clone()),
+        intro_end_sec: structure.as_ref().map(|s| s.intro_end_sec),
+        outro_start_sec: structure.as_ref().map(|s| s.outro_start_sec),
+        energy_level: structure.as_ref().map(|s| s.energy_level),
     })
 }
 
@@ -1220,5 +1276,85 @@ mod tests {
 
         assert!(r_sine.spectral_flatness_mean.unwrap() < r_noise.spectral_flatness_mean.unwrap());
         assert!(r_sine.spectral_bandwidth_mean.unwrap() < r_noise.spectral_bandwidth_mean.unwrap());
+    }
+
+    // ---- structure (opt-in) ----
+
+    fn structure_config() -> AnalysisConfig {
+        AnalysisConfig {
+            mode: AnalysisMode::Playlist,
+            features: Some(["structure"].iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn test_structure_is_opt_in() {
+        let y = sine(440.0, 22050, 15.0);
+        // Default playlist/full modes must NOT compute structure.
+        for cfg in [playlist(), full()] {
+            let r = analyze_signal(y.view(), 22050, &cfg).unwrap();
+            assert!(r.energy_curve.is_none(), "structure must be absent by default");
+            assert!(r.segments.is_none());
+            assert!(r.energy_level.is_none());
+        }
+        // Compact obviously not.
+        let rc = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        assert!(rc.energy_curve.is_none());
+        // Opt-in via features=["structure"] turns it on.
+        let rs = analyze_signal(y.view(), 22050, &structure_config()).unwrap();
+        assert!(rs.energy_curve.as_ref().unwrap().len() > 0);
+        assert!(rs.segments.is_some());
+        assert!(rs.energy_curve_hop_sec.unwrap() > 0.0);
+        let lvl = rs.energy_level.unwrap();
+        assert!((1..=10).contains(&lvl));
+    }
+
+    #[test]
+    fn test_structure_pipeline_known_shape() {
+        // Synthetic audio with known structure:
+        // 30s quiet 200 Hz sine -> 60s loud broadband -> 30s quiet sine.
+        let sr = 22050u32;
+        let seg = |dur: Float, loud: bool| -> Vec<Float> {
+            let n = (dur * sr as Float) as usize;
+            (0..n)
+                .map(|i| {
+                    if loud {
+                        // Broadband: sum of several partials, high amplitude.
+                        let t = i as Float / sr as Float;
+                        0.5 * ((2.0 * PI * 200.0 * t).sin()
+                            + (2.0 * PI * 1500.0 * t).sin()
+                            + (2.0 * PI * 4000.0 * t).sin())
+                            / 3.0
+                            * 3.0
+                    } else {
+                        0.04 * (2.0 * PI * 200.0 * i as Float / sr as Float).sin()
+                    }
+                })
+                .collect()
+        };
+        let mut samples = seg(30.0, false);
+        samples.extend(seg(60.0, true));
+        samples.extend(seg(30.0, false));
+        let y = Array1::from(samples);
+
+        let r = analyze_signal(y.view(), sr, &structure_config()).unwrap();
+        let segs = r.segments.as_ref().unwrap();
+        // Covering + ordered + non-overlapping.
+        assert!(segs.first().unwrap().0.abs() < 1e-2, "first segment must start at 0");
+        assert!((segs.last().unwrap().1 - r.duration_sec).abs() < 0.5, "last must end at duration");
+        for w in segs.windows(2) {
+            assert!((w[0].1 - w[1].0).abs() < 1e-2, "segments must be contiguous");
+        }
+        // Boundaries near 30s and 90s.
+        let interior: Vec<Float> = segs.iter().skip(1).map(|s| s.0).collect();
+        let near = |target: Float| interior.iter().any(|&b| (b - target).abs() < 8.0);
+        assert!(near(30.0), "expected boundary near 30s, interior={:?}", interior);
+        assert!(near(90.0), "expected boundary near 90s, interior={:?}", interior);
+        // Intro/outro land in the quiet regions.
+        assert!(r.intro_end_sec.unwrap() < 45.0);
+        assert!(r.outro_start_sec.unwrap() > 80.0);
+        // Middle (loud) segment has clearly higher mean energy than the ends.
+        let mid = segs.iter().find(|s| s.0 < 60.0 && s.1 > 60.0).map(|s| s.2).unwrap_or(0.0);
+        assert!(mid > segs.first().unwrap().2 + 0.15, "loud section should be more energetic");
     }
 }
