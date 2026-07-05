@@ -2,6 +2,28 @@
 
 All notable changes to sonara are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Optional BPM range** — `bpm_min` / `bpm_max` parameters on `analyze_file` / `analyze_signal` / `analyze_batch` (and `AnalysisConfig`). When both are set, detected tempos outside the range are deterministically doubled/halved into it (e.g. a house/techno project range of 79–192). `bpm_max` must be at least `2 * bpm_min`.
+- **Tempo candidates in results** — new `bpm_raw` (selected tempo before range alignment) and `bpm_candidates` (top-5 `(bpm, score)` pairs) fields in all modes, so downstream apps can apply their own octave-disambiguation policy. Exposed in Rust via `beat_track_detailed()` returning a `TempoEstimate`.
+- **Camelot wheel notation** — new `key_camelot` field (e.g. A minor → `8A`, C major → `8B`) alongside `key` in playlist/full modes, for harmonic mixing workflows.
+- **Structured per-file batch errors** — `analyze_batch` now always returns one entry per input path in order; a file that fails to decode yields `{path, error, error_kind}` (`io`, `decode`, `unsupported_format`, …) instead of aborting the whole batch. New `TrackAnalysis.failed` property.
+- **Accuracy regression harness** — `sonara/tests/bpm_accuracy.rs` (synthetic ground-truth suite: 15 tempos × 3 patterns, octave-error and drift metrics with hard-asserted thresholds) and `sonara/examples/accuracy_eval.rs` (CSV-driven evaluator for labeled corpora with worst-offenders table).
+- **Contribution infrastructure** — `CONTRIBUTING.md`, issue templates, and PR template; detection changes now require accuracy evidence.
+
+### Fixed
+
+- **Half-BPM octave errors** — tempo estimation now collects all ACF candidates and lifts a well-supported 2x/1.5x metrical multiple when the raw pick is suspiciously low. Fixes the classic electronic-music failure where ~126–140 BPM tracks were reported at half tempo. Synthetic-suite octave errors at 126/140 BPM eliminated across all test patterns.
+- **1–3 BPM quantization drift** — ACF peak selection now uses parabolic (fractional-lag) interpolation instead of integer lags. Synthetic-suite median absolute error dropped from 0.90 to 0.27 BPM.
+- **Degenerate onset envelopes** — flat/silent onset envelopes now fall back to `start_bpm` with no beats instead of producing arbitrary output.
+
+### Known limitations
+
+- 192 BPM material can still be halved to ~96 (outside the metrical-lift tiers); use a `bpm_min`/`bpm_max` range whose floor excludes ~96 to rescue it.
+- The metrical lift can double genuinely slow (60–70 BPM) tracks that have dense offbeat hats; a `bpm_max` bound disambiguates. Beat-grid regularity scoring across candidates is the planned principled fix. Both cases are tracked as `#[ignore]`d tests in the accuracy suite.
+
 ## [0.1.6] - 2026-04-14
 
 ### Added
