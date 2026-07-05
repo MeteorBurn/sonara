@@ -517,23 +517,10 @@ pub struct KeyCandidate {
 
 /// Map a root note + mode to its Camelot-wheel code (used for harmonic mixing).
 ///
-/// Root note names use the sharp spelling from `NOTE_NAMES`. Returns `"?"` for
+/// Thin wrapper over [`camelot`] that returns `"?"` instead of `None` for
 /// unrecognized input (should not happen for pipeline output).
 pub fn key_camelot(key: &str, mode: &str) -> &'static str {
-    let minor = mode == "minor";
-    match (key, minor) {
-        // Major keys (B side of the wheel)
-        ("C", false) => "8B",  ("C#", false) => "3B", ("D", false) => "10B",
-        ("D#", false) => "5B", ("E", false) => "12B", ("F", false) => "7B",
-        ("F#", false) => "2B", ("G", false) => "9B",  ("G#", false) => "4B",
-        ("A", false) => "11B", ("A#", false) => "6B", ("B", false) => "1B",
-        // Minor keys (A side of the wheel)
-        ("C", true) => "5A",   ("C#", true) => "12A", ("D", true) => "7A",
-        ("D#", true) => "2A",  ("E", true) => "9A",   ("F", true) => "4A",
-        ("F#", true) => "11A", ("G", true) => "6A",   ("G#", true) => "1A",
-        ("A", true) => "8A",   ("A#", true) => "3A",  ("B", true) => "10A",
-        _ => "?",
-    }
+    camelot(key, mode).unwrap_or("?")
 }
 
 /// Detect the top-3 candidate keys from a 12-bin chroma vector.
@@ -785,6 +772,9 @@ mod tests {
         ];
         for (tonic, code) in cases {
             assert_eq!(camelot(tonic, "minor"), Some(code), "{tonic} minor");
+        }
+    }
+
     // ---- key candidates ----
 
     #[test]
@@ -865,6 +855,9 @@ mod tests {
             assert!(camelot(name, "minor").is_some(), "{name} minor");
             assert!(camelot(name, "major").is_some(), "{name} major");
         }
+    }
+
+    #[test]
     fn test_key_candidates_camelot_relatives() {
         // C major and A minor are relative keys → 8B / 8A
         assert_eq!(key_camelot("C", "major"), "8B");

@@ -208,6 +208,8 @@ impl AnalysisConfig {
             Some(f) => f.contains("structure"),
             None => false,
         }
+    }
+
     // --- fingerprint ---
     /// Whether to compute the acoustic fingerprint. Strictly opt-in: it is only
     /// produced when the caller explicitly lists the `"fingerprint"` feature, so
@@ -1515,12 +1517,17 @@ mod tests {
         AnalysisConfig {
             mode: AnalysisMode::Playlist,
             features: Some(["structure"].iter().map(|s| s.to_string()).collect()),
+            ..AnalysisConfig::default()
+        }
+    }
+
     // ---- opt-in features: silence, key candidates, vocalness ----
 
     fn feature_config(names: &[&str]) -> AnalysisConfig {
         AnalysisConfig {
             mode: AnalysisMode::Compact,
             features: Some(names.iter().map(|s| s.to_string()).collect()),
+            ..AnalysisConfig::default()
         }
     }
 
@@ -1673,6 +1680,9 @@ mod tests {
         // Middle (loud) segment has clearly higher mean energy than the ends.
         let mid = segs.iter().find(|s| s.0 < 60.0 && s.1 > 60.0).map(|s| s.2).unwrap_or(0.0);
         assert!(mid > segs.first().unwrap().2 + 0.15, "loud section should be more energetic");
+    }
+
+    #[test]
     fn test_key_candidates_pipeline_a_minor() {
         // Synthesized A-minor triad: A(220), C(~261.6), E(~329.6).
         let sr = SR;
