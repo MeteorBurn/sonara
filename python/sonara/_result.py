@@ -68,6 +68,15 @@ class TrackAnalysis(dict):
             conf = self.get("time_signature_confidence")
             rhythm.append(("Time signature", f"{ts}  (conf {conf:.2f})" if conf is not None else str(ts)))
 
+        # --- beat grid ---
+        beatgrid: list[tuple[str, str]] = []
+        if "grid_offset_sec" in self:
+            beatgrid.append(("Grid offset", f"{self['grid_offset_sec']:.3f} sec"))
+        if "downbeats" in self:
+            beatgrid.append(("Downbeats", str(len(self["downbeats"]))))
+        if "grid_stability" in self:
+            beatgrid.append(("Grid stability", f"{self['grid_stability']:.3f}"))
+
         tonal: list[tuple[str, str]] = []
         if "key" in self:
             key_str = str(self["key"])
@@ -115,6 +124,8 @@ class TrackAnalysis(dict):
             ("Tonal", tonal),
             ("Perceptual", perceptual),
             ("Spectral", spectral),
+            # --- beat grid ---
+            ("Beat grid", beatgrid),
         ):
             if not rows:
                 continue

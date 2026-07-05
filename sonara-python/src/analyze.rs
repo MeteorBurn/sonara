@@ -67,6 +67,12 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     if let Some(v) = r.instrumentalness { d.set_item("instrumentalness", v)?; }
     if let Some(ref v) = r.genre { d.set_item("genre", v.as_str())?; }
 
+    // --- beat grid ---
+    // Opt-in (features=["beatgrid"]); keys absent by default.
+    if let Some(v) = r.grid_offset_sec { d.set_item("grid_offset_sec", v)?; }
+    if let Some(ref v) = r.downbeats { d.set_item("downbeats", v.clone())?; }
+    if let Some(v) = r.grid_stability { d.set_item("grid_stability", v)?; }
+
     Ok(d)
 }
 

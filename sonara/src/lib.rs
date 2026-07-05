@@ -3,6 +3,7 @@ extern crate blas_src;
 
 pub mod analyze;
 pub mod beat;
+pub mod beatgrid;
 pub mod core;
 pub mod decompose;
 pub mod dsp;

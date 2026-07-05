@@ -101,6 +101,9 @@ pub struct AnalysisConfig {
     /// **Perceptual:**
     /// `energy`, `danceability`, `key`, `valence`, `acousticness`
     ///
+    /// **Beat grid (opt-in only — never on by mode):**
+    /// `beatgrid` (populates `grid_offset_sec`, `downbeats`, `grid_stability`)
+    ///
     /// Note: `duration` is always included. Some features depend on others
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
     /// are resolved automatically.
@@ -143,6 +146,16 @@ impl AnalysisConfig {
                 AnalysisMode::Full => true,
             }
         }
+    }
+
+    /// Check if an opt-in feature was *explicitly* requested.
+    ///
+    /// Unlike [`wants`], this never returns `true` from a mode default — the
+    /// feature is computed only when its name appears in an explicit `features`
+    /// list (e.g. `features=["beatgrid"]`). Used for additive features that must
+    /// stay off in the default compact/playlist/full modes for performance.
+    fn wants_optin(&self, name: &str) -> bool {
+        self.features.as_ref().is_some_and(|f| f.contains(name))
     }
 
     /// Check if extended features (anything beyond compact) are needed.
@@ -255,6 +268,16 @@ pub struct TrackAnalysis {
     pub mood_sad: Option<Float>,
     pub instrumentalness: Option<Float>,
     pub genre: Option<String>,
+
+    // --- beat grid ---
+    // Opt-in only (request via features=["beatgrid"]); `None` in the default
+    // compact/playlist/full modes.
+    /// Time (seconds) of the first beat — the grid anchor.
+    pub grid_offset_sec: Option<Float>,
+    /// Frame indices of bar-starting beats (subset of `beats`).
+    pub downbeats: Option<Vec<usize>>,
+    /// How rigidly beats fit a constant-tempo grid, in `[0, 1]`.
+    pub grid_stability: Option<Float>,
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -874,6 +897,30 @@ fn analyze_signal_inner(
     };
 
     // ================================================================
+    // BEAT GRID: offset, downbeats, stability (opt-in via features)
+    // Reuses the already-computed beats + onset envelope (O(n_beats)),
+    // so it never runs in the default modes — only when explicitly
+    // requested via features=["beatgrid"].
+    // ================================================================
+
+    let (grid_offset_sec, downbeats, grid_stability) = if config.wants_optin("beatgrid") {
+        // Prefer the detected meter (full mode) when it was also requested;
+        // otherwise assume 4/4.
+        let beats_per_bar = time_signature
+            .as_deref()
+            .and_then(|ts| ts.split('/').next())
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(crate::beatgrid::DEFAULT_BEATS_PER_BAR);
+        let grid = crate::beatgrid::analyze_grid(
+            &beats, oenv_padded.view(), sr, hop_length, beats_per_bar,
+        );
+        (Some(grid.grid_offset_sec), Some(grid.downbeats), Some(grid.grid_stability))
+    } else {
+        (None, None, None)
+    };
+
+    // ================================================================
     // TONAL: chords from fused HPCP, dissonance from fused accumulator
     // ================================================================
 
@@ -993,6 +1040,11 @@ fn analyze_signal_inner(
         mood_sad: None,
         instrumentalness: None,
         genre: None,
+
+        // --- beat grid ---
+        grid_offset_sec,
+        downbeats,
+        grid_stability,
     })
 }
 

@@ -160,6 +160,26 @@ parameters are available on the lower-level beat tracker:
 tempo, beats = sonara.beat_track(y=y, sr=sr, bpm_min=79.0, bpm_max=192.0)
 ```
 
+### Beat grid (opt-in)
+
+For DJ-style beat matching, sonara can turn the raw beat list into a *grid*: where the first beat falls, which beats begin each bar (downbeats), and how rigidly the beats fit a constant-tempo lattice. This is **opt-in only** — it is never computed by the `compact`, `playlist`, or `full` modes and adds no cost to them. Request it with `features=["beatgrid"]`:
+
+```python
+r = sonara.analyze_file("track.mp3", features=["beatgrid"])
+
+r['grid_offset_sec']   # Time (sec) of the first beat — the grid anchor
+r['downbeats']         # Frame indices of bar-starting beats (subset of beats)
+r['grid_stability']    # 0.0-1.0: how rigidly beats fit a constant grid
+```
+
+The three keys appear **only** when `beatgrid` is requested; they are absent otherwise. It reuses the beats and onset envelope already computed by the pipeline, so it is O(number of beats):
+
+- **`grid_offset_sec`** — the time of the first tracked beat.
+- **`downbeats`** — assuming 4/4 (or the detected `time_signature` when that is also requested), each of the possible bar phases is scored by onset-accent energy at the candidate downbeats; the highest-scoring phase wins. Kicks and other bar-anchoring accents typically land on beat one.
+- **`grid_stability`** — `clamp(1 - MAD / median, 0, 1)`, where the inter-beat intervals have median `median` and median absolute deviation `MAD`. A perfectly regular grid scores `1.0`; jitter lowers the score monotonically. Useful both as a confidence measure and, in future, for tempo-octave disambiguation via grid regularity.
+
+You can combine it with other features, e.g. `features=["bpm", "beatgrid"]` or `features=["beatgrid", "time_signature"]` (the latter lets the grid honour a detected non-4/4 meter).
+
 ### Custom feature selection
 
 Cherry-pick specific features regardless of mode:
@@ -168,7 +188,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `beatgrid`
 
 ### Batch analysis
 

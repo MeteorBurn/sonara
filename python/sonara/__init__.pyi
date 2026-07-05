@@ -180,3 +180,10 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 # exactly one entry in input order; a failed file's entry has keys
 # `path`, `error`, and `error_kind` (e.g. "decode", "io", "unsupported_format")
 # instead of feature fields.
+
+# --- beat grid ---
+# Opt-in via features=["beatgrid"]. When requested, the analyze_* result dict
+# additionally contains:
+#   grid_offset_sec: float        — time (sec) of the first beat (grid anchor)
+#   downbeats:       List[int]    — frame indices of bar-starting beats
+#   grid_stability:  float        — 0..1, how rigidly beats fit a constant grid
