@@ -26,7 +26,15 @@ def analyze_signal(y, *, sr=22050, mode="compact", features=None, bpm_min=None, 
 
 
 def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None):
-    """Analyze a list of audio files in parallel; returns a `list[TrackAnalysis]`."""
+    """Analyze a list of audio files in parallel; returns a `list[TrackAnalysis]`.
+
+    Errors are isolated per file: the returned list has exactly one entry per
+    input path, in the same order as ``paths``. A file that fails to decode does
+    not abort the batch — instead its entry is a failure ``TrackAnalysis`` with
+    ``path``, ``error`` (human-readable, includes container/codec and cause) and
+    ``error_kind`` (a short stable category such as ``"decode"``, ``"io"`` or
+    ``"unsupported_format"``). Use ``result.failed`` to distinguish them.
+    """
     return [
         TrackAnalysis(r)
         for r in _analyze_batch(

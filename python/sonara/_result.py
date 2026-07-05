@@ -15,7 +15,14 @@ def _fmt_duration(sec: float) -> str:
 class TrackAnalysis(dict):
     """Result of `sonara.analyze_*`. Behaves as a dict; adds `.print()` for a human-readable summary."""
 
+    @property
+    def failed(self) -> bool:
+        """True if this entry is a per-file failure from `analyze_batch`."""
+        return "error" in self
+
     def __repr__(self) -> str:
+        if self.failed:
+            return f"<TrackAnalysis FAILED [{self.get('error_kind')}] {self.get('path')}>"
         parts = []
         if "bpm" in self:
             parts.append(f"{self['bpm']:.0f} BPM")
@@ -29,6 +36,13 @@ class TrackAnalysis(dict):
 
     def print(self) -> None:
         """Print a mode-aware summary, including only fields that were computed."""
+        if self.failed:
+            print(
+                f"TrackAnalysis  FAILED ({self.get('error_kind')})\n"
+                f"  path   {self.get('path')}\n"
+                f"  error  {self.get('error')}"
+            )
+            return
         lines: list[str] = []
         if "duration_sec" in self:
             lines.append(f"TrackAnalysis  ({_fmt_duration(self['duration_sec'])})")

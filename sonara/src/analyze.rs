@@ -291,6 +291,12 @@ pub fn analyze_signal(
 }
 
 /// Analyze multiple files in parallel.
+///
+/// Failures are isolated per file: the returned vector has exactly one entry
+/// per input path, in the same order as `paths`, and a decode/IO failure on one
+/// file yields an `Err` for that entry only — it never aborts or poisons the
+/// rest of the batch. This is the robustness contract the Python `analyze_batch`
+/// binding relies on when analyzing large libraries.
 pub fn analyze_batch(paths: &[&Path], sr: u32, config: &AnalysisConfig) -> Vec<Result<TrackAnalysis>> {
     paths.par_iter().map(|path| analyze_file(path, sr, config)).collect()
 }

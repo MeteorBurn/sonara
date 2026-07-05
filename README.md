@@ -181,10 +181,21 @@ files = [str(p) for p in Path("~/Music").rglob("*.mp3")]
 results = sonara.analyze_batch(files, mode="playlist")
 
 for r in results:
+    if r.failed:            # a file that could not be decoded/read
+        print(f"SKIP [{r['error_kind']}] {r['path']}: {r['error']}")
+        continue
     print(f"{r['bpm']:5.0f} BPM | {r['energy']:.2f} energy | "
           f"{r['key']:>10} | {r['predominant_chord']:>4} | "
           f"{r['dissonance']:.3f} diss | {r['valence']:.2f} valence")
 ```
+
+**Per-file error handling.** `analyze_batch` never raises on a single bad file —
+essential when scanning large libraries. It always returns exactly one entry per
+input path, in input order. A file that fails to decode yields a failure entry
+(`r.failed` is `True`) carrying `path`, `error` (human-readable, including the
+container/codec and underlying cause) and `error_kind` — a short stable category:
+`"io"`, `"decode"`, `"unsupported_format"`, `"invalid_audio"`, `"insufficient_data"`,
+or `"compute"`. (`analyze_file` on a single path still raises as before.)
 
 ## Tonal Analysis
 

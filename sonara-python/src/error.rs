@@ -22,6 +22,34 @@ pub fn to_pyerr(err: SonaraError) -> PyErr {
     }
 }
 
+/// A short, stable category string for a `SonaraError`.
+///
+/// Used by `analyze_batch` to attach a machine-readable `error_kind` to each
+/// per-file failure so callers can branch on the failure type (skip, retry,
+/// re-encode, …) without parsing human-readable messages. These strings are
+/// part of the public API — keep them stable.
+pub fn error_kind(err: &SonaraError) -> &'static str {
+    match err {
+        // File could not be opened/read (missing path, permissions, truncated I/O).
+        SonaraError::AudioFile(_) => "io",
+        // Bitstream/container recognized but could not be decoded.
+        SonaraError::Decode(_) => "decode",
+        // No registered demuxer/codec for this container or codec.
+        SonaraError::UnsupportedFormat(_) => "unsupported_format",
+        // Caller-supplied parameters or signal shape were invalid.
+        SonaraError::InvalidParameter { .. }
+        | SonaraError::ShapeMismatch { .. }
+        | SonaraError::InvalidAudio(_) => "invalid_audio",
+        // Audio decoded but was too short for the requested analysis.
+        SonaraError::InsufficientData { .. } => "insufficient_data",
+        // Downstream numerical/DSP computation failure.
+        SonaraError::Fft(_)
+        | SonaraError::ConvergenceFailed { .. }
+        | SonaraError::Numerical(_)
+        | SonaraError::NoPitchDetected => "compute",
+    }
+}
+
 /// Extension trait to convert sonara Result to PyResult.
 pub trait IntoPyResult<T> {
     fn into_pyresult(self) -> pyo3::PyResult<T>;

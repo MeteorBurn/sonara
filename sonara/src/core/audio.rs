@@ -123,6 +123,44 @@ fn load_wav(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
     Ok((samples, sr, n_channels))
 }
 
+/// Map a symphonia error into the most appropriate `SonaraError` variant,
+/// annotating it with the file path, a stage label, and (when known) the
+/// container/codec that was in play so batch callers get an actionable message.
+fn map_symphonia_err(
+    path: &Path,
+    stage: &str,
+    codec: Option<&str>,
+    err: symphonia::core::errors::Error,
+) -> SonaraError {
+    use symphonia::core::errors::Error as SymErr;
+
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
+    let codec = codec.unwrap_or("unknown");
+    let ctx = format!(
+        "{} (container='{}', codec='{}', stage={}): {}",
+        path.display(),
+        ext,
+        codec,
+        stage,
+        err
+    );
+    match err {
+        // The probe/codec registry does not recognize this container or codec.
+        SymErr::Unsupported(_) => SonaraError::UnsupportedFormat(ctx),
+        // Underlying filesystem/stream I/O problem (not a clean EOF).
+        SymErr::IoError(_) => SonaraError::AudioFile(ctx),
+        // Malformed bitstream, reset required, limit exceeded, seek error → decode.
+        _ => SonaraError::Decode(ctx),
+    }
+}
+
+/// Human-readable short name for a symphonia codec type, if registered.
+fn codec_short_name(codec: symphonia::core::codecs::CodecType) -> Option<&'static str> {
+    symphonia::default::get_codecs()
+        .get_codec(codec)
+        .map(|d| d.short_name)
+}
+
 /// Load audio file using symphonia (supports mp3, flac, ogg, etc.).
 fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
     use symphonia::core::audio::SampleBuffer;
@@ -143,18 +181,23 @@ fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
 
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .map_err(|e| SonaraError::Decode(format!("probe failed: {e}")))?;
+        .map_err(|e| map_symphonia_err(path, "probe", None, e))?;
 
     let mut format = probed.format;
 
     let track = format
         .default_track()
-        .ok_or_else(|| SonaraError::Decode("no audio track found".into()))?;
+        .ok_or_else(|| SonaraError::Decode(format!("{}: no audio track found", path.display())))?;
     let track_id = track.id;
+    let codec_name = codec_short_name(track.codec_params.codec);
     let sr = track
         .codec_params
         .sample_rate
-        .ok_or_else(|| SonaraError::Decode("no sample rate".into()))?;
+        .ok_or_else(|| SonaraError::Decode(format!(
+            "{} (codec='{}'): missing sample rate in stream header",
+            path.display(),
+            codec_name.unwrap_or("unknown"),
+        )))?;
     let n_channels = track
         .codec_params
         .channels
@@ -163,7 +206,7 @@ fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| SonaraError::Decode(format!("codec init failed: {e}")))?;
+        .map_err(|e| map_symphonia_err(path, "codec-init", codec_name, e))?;
 
     // Pre-allocate output with estimated capacity (avoid repeated growth)
     let estimated_samples = track
@@ -184,7 +227,7 @@ fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
             {
                 break;
             }
-            Err(e) => return Err(SonaraError::Decode(e.to_string())),
+            Err(e) => return Err(map_symphonia_err(path, "demux", codec_name, e)),
         };
 
         if packet.track_id() != track_id {
@@ -193,7 +236,7 @@ fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
 
         let decoded = decoder
             .decode(&packet)
-            .map_err(|e| SonaraError::Decode(e.to_string()))?;
+            .map_err(|e| map_symphonia_err(path, "decode", codec_name, e))?;
 
         let spec = *decoded.spec();
         let capacity = decoded.capacity();

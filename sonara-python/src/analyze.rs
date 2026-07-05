@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use sonara::analyze as rs;
-use crate::error::IntoPyResult;
+use crate::error::{error_kind, IntoPyResult};
 
 fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
@@ -116,6 +116,32 @@ pub fn py_analyze_signal<'py>(
     result_to_dict(py, &result)
 }
 
+/// Build a structured error entry for a file that failed to analyze.
+///
+/// Returns a dict with `path`, `error` (human-readable, includes container/
+/// codec and underlying cause) and `error_kind` (short stable category).
+fn error_to_dict<'py>(
+    py: Python<'py>,
+    path: &str,
+    err: &sonara::SonaraError,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("path", path)?;
+    d.set_item("error", err.to_string())?;
+    d.set_item("error_kind", error_kind(err))?;
+    Ok(d)
+}
+
+/// Analyze many files in parallel, returning one entry per input path in order.
+///
+/// Unlike `analyze_file`, this never raises on a per-file decode/IO failure.
+/// Every input path yields exactly one dict, in input order:
+/// - success → the usual feature dict (unchanged);
+/// - failure → `{ "path", "error", "error_kind" }`.
+///
+/// A single bad file therefore cannot abort analysis of a large library.
+/// `ValueError` is still raised only for whole-call configuration errors
+/// (e.g. an invalid `mode`), which apply to every path.
 #[pyfunction]
 #[pyo3(name = "analyze_batch", signature = (paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None))]
 pub fn py_analyze_batch<'py>(
@@ -132,9 +158,10 @@ pub fn py_analyze_batch<'py>(
     let results = rs::analyze_batch(&path_refs, sr, &config);
     results
         .into_iter()
-        .map(|r| {
-            let analysis = r.into_pyresult()?;
-            result_to_dict(py, &analysis)
+        .zip(paths.iter())
+        .map(|(r, path)| match r {
+            Ok(analysis) => result_to_dict(py, &analysis),
+            Err(err) => error_to_dict(py, path, &err),
         })
         .collect()
 }
