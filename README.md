@@ -234,10 +234,9 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `beatgrid`
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `structure`
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `structure`, `embedding`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
-### Structure & energy
+### Structure & energy (opt-in)
 
 Where things happen in a track — a time-resolved energy curve, section
 boundaries, intro/outro, and a coarse 1-10 energy level. This is **opt-in**:
@@ -289,8 +288,6 @@ where the energy curve crosses the midpoint between its 10th and 90th
 percentiles, snapped to a nearby boundary. `energy_level` stretches the observed
 0.25-0.60 mean-energy band (measured over a large commercial library) across 1-10 so real music spreads out instead of
 clustering at 5-6.
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `loudness` (opt-in loudness/gain group: true peak, ReplayGain, short-term curve, momentary max, LRA)
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `silence`, `key_candidates`, `vocalness`
 
 ### Opt-in extras
 
@@ -346,7 +343,6 @@ is harmonic → low flatness), and the 4–8 Hz modulation energy of the vocal-b
 envelope (the syllabic rate), gating harmonicity and syllabic modulation together
 so sustained pads and percussion score low while modulated harmonic content
 scores high. Treat it as a soft hint.
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `embedding`
 
 ### Batch analysis
 
@@ -375,7 +371,7 @@ input path, in input order. A file that fails to decode yields a failure entry
 container/codec and underlying cause) and `error_kind` — a short stable category:
 `"io"`, `"decode"`, `"unsupported_format"`, `"invalid_audio"`, `"insufficient_data"`,
 or `"compute"`. (`analyze_file` on a single path still raises as before.)
-### Duplicate detection
+### Duplicate detection (opt-in)
 
 sonara can compute a compact acoustic **fingerprint** that identifies the *same
 recording* across different encodings, bitrates and playback gains — the classic
@@ -471,7 +467,7 @@ for path, score in most_similar(seed, library):
     print(f"{score:.3f}  {path}")
 ```
 
-The metric is a **weighted, normalized Euclidean distance** (not cosine): all dimensions are non-negative and bounded to `[0, 1]`, where cosine is biased toward 1 — Euclidean stays discriminative, and per-dimension weights let timbre, harmony and tempo dominate over incidental dimensions like absolute loudness. Because loudness contributes little, the *same* track at a different gain still scores as highly similar. The hand-crafted vector sits behind `embedding_version`, so a learned (e.g. ONNX) embedding can later replace it behind the same field and API.
+The metric is a **weighted, normalized Euclidean distance** (not cosine): all dimensions are non-negative and bounded to `[0, 1]`, where cosine is biased toward 1 — Euclidean stays discriminative, and per-dimension weights let timbre, harmony and tempo dominate over incidental dimensions like absolute loudness. Because loudness contributes little, the *same* track at a different gain still scores as highly similar. `sonara.similarity()` applies a calibrated stretch (measured on a large commercial library) so scores are interpretable: an unrelated pair lands near **0.5**, close neighbors **0.65+**, identical tracks **1.0**. The stretch is monotone in the raw distance, so nearest-neighbor rankings are unaffected. The hand-crafted vector sits behind `embedding_version`, so a learned (e.g. ONNX) embedding can later replace it behind the same field and API.
 
 ## Tonal Analysis
 
@@ -629,12 +625,16 @@ sonara/src/
   perceptual.rs   — LUFS, energy, danceability, key detection, valence, acousticness
   loudness_ext.rs — True peak (dBTP), ReplayGain, short-term curve, momentary max, EBU R128 LRA
   tonal.rs        — HPCP, chord detection, dissonance (Sethares 1998)
-  beat.rs         — Beat tracking (Ellis 2007 DP algorithm)
+  beat.rs         — Beat tracking (Ellis 2007 DP algorithm), tempo candidates, BPM range
+  beatgrid.rs     — Beat grid: first-beat offset, downbeats, grid stability
   onset.rs        — Onset detection (spectral flux + peak picking)
   decompose.rs    — HPSS, NMF
   effects.rs      — Time stretch, pitch shift, trim, split
   segment.rs      — Recurrence matrix, cross-similarity, path enhancement
   structure.rs    — Energy curve + novelty segmentation (Foote), intro/outro
+  similarity.rs   — 48-dim similarity embedding + calibrated distance
+  fingerprint.rs  — Gain-invariant acoustic fingerprint for duplicate detection
+  vocal.rs        — Vocal-presence heuristic (vocalness)
   sequence.rs     — DTW, RQA, Viterbi, transition matrices
   core/
     audio.rs      — Audio I/O, resampling, fast 2:1 decimation

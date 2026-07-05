@@ -101,14 +101,17 @@ pub struct AnalysisConfig {
     /// **Perceptual:**
     /// `energy`, `danceability`, `key`, `valence`, `acousticness`
     ///
-    /// **Beat grid (opt-in only — never on by mode):**
-    /// `beatgrid` (populates `grid_offset_sec`, `downbeats`, `grid_stability`)
-    /// **Opt-in only (never enabled by any mode; request explicitly):**
-    /// `silence` (leading/trailing silence offsets), `key_candidates`
-    /// (top-3 keys), `vocalness` (vocal-presence heuristic)
-    /// **Similarity (opt-in):**
-    /// `embedding` — hand-crafted similarity vector; automatically pulls in the
-    /// features it is assembled from. Never produced by a bare mode.
+    /// **Rhythm analysis (Full mode or explicit request):**
+    /// `tempo_curve`, `time_signature`
+    ///
+    /// **Opt-in only (never enabled by any mode — see `OPT_IN_ONLY_FEATURES`):**
+    /// `beatgrid` (grid offset, downbeats, grid stability),
+    /// `structure` (energy curve, segments, intro/outro, energy level),
+    /// `embedding` (similarity vector; auto-pulls the features it is built from),
+    /// `fingerprint` (duplicate-detection fingerprint),
+    /// `loudness` (true peak, ReplayGain, loudness curve, momentary max, LRA),
+    /// `silence` (leading/trailing silence offsets),
+    /// `key_candidates` (top-3 keys), `vocalness` (vocal-presence heuristic)
     ///
     /// Note: `duration` is always included. Some features depend on others
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies

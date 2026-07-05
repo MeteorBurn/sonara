@@ -15,7 +15,13 @@ from sonara import display  # noqa: F401
 
 
 def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None):
-    """Analyze an audio file and return a `TrackAnalysis` (dict subclass with `.print()`)."""
+    """Analyze an audio file and return a `TrackAnalysis` (dict subclass with `.print()`).
+
+    ``features`` selects features explicitly (overriding ``mode``) and is the
+    only way to enable the opt-in features: ``beatgrid``, ``structure``,
+    ``embedding``, ``fingerprint``, ``loudness``, ``silence``,
+    ``key_candidates``, ``vocalness``. See the README for the full list.
+    """
     return TrackAnalysis(_analyze_file(
         path, sr=sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
     ))
