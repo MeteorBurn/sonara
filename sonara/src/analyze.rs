@@ -105,6 +105,13 @@ pub struct AnalysisConfig {
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
     /// are resolved automatically.
     pub features: Option<HashSet<String>>,
+    /// Optional lower bound for octave-folding tempo normalization.
+    ///
+    /// When both `bpm_min` and `bpm_max` are set, BPM values outside the range
+    /// are doubled or halved by octaves until they fit the requested range.
+    pub bpm_min: Option<Float>,
+    /// Optional upper bound for octave-folding tempo normalization.
+    pub bpm_max: Option<Float>,
 }
 
 impl Default for AnalysisConfig {
@@ -112,6 +119,8 @@ impl Default for AnalysisConfig {
         Self {
             mode: AnalysisMode::Compact,
             features: None,
+            bpm_min: None,
+            bpm_max: None,
         }
     }
 }
@@ -189,6 +198,11 @@ pub struct TrackAnalysis {
     // -- Basic (always computed) --
     pub duration_sec: Float,
     pub bpm: Float,
+    /// Selected tempo before optional `bpm_min`/`bpm_max` range alignment.
+    pub bpm_raw: Float,
+    /// Strongest tempo candidates as `(bpm, score)` pairs, sorted by score
+    /// descending (up to the top 5).
+    pub bpm_candidates: Vec<(Float, Float)>,
     pub beats: Vec<usize>,
     pub onset_frames: Vec<usize>,
     pub rms_mean: Float,
@@ -699,9 +713,13 @@ fn analyze_signal_inner(
     // BEAT TRACKING + ONSET DETECTION
     // ================================================================
 
-    let (bpm, beats) = crate::beat::beat_track(
+    let (tempo_estimate, beats) = crate::beat::beat_track_detailed(
         None, Some(oenv_padded.view()), sr, hop_length, 120.0, 100.0, true,
+        config.bpm_min, config.bpm_max,
     )?;
+    let bpm = tempo_estimate.tempo;
+    let bpm_raw = tempo_estimate.tempo_raw;
+    let bpm_candidates = tempo_estimate.candidates;
 
     let onset_frames = crate::onset::onset_detect(
         None, Some(oenv_padded.view()), sr, hop_length, false, 0.07, 0,
@@ -922,6 +940,8 @@ fn analyze_signal_inner(
     Ok(TrackAnalysis {
         duration_sec,
         bpm,
+        bpm_raw,
+        bpm_candidates,
         beats,
         onset_frames,
         rms_mean,
@@ -969,17 +989,17 @@ fn analyze_signal_inner(
 
 /// Shorthand for compact mode analysis.
 pub fn compact() -> AnalysisConfig {
-    AnalysisConfig { mode: AnalysisMode::Compact, features: None }
+    AnalysisConfig { mode: AnalysisMode::Compact, ..Default::default() }
 }
 
 /// Shorthand for playlist mode analysis.
 pub fn playlist() -> AnalysisConfig {
-    AnalysisConfig { mode: AnalysisMode::Playlist, features: None }
+    AnalysisConfig { mode: AnalysisMode::Playlist, ..Default::default() }
 }
 
 /// Shorthand for full mode analysis.
 pub fn full() -> AnalysisConfig {
-    AnalysisConfig { mode: AnalysisMode::Full, features: None }
+    AnalysisConfig { mode: AnalysisMode::Full, ..Default::default() }
 }
 
 #[cfg(test)]
@@ -1039,6 +1059,7 @@ mod tests {
         let config = AnalysisConfig {
             mode: AnalysisMode::Compact,
             features: Some(["energy", "key", "chroma"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
         };
         let result = analyze_signal(y.view(), 22050, &config).unwrap();
         // Requested features should be present
@@ -1048,6 +1069,43 @@ mod tests {
         // Non-requested extended features should be absent
         assert!(result.danceability.is_none());
         assert!(result.acousticness.is_none());
+    }
+
+    #[test]
+    fn test_analyze_config_accepts_runtime_bpm_range() {
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: None,
+            bpm_min: Some(79.0),
+            bpm_max: Some(192.0),
+        };
+        assert_eq!(config.bpm_min, Some(79.0));
+        assert_eq!(config.bpm_max, Some(192.0));
+    }
+
+    #[test]
+    fn test_analyze_exposes_bpm_candidates() {
+        let sr = 22050u32;
+        let n = (4.0 * sr as Float) as usize;
+        let interval = (60.0 / 120.0 * sr as Float) as usize;
+        let mut y = Array1::<Float>::zeros(n);
+        let mut pos = 0;
+        while pos < n {
+            for i in 0..100.min(n - pos) {
+                y[pos + i] = (2.0 * PI * 1000.0 * i as Float / sr as Float).sin();
+            }
+            pos += interval;
+        }
+        let result = analyze_signal(y.view(), sr, &compact()).unwrap();
+        assert!(!result.bpm_candidates.is_empty(), "expected tempo candidates");
+        assert!(result.bpm_candidates.len() <= 5);
+        // Candidates are sorted by score descending.
+        for w in result.bpm_candidates.windows(2) {
+            assert!(w[0].1 >= w[1].1, "candidates must be sorted by score descending");
+        }
+        assert!(result.bpm_raw > 30.0 && result.bpm_raw < 320.0);
+        // Without a bpm range, the final bpm equals the raw selection.
+        assert!((result.bpm - result.bpm_raw).abs() < 1e-6);
     }
 
     #[test]

@@ -74,6 +74,8 @@ Core signal features, always computed:
 r = sonara.analyze_file("track.mp3", mode="compact")
 
 r['bpm']                    # Tempo (BPM)
+r['bpm_raw']                # Tempo before optional bpm_min/bpm_max alignment
+r['bpm_candidates']         # Top tempo candidates as [bpm, score] pairs, best first
 r['beats']                  # Beat frame positions
 r['onset_frames']           # Onset positions
 r['onset_density']          # Onsets per second
@@ -129,6 +131,32 @@ r['tempo_curve']                # Per-beat BPM values
 r['tempo_variability']          # Coefficient of variation of tempo
 r['time_signature']             # e.g. "4/4", "3/4"
 r['time_signature_confidence']  # Detection confidence
+```
+
+### BPM range alignment
+
+For host applications with a project-level tempo window — e.g. a DJ library
+configured with a lowest/highest BPM — pass `bpm_min` and `bpm_max`. When both
+are given, the estimated tempo is folded by octaves until it lands inside the
+range: values below `bpm_min` are doubled, values above `bpm_max` are halved.
+This corrects the half/double-tempo octave errors common on electronic music.
+
+```python
+# 79-192 BPM window (matching a typical electronic-music library)
+r = sonara.analyze_file("track.mp3", mode="playlist", bpm_min=79.0, bpm_max=192.0)
+
+r['bpm']              # Tempo folded into [79, 192]
+r['bpm_raw']          # Tempo before alignment (what you'd get without the range)
+r['bpm_candidates']   # Ranked [bpm, score] candidates the estimate was chosen from
+```
+
+Both bounds must be provided together, be finite and positive with
+`bpm_min < bpm_max`, and span at least one octave (`bpm_max >= 2 * bpm_min`).
+Alignment is opt-in: without a range, `bpm` equals `bpm_raw`. The same
+parameters are available on the lower-level beat tracker:
+
+```python
+tempo, beats = sonara.beat_track(y=y, sr=sr, bpm_min=79.0, bpm_max=192.0)
 ```
 
 ### Custom feature selection

@@ -9,6 +9,34 @@ use crate::error::{SonaraError, Result};
 use crate::onset;
 use crate::types::Float;
 
+/// Number of strongest tempo candidates surfaced in a [`TempoEstimate`].
+const MAX_TEMPO_CANDIDATES: usize = 5;
+
+/// Result of tempo estimation, including diagnostic tempo candidates.
+///
+/// - `tempo`: final BPM used for beat tracking (after metrical selection,
+///   fractional ACF refinement, optional `bpm_min`/`bpm_max` range alignment,
+///   and clamping to `[30, 320]`).
+/// - `tempo_raw`: the same estimate *before* optional BPM-range alignment.
+/// - `candidates`: the strongest ACF tempo candidates as `(bpm, score)` pairs,
+///   sorted by score descending.
+#[derive(Debug, Clone)]
+pub struct TempoEstimate {
+    /// Final tempo in BPM (post range-alignment and clamping).
+    pub tempo: Float,
+    /// Selected tempo in BPM before optional BPM-range alignment.
+    pub tempo_raw: Float,
+    /// Strongest `(bpm, score)` candidates, sorted by score descending.
+    pub candidates: Vec<(Float, Float)>,
+}
+
+impl TempoEstimate {
+    /// Fallback estimate carrying a single tempo and no ACF candidates.
+    fn fallback(tempo: Float) -> Self {
+        Self { tempo, tempo_raw: tempo, candidates: Vec::new() }
+    }
+}
+
 /// Track beats in an audio signal.
 ///
 /// Returns `(tempo, beat_frames)`:
@@ -23,6 +51,47 @@ pub fn beat_track(
     tightness: Float,
     trim: bool,
 ) -> Result<(Float, Vec<usize>)> {
+    beat_track_with_bpm_range(y, onset_envelope, sr, hop_length, start_bpm, tightness, trim, None, None)
+}
+
+/// Track beats in an audio signal with optional octave-folding BPM range.
+///
+/// If both `bpm_min` and `bpm_max` are provided, the estimated tempo is doubled
+/// or halved by octaves until it falls inside the requested range. This mirrors
+/// DJ-library workflows that constrain BPM display to a preferred range.
+pub fn beat_track_with_bpm_range(
+    y: Option<ArrayView1<Float>>,
+    onset_envelope: Option<ArrayView1<Float>>,
+    sr: u32,
+    hop_length: usize,
+    start_bpm: Float,
+    tightness: Float,
+    trim: bool,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<(Float, Vec<usize>)> {
+    let (estimate, beats) = beat_track_detailed(
+        y, onset_envelope, sr, hop_length, start_bpm, tightness, trim, bpm_min, bpm_max,
+    )?;
+    Ok((estimate.tempo, beats))
+}
+
+/// Track beats and return the full [`TempoEstimate`] alongside the beat frames.
+///
+/// Like [`beat_track_with_bpm_range`], but also surfaces the pre-range-alignment
+/// tempo and the strongest ACF tempo candidates for reporting.
+#[allow(clippy::too_many_arguments)]
+pub fn beat_track_detailed(
+    y: Option<ArrayView1<Float>>,
+    onset_envelope: Option<ArrayView1<Float>>,
+    sr: u32,
+    hop_length: usize,
+    start_bpm: Float,
+    tightness: Float,
+    trim: bool,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<(TempoEstimate, Vec<usize>)> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -39,15 +108,30 @@ pub fn beat_track(
     };
 
     if oenv.len() < 4 {
-        return Ok((start_bpm, vec![]));
+        return Ok((TempoEstimate::fallback(start_bpm), vec![]));
+    }
+
+    // Guard against flat / degenerate onset envelopes (silence, DC): with no
+    // dynamic range there is no meaningful autocorrelation peak to track.
+    let (min_onset, max_onset) = oenv.iter().copied().fold(
+        (Float::INFINITY, Float::NEG_INFINITY),
+        |(min_v, max_v), v| (min_v.min(v), max_v.max(v)),
+    );
+    if !min_onset.is_finite()
+        || !max_onset.is_finite()
+        || max_onset <= 1e-10
+        || (max_onset - min_onset) <= 1e-10
+    {
+        return Ok((TempoEstimate::fallback(start_bpm), vec![]));
     }
 
     // Estimate tempo
-    let tempo = estimate_tempo(&oenv, sr, hop_length, start_bpm)?;
+    let estimate = estimate_tempo(&oenv, sr, hop_length, start_bpm, bpm_min, bpm_max)?;
+    let tempo = estimate.tempo;
     let frames_per_beat = (60.0 * frame_rate / tempo).round() as usize;
 
     if frames_per_beat == 0 {
-        return Ok((tempo, vec![]));
+        return Ok((estimate, vec![]));
     }
 
     // Normalize onset envelope
@@ -72,7 +156,7 @@ pub fn beat_track(
         beats
     };
 
-    Ok((tempo, beats))
+    Ok((estimate, beats))
 }
 
 /// Estimate tempo from onset envelope using autocorrelation.
@@ -81,7 +165,9 @@ fn estimate_tempo(
     sr: u32,
     hop_length: usize,
     start_bpm: Float,
-) -> Result<Float> {
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<TempoEstimate> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -90,7 +176,7 @@ fn estimate_tempo(
     let acf = crate::core::audio::autocorrelate(oenv.view(), Some(max_lag))?;
 
     if acf.is_empty() {
-        return Ok(start_bpm);
+        return Ok(TempoEstimate::fallback(start_bpm));
     }
 
     // Find peaks in BPM range [30, 300]
@@ -99,26 +185,172 @@ fn estimate_tempo(
     let max_lag = max_lag.min(acf.len() - 1);
 
     if min_lag >= max_lag {
-        return Ok(start_bpm);
+        return Ok(TempoEstimate::fallback(start_bpm));
     }
 
-    // Weight by log-normal prior centered at start_bpm
-    let mut best_lag = min_lag;
-    let mut best_score = Float::NEG_INFINITY;
+    // Weight by log-normal prior centered at start_bpm, collecting every
+    // candidate so downstream metrical-multiple lifting can inspect them.
+    let mut candidates = Vec::with_capacity(max_lag - min_lag + 1);
 
     for lag in min_lag..=max_lag {
         let bpm = 60.0 * frame_rate / lag as Float;
         let log_prior = -0.5 * ((bpm.log2() - start_bpm.log2()) / 1.0).powi(2);
         let score = acf[lag] * (1.0 + log_prior.exp());
+        candidates.push((lag, bpm, score));
+    }
 
-        if score > best_score {
-            best_score = score;
-            best_lag = lag;
+    let (lag, _tempo, _score) =
+        select_preferred_tempo_candidate(&candidates).unwrap_or((min_lag, start_bpm, 0.0));
+    let refined = refine_tempo_from_acf_peak(acf.view(), lag, frame_rate);
+    let tempo_raw = refined.clamp(30.0, 320.0);
+    let tempo = align_tempo_to_bpm_range(refined, bpm_min, bpm_max)?.clamp(30.0, 320.0);
+
+    // Surface the strongest candidates (by score) as (bpm, score) pairs.
+    let mut ranked: Vec<(Float, Float)> = candidates
+        .iter()
+        .filter(|(_, bpm, score)| bpm.is_finite() && score.is_finite())
+        .map(|&(_, bpm, score)| (bpm, score))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(MAX_TEMPO_CANDIDATES);
+
+    Ok(TempoEstimate { tempo, tempo_raw, candidates: ranked })
+}
+
+/// Refine a tempo from an integer ACF lag using parabolic interpolation of the
+/// autocorrelation peak. This removes the 1–3 BPM quantization drift caused by
+/// snapping tempo to integer lags.
+fn refine_tempo_from_acf_peak(acf: ArrayView1<Float>, lag: usize, frame_rate: Float) -> Float {
+    let integer_tempo = if lag > 0 {
+        60.0 * frame_rate / lag as Float
+    } else {
+        return 0.0;
+    };
+
+    if lag + 1 >= acf.len() || !frame_rate.is_finite() || frame_rate <= 0.0 {
+        return integer_tempo;
+    }
+
+    let left = acf[lag - 1];
+    let center = acf[lag];
+    let right = acf[lag + 1];
+    if !left.is_finite()
+        || !center.is_finite()
+        || !right.is_finite()
+        || center < left
+        || center < right
+    {
+        return integer_tempo;
+    }
+
+    let denominator = left - 2.0 * center + right;
+    if denominator.abs() <= 1e-12 {
+        return integer_tempo;
+    }
+
+    let offset = (0.5 * (left - right) / denominator).clamp(-0.5, 0.5);
+    let refined_lag = lag as Float + offset;
+    if refined_lag <= 0.0 || !refined_lag.is_finite() {
+        integer_tempo
+    } else {
+        60.0 * frame_rate / refined_lag
+    }
+}
+
+/// Choose a preferred tempo candidate, lifting a supported metrical multiple
+/// (2x / 1.5x) when the raw best BPM is suspiciously low. Electronic music
+/// frequently produces a strong half-tempo ACF peak; when a supported
+/// double/dotted multiple exists in the higher, danceable range we prefer it.
+fn select_preferred_tempo_candidate(candidates: &[(usize, Float, Float)]) -> Option<(usize, Float, Float)> {
+    let best = candidates
+        .iter()
+        .copied()
+        .filter(|(_, bpm, score)| bpm.is_finite() && score.is_finite())
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    if best.1 < 75.0 {
+        if let Some(candidate) = best_supported_metrical_candidate(candidates, best, 115.0, 150.0, 1.80, 2.20, 0.50) {
+            return Some(candidate);
+        }
+    } else if best.1 < 90.0 {
+        if let Some(candidate) = best_supported_metrical_candidate(candidates, best, 120.0, 145.0, 1.42, 1.62, 0.75) {
+            return Some(candidate);
+        }
+    } else if best.1 < 95.0 && best.2 >= 4.0 {
+        if let Some(candidate) = best_supported_metrical_candidate(candidates, best, 120.0, 145.0, 1.42, 1.62, 0.85) {
+            return Some(candidate);
         }
     }
 
-    let tempo = 60.0 * frame_rate / best_lag as Float;
-    Ok(tempo.clamp(30.0, 320.0))
+    Some(best)
+}
+
+/// Find the strongest candidate that is a supported metrical multiple of `best`
+/// (within the given BPM window, multiple range, and score-ratio floor).
+fn best_supported_metrical_candidate(
+    candidates: &[(usize, Float, Float)],
+    best: (usize, Float, Float),
+    min_bpm: Float,
+    max_bpm: Float,
+    min_multiple: Float,
+    max_multiple: Float,
+    min_score_ratio: Float,
+) -> Option<(usize, Float, Float)> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let multiple = candidate.1 / best.1;
+            candidate.1 >= min_bpm
+                && candidate.1 <= max_bpm
+                && multiple >= min_multiple
+                && multiple <= max_multiple
+                && candidate.2 >= best.2 * min_score_ratio
+        })
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// Deterministically double/halve a tempo into an optional user-supplied BPM
+/// range. Both bounds must be supplied together and span at least one octave.
+fn align_tempo_to_bpm_range(
+    mut tempo: Float,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<Float> {
+    let (min_bpm, max_bpm) = match (bpm_min, bpm_max) {
+        (None, None) => return Ok(tempo),
+        (Some(min_bpm), Some(max_bpm)) => (min_bpm, max_bpm),
+        _ => {
+            return Err(SonaraError::InvalidParameter {
+                param: "bpm_range",
+                reason: "bpm_min and bpm_max must be provided together".into(),
+            });
+        }
+    };
+
+    if !min_bpm.is_finite() || !max_bpm.is_finite() || min_bpm <= 0.0 || max_bpm <= min_bpm {
+        return Err(SonaraError::InvalidParameter {
+            param: "bpm_range",
+            reason: "expected finite values with 0 < bpm_min < bpm_max".into(),
+        });
+    }
+    if max_bpm < min_bpm * 2.0 {
+        return Err(SonaraError::InvalidParameter {
+            param: "bpm_range",
+            reason: "bpm_max must be at least double bpm_min for octave folding".into(),
+        });
+    }
+    if !tempo.is_finite() || tempo <= 0.0 {
+        return Ok(tempo);
+    }
+
+    while tempo < min_bpm {
+        tempo *= 2.0;
+    }
+    while tempo > max_bpm {
+        tempo /= 2.0;
+    }
+    Ok(tempo)
 }
 
 /// Compute local beat score via Gaussian convolution.
@@ -392,6 +624,96 @@ mod tests {
         let y = click_train(22050, 4.0, 120.0);
         let (tempo, _) = beat_track(Some(y.view()), None, 22050, 512, 120.0, 100.0, true).unwrap();
         assert!((tempo - 120.0).abs() < 30.0, "tempo {tempo} should be ~120 BPM");
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_lifts_supported_half_tempo() {
+        let selected = select_preferred_tempo_candidate(&[
+            (41, 63.024010, 11.464),
+            (31, 83.354332, 9.647),
+            (21, 123.046875, 7.414),
+            (20, 129.199219, 7.407),
+        ]).unwrap();
+        assert_eq!(selected.0, 21);
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_lifts_supported_three_halves_tempo() {
+        let selected = select_preferred_tempo_candidate(&[
+            (29, 89.102913, 9.025),
+            (19, 135.999176, 8.613),
+            (39, 66.256012, 7.820),
+            (20, 129.199219, 6.865),
+        ]).unwrap();
+        assert_eq!(selected.0, 19);
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_keeps_weakly_supported_true_90_bpm() {
+        let selected = select_preferred_tempo_candidate(&[
+            (29, 89.102913, 2.050),
+            (20, 129.199219, 1.338),
+            (19, 135.999176, 0.939),
+            (39, 66.256012, 0.747),
+        ]).unwrap();
+        assert_eq!(selected.0, 29);
+    }
+
+    #[test]
+    fn test_tempo_candidate_selection_keeps_low_confidence_92_bpm() {
+        let selected = select_preferred_tempo_candidate(&[
+            (28, 92.285156, 2.170),
+            (37, 69.837418, 2.145),
+            (18, 143.554688, 2.144),
+            (19, 135.999176, 2.082),
+        ]).unwrap();
+        assert_eq!(selected.0, 28);
+    }
+
+    #[test]
+    fn test_tempo_refinement_uses_fractional_acf_peak() {
+        let mut acf = Array1::<Float>::zeros(24);
+        acf[19] = 7.0;
+        acf[20] = 10.0;
+        acf[21] = 10.0;
+
+        let frame_rate = 22050.0 / 512.0;
+        let refined = refine_tempo_from_acf_peak(acf.view(), 20, frame_rate);
+
+        let expected = 60.0 * frame_rate / 20.5;
+        assert!(
+            (refined - expected).abs() < 1e-5,
+            "expected fractional-lag tempo {expected}, got {refined}"
+        );
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_doubles_low_values() {
+        assert_eq!(align_tempo_to_bpm_range(63.02401, Some(79.0), Some(192.0)).unwrap(), 126.04802);
+        assert_eq!(align_tempo_to_bpm_range(66.25601, Some(79.0), Some(192.0)).unwrap(), 132.51202);
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_halves_high_values() {
+        assert!((align_tempo_to_bpm_range(250.0, Some(79.0), Some(192.0)).unwrap() - 125.0).abs() < 1e-6);
+        assert!((align_tempo_to_bpm_range(401.0, Some(79.0), Some(192.0)).unwrap() - 100.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_requires_complete_valid_range() {
+        assert!(align_tempo_to_bpm_range(120.0, None, None).is_ok());
+        assert!(align_tempo_to_bpm_range(120.0, Some(79.0), None).is_err());
+        assert!(align_tempo_to_bpm_range(120.0, None, Some(192.0)).is_err());
+        assert!(align_tempo_to_bpm_range(120.0, Some(192.0), Some(79.0)).is_err());
+        assert!(align_tempo_to_bpm_range(120.0, Some(100.0), Some(150.0)).is_err());
+    }
+
+    #[test]
+    fn test_beat_track_flat_onset_envelope_falls_back_without_beats() {
+        let env = Array1::<Float>::zeros(128);
+        let (tempo, beats) = beat_track(None, Some(env.view()), 22050, 512, 120.0, 100.0, true).unwrap();
+        assert!((tempo - 120.0).abs() < 1e-6, "flat onset envelope should fall back to start BPM, got {tempo}");
+        assert!(beats.is_empty(), "flat onset envelope should not produce beats, got {}", beats.len());
     }
 
     #[test]

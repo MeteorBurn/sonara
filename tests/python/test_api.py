@@ -109,6 +109,7 @@ test("hybrid_cqt(y)", lambda: sonara.hybrid_cqt(y_1s, sr=22050, n_bins=36))
 print("\n--- Pattern 6: Beat Tracking ---")
 
 test("beat_track(y=y)", lambda: sonara.beat_track(y=y_5s, sr=22050))
+test("beat_track accepts bpm range", lambda: sonara.beat_track(y=y_clicks, sr=22050, bpm_min=79.0, bpm_max=192.0))
 tempo, beats = sonara.beat_track(y=y_clicks, sr=22050)
 test("beat_track returns tempo", lambda: (None if tempo > 0 else (_ for _ in ()).throw(ValueError("bad tempo"))))
 test("beat_track returns beats", lambda: (None if len(beats) > 0 else (_ for _ in ()).throw(ValueError("no beats"))))
@@ -283,6 +284,40 @@ try:
     plt.close('all')
 except ImportError:
     test("display (matplotlib not available)", lambda: None)
+
+# ============================================================
+# Pattern 21: Fused Analysis
+# ============================================================
+print("\n--- Pattern 21: Fused Analysis ---")
+
+test("analyze_signal compact", lambda: sonara.analyze_signal(y_clicks, sr=22050))
+test("analyze_signal accepts bpm range", lambda: sonara.analyze_signal(y_clicks, sr=22050, bpm_min=79.0, bpm_max=192.0))
+
+
+def _check_bpm_candidate_fields():
+    r = sonara.analyze_signal(y_clicks, sr=22050, mode="playlist")
+    assert "bpm_candidates" in r, "missing bpm_candidates"
+    assert "bpm_raw" in r, "missing bpm_raw"
+    cands = r["bpm_candidates"]
+    assert len(cands) > 0, "expected at least one tempo candidate"
+    assert len(cands) <= 5, "expected at most 5 tempo candidates"
+    # Each candidate is a (bpm, score) pair.
+    for c in cands:
+        assert len(c) == 2, f"candidate {c} is not a (bpm, score) pair"
+    # Sorted by score descending.
+    scores = [c[1] for c in cands]
+    assert scores == sorted(scores, reverse=True), "candidates not sorted by score desc"
+    # bpm is derivable from the candidate list (equal or octave-related).
+    bpm = r["bpm"]
+
+    def close(a, b):
+        return abs(a - b) <= max(2.0, 0.03 * b)
+
+    ok = any(close(bpm, c[0]) or close(bpm, 2 * c[0]) or close(bpm, c[0] / 2) for c in cands)
+    assert ok, f"bpm {bpm} not derivable from candidates {cands}"
+
+
+test("analyze_signal exposes bpm_candidates/bpm_raw", _check_bpm_candidate_fields)
 
 # ============================================================
 # Summary

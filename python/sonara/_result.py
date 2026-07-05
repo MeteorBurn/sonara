@@ -38,6 +38,11 @@ class TrackAnalysis(dict):
         rhythm: list[tuple[str, str]] = []
         if "bpm" in self:
             rhythm.append(("BPM", f"{self['bpm']:.1f}"))
+        if "bpm_raw" in self and abs(self["bpm_raw"] - self.get("bpm", self["bpm_raw"])) > 0.05:
+            rhythm.append(("BPM (raw)", f"{self['bpm_raw']:.1f}"))
+        if self.get("bpm_candidates"):
+            top = ", ".join(f"{bpm:.1f}" for bpm, _score in self["bpm_candidates"][:3])
+            rhythm.append(("BPM candidates", top))
         if "n_beats" in self:
             rhythm.append(("Beats", str(self["n_beats"])))
         if "onset_density" in self:
