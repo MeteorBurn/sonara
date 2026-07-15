@@ -173,6 +173,18 @@ AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[s
 
 # Result dicts include string fields such as "key" ("A minor"), "key_camelot"
 # (Camelot wheel code, e.g. "8A"), "time_signature", and "predominant_chord".
+#
+# Every result dict carries a "provenance" sub-dict describing how it was
+# produced (self-describing time + stale-record detection):
+#   provenance: Dict — {
+#     "schema_version":     int        # bumped when field meaning/units change
+#     "sample_rate":        int        # effective Hz (post-resample); frame
+#                                      # indices are valid against this rate
+#     "hop_length":         int        # STFT hop of the main pass; seconds =
+#                                      # frame * hop_length / sample_rate
+#     "mode":               str        # "compact" | "playlist" | "full"
+#     "requested_features": List[str]  # sorted; only when features=[...] given
+#   }
 def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> AnalysisResult: ...
 def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> AnalysisResult: ...
 def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> List[AnalysisResult]: ...

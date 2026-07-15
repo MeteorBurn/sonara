@@ -10,6 +10,18 @@ use crate::error::{error_kind, IntoPyResult};
 fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     // Core (always present)
+    // Provenance: schema version, effective sample rate, hop length,
+    // mode/features — lets a consumer convert frame indices to seconds and
+    // detect stale persisted records.
+    let prov = PyDict::new(py);
+    prov.set_item("schema_version", r.provenance.schema_version)?;
+    prov.set_item("sample_rate", r.provenance.sample_rate)?;
+    prov.set_item("hop_length", r.provenance.hop_length)?;
+    prov.set_item("mode", r.provenance.mode.as_str())?;
+    if let Some(ref v) = r.provenance.requested_features {
+        prov.set_item("requested_features", v.clone())?;
+    }
+    d.set_item("provenance", prov)?;
     d.set_item("duration_sec", r.duration_sec)?;
     d.set_item("bpm", r.bpm)?;
     d.set_item("bpm_raw", r.bpm_raw)?;

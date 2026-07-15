@@ -86,6 +86,11 @@ r['dynamic_range_db']       # Loudness range (p95 - p5, dB)
 r['spectral_centroid_mean'] # Brightness (Hz)
 r['zero_crossing_rate']     # Percussiveness proxy
 r['duration_sec']           # Track length
+r['provenance']             # How the result was produced: {"schema_version",
+                            # "sample_rate" (effective Hz), "hop_length",
+                            # "mode", "requested_features" (when features=[...])}
+                            # Frame indices convert to seconds as
+                            # frame * hop_length / sample_rate.
 ```
 
 ### Playlist mode

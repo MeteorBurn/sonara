@@ -72,6 +72,15 @@ impl AnalysisMode {
             _ => None,
         }
     }
+
+    /// Canonical lowercase name (the inverse of [`AnalysisMode::from_str`]).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Playlist => "playlist",
+            Self::Full => "full",
+        }
+    }
 }
 
 impl Default for AnalysisMode {
@@ -214,6 +223,19 @@ const EMBEDDING_DEPS: &[&str] = &[
     "energy", "danceability", "key", "valence", "dissonance", "chords",
 ];
 
+/// Version of the `TrackAnalysis` result schema. Bump whenever the meaning,
+/// unit, or time base of an existing field changes (e.g. a different
+/// `HOP_LENGTH`, a re-derived curve, renamed/retyped fields) — additions of
+/// new fields do NOT require a bump. Consumers persisting analysis results
+/// compare this against `AnalysisProvenance::schema_version` to detect stale
+/// records.
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 1;
+
+/// STFT hop length (samples) used by the main analysis pass. All frame-index
+/// fields on [`TrackAnalysis`] (`beats`, `onset_frames`, `downbeats`) convert
+/// to time as `frame * HOP_LENGTH / sample_rate`.
+pub(crate) const HOP_LENGTH: usize = 512;
+
 /// Number of spectral contrast bands.
 const N_CONTRAST_BANDS: usize = 6;
 /// Number of MFCC coefficients.
@@ -242,12 +264,43 @@ thread_local! {
     static ANALYSIS_CACHE: RefCell<Option<AnalysisCache>> = const { RefCell::new(None) };
 }
 
+/// Provenance metadata: how an analysis result was produced.
+///
+/// Makes a persisted [`TrackAnalysis`] self-describing — a consumer can
+/// convert frame indices to seconds (`frame * hop_length / sample_rate`) and
+/// detect stale stored records by comparing `schema_version` against
+/// [`ANALYSIS_SCHEMA_VERSION`] without out-of-band knowledge.
+///
+/// `sample_rate`/`hop_length` describe the main analysis pass only; the
+/// `fingerprint` field lives in its own fixed internal sample-rate space and
+/// carries its own version (see [`crate::fingerprint`]), as does `embedding`
+/// (`embedding_version`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisProvenance {
+    /// Value of [`ANALYSIS_SCHEMA_VERSION`] at analysis time.
+    pub schema_version: u32,
+    /// Effective sample rate (Hz) the analyzed signal was at — after any
+    /// resampling by `analyze_file`. Frame indices are valid against this
+    /// rate only.
+    pub sample_rate: u32,
+    /// STFT hop length (samples) of the main pass.
+    pub hop_length: usize,
+    /// The configured [`AnalysisMode`]. Ignored by feature selection when
+    /// `requested_features` is `Some` (an explicit list overrides the mode).
+    pub mode: AnalysisMode,
+    /// The explicit `features=[...]` request (sorted), if one was given.
+    pub requested_features: Option<Vec<String>>,
+}
+
 /// Complete analysis result for a single track.
 ///
 /// Core fields are always populated. Extended/perceptual fields are `Some`
 /// only when the selected mode or feature list includes them.
 pub struct TrackAnalysis {
     // -- Basic (always computed) --
+    /// How this result was produced (schema version, effective sample rate,
+    /// hop length, mode/features) — see [`AnalysisProvenance`].
+    pub provenance: AnalysisProvenance,
     pub duration_sec: Float,
     pub bpm: Float,
     /// Selected tempo before optional `bpm_min`/`bpm_max` range alignment.
@@ -440,7 +493,7 @@ fn analyze_signal_inner(
 ) -> Result<TrackAnalysis> {
     let sr_f = sr as Float;
     let n_fft = 2048;
-    let hop_length = 512;
+    let hop_length = HOP_LENGTH;
     let n_mels = 128;
     let n_bins = n_fft / 2 + 1;
 
@@ -1190,6 +1243,17 @@ fn analyze_signal_inner(
     };
 
     let mut result = TrackAnalysis {
+        provenance: AnalysisProvenance {
+            schema_version: ANALYSIS_SCHEMA_VERSION,
+            sample_rate: sr,
+            hop_length,
+            mode: config.mode,
+            requested_features: config.features.as_ref().map(|f| {
+                let mut v: Vec<String> = f.iter().cloned().collect();
+                v.sort();
+                v
+            }),
+        },
         duration_sec,
         bpm,
         bpm_raw,
@@ -1412,6 +1476,48 @@ mod tests {
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .unwrap().0;
         assert_eq!(max_bin, 9, "A440 should map to chroma bin 9 (A), got {}", max_bin);
+    }
+
+    #[test]
+    fn test_analysis_schema_version_pinned() {
+        // Bump deliberately (with a changelog note), never accidentally.
+        assert_eq!(ANALYSIS_SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn test_provenance_populated() {
+        let y = sine(440.0, 22050, 2.0);
+        let result = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let p = &result.provenance;
+        assert_eq!(p.schema_version, ANALYSIS_SCHEMA_VERSION);
+        assert_eq!(p.sample_rate, 22050);
+        assert_eq!(p.hop_length, HOP_LENGTH);
+        assert_eq!(p.mode, AnalysisMode::Compact);
+        assert!(p.requested_features.is_none());
+        // Frame→seconds via provenance must agree with the beatgrid convention.
+        if let Some(&f) = result.beats.first() {
+            let via_prov = f as Float * p.hop_length as Float / p.sample_rate as Float;
+            let via_grid = crate::beatgrid::grid_offset(&result.beats, 22050, HOP_LENGTH);
+            assert!((via_prov - via_grid).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_provenance_records_feature_override() {
+        let y = sine(440.0, 22050, 2.0);
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Playlist,
+            features: Some(["key", "energy", "chroma"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        let p = &result.provenance;
+        assert_eq!(p.mode, AnalysisMode::Playlist);
+        // Sorted, so the recorded list is deterministic across runs.
+        assert_eq!(
+            p.requested_features.as_deref(),
+            Some(&["chroma".to_string(), "energy".to_string(), "key".to_string()][..])
+        );
     }
 
     #[test]

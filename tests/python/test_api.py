@@ -319,6 +319,34 @@ def _check_bpm_candidate_fields():
 
 test("analyze_signal exposes bpm_candidates/bpm_raw", _check_bpm_candidate_fields)
 
+
+def _check_provenance_fields():
+    r = sonara.analyze_signal(y_clicks, sr=22050)
+    assert "provenance" in r, "missing provenance"
+    p = r["provenance"]
+    for key in ("schema_version", "sample_rate", "hop_length", "mode"):
+        assert key in p, f"provenance missing {key}"
+    assert p["schema_version"] >= 1
+    assert p["sample_rate"] == 22050
+    assert p["hop_length"] == 512
+    assert p["mode"] == "compact"
+    assert "requested_features" not in p, "requested_features present without features=[...]"
+    # Frame -> seconds using the carried sr/hop must land inside the track.
+    if r["beats"]:
+        last_sec = r["beats"][-1] * p["hop_length"] / p["sample_rate"]
+        assert 0.0 <= last_sec <= r["duration_sec"] + 0.1, f"beat at {last_sec}s outside track"
+
+
+def _check_provenance_feature_override():
+    r = sonara.analyze_signal(y_clicks, sr=22050, mode="playlist", features=["key", "energy"])
+    p = r["provenance"]
+    assert p["mode"] == "playlist"
+    assert p["requested_features"] == ["energy", "key"], p["requested_features"]
+
+
+test("analyze_signal carries provenance", _check_provenance_fields)
+test("provenance records feature override (sorted)", _check_provenance_feature_override)
+
 # ============================================================
 # Summary
 # ============================================================
