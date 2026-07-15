@@ -292,6 +292,8 @@ pub struct AnalysisProvenance {
     pub requested_features: Option<Vec<String>>,
 }
 
+pub use crate::structure::SegmentEvent;
+
 /// A chord with its time span, in seconds.
 ///
 /// Derived from the same beat-aligned windows as `chord_sequence`, with runs
@@ -413,8 +415,8 @@ pub struct TrackAnalysis {
     pub energy_curve: Option<Vec<Float>>,
     /// Seconds between successive `energy_curve` samples.
     pub energy_curve_hop_sec: Option<Float>,
-    /// Structural sections as `(start_sec, end_sec, mean_energy)`.
-    pub segments: Option<Vec<(Float, Float, Float)>>,
+    /// Contiguous structural sections covering the track. See [`SegmentEvent`].
+    pub segments: Option<Vec<SegmentEvent>>,
     /// End of the initial low-energy / pre-first-drop region (seconds).
     pub intro_end_sec: Option<Float>,
     /// Start of the final fade / low-energy region (seconds).
@@ -450,6 +452,33 @@ pub struct TrackAnalysis {
     /// `crate::similarity::SIMILARITY_VERSION`). `Some` iff `embedding` is `Some`.
     /// Present only when the `"embedding"` feature is explicitly requested.
     pub embedding_version: Option<u32>,
+}
+
+impl TrackAnalysis {
+    /// Convert a main-pass frame index (as in `beats`, `onset_frames`,
+    /// `downbeats`) to seconds using the carried provenance:
+    /// `frame * hop_length / sample_rate`.
+    pub fn frame_to_sec(&self, frame: usize) -> Float {
+        frame as Float * self.provenance.hop_length as Float
+            / self.provenance.sample_rate as Float
+    }
+
+    /// Beat times in seconds (see [`Self::frame_to_sec`]).
+    pub fn beats_sec(&self) -> Vec<Float> {
+        self.beats.iter().map(|&f| self.frame_to_sec(f)).collect()
+    }
+
+    /// Onset times in seconds (see [`Self::frame_to_sec`]).
+    pub fn onsets_sec(&self) -> Vec<Float> {
+        self.onset_frames.iter().map(|&f| self.frame_to_sec(f)).collect()
+    }
+
+    /// Downbeat times in seconds; `None` unless `features=["beatgrid"]`.
+    pub fn downbeats_sec(&self) -> Option<Vec<Float>> {
+        self.downbeats
+            .as_ref()
+            .map(|d| d.iter().map(|&f| self.frame_to_sec(f)).collect())
+    }
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -1577,6 +1606,23 @@ mod tests {
     }
 
     #[test]
+    fn test_frame_to_sec_helpers_match_beatgrid() {
+        let y = sine(440.0, 22050, 2.0);
+        let result = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let beats_sec = result.beats_sec();
+        assert_eq!(beats_sec.len(), result.beats.len());
+        if !result.beats.is_empty() {
+            let via_grid = crate::beatgrid::grid_offset(&result.beats, 22050, HOP_LENGTH);
+            assert!((beats_sec[0] - via_grid).abs() < 1e-9);
+        }
+        for (sec, &frame) in result.onsets_sec().iter().zip(&result.onset_frames) {
+            assert!((sec - result.frame_to_sec(frame)).abs() < 1e-9);
+            assert!(*sec >= 0.0 && *sec <= result.duration_sec + 0.1);
+        }
+        assert!(result.downbeats_sec().is_none(), "beatgrid not requested");
+    }
+
+    #[test]
     fn test_chord_events_merge_and_cover() {
         let chords: Vec<String> = ["Am", "Am", "C", "C", "C", "G"]
             .iter().map(|s| s.to_string()).collect();
@@ -1891,13 +1937,13 @@ mod tests {
         let r = analyze_signal(y.view(), sr, &structure_config()).unwrap();
         let segs = r.segments.as_ref().unwrap();
         // Covering + ordered + non-overlapping.
-        assert!(segs.first().unwrap().0.abs() < 1e-2, "first segment must start at 0");
-        assert!((segs.last().unwrap().1 - r.duration_sec).abs() < 0.5, "last must end at duration");
+        assert!(segs.first().unwrap().start_sec.abs() < 1e-2, "first segment must start at 0");
+        assert!((segs.last().unwrap().end_sec - r.duration_sec).abs() < 0.5, "last must end at duration");
         for w in segs.windows(2) {
-            assert!((w[0].1 - w[1].0).abs() < 1e-2, "segments must be contiguous");
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-2, "segments must be contiguous");
         }
         // Boundaries near 30s and 90s.
-        let interior: Vec<Float> = segs.iter().skip(1).map(|s| s.0).collect();
+        let interior: Vec<Float> = segs.iter().skip(1).map(|s| s.start_sec).collect();
         let near = |target: Float| interior.iter().any(|&b| (b - target).abs() < 8.0);
         assert!(near(30.0), "expected boundary near 30s, interior={:?}", interior);
         assert!(near(90.0), "expected boundary near 90s, interior={:?}", interior);
@@ -1905,8 +1951,11 @@ mod tests {
         assert!(r.intro_end_sec.unwrap() < 45.0);
         assert!(r.outro_start_sec.unwrap() > 80.0);
         // Middle (loud) segment has clearly higher mean energy than the ends.
-        let mid = segs.iter().find(|s| s.0 < 60.0 && s.1 > 60.0).map(|s| s.2).unwrap_or(0.0);
-        assert!(mid > segs.first().unwrap().2 + 0.15, "loud section should be more energetic");
+        let mid = segs.iter()
+            .find(|s| s.start_sec < 60.0 && s.end_sec > 60.0)
+            .map(|s| s.energy)
+            .unwrap_or(0.0);
+        assert!(mid > segs.first().unwrap().energy + 0.15, "loud section should be more energetic");
     }
 
     #[test]

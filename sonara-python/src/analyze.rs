@@ -113,11 +113,11 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     if let Some(v) = r.energy_curve_hop_sec { d.set_item("energy_curve_hop_sec", v)?; }
     if let Some(ref segs) = r.segments {
         let list = pyo3::types::PyList::empty(py);
-        for &(start, end, energy) in segs {
+        for s in segs {
             let sd = PyDict::new(py);
-            sd.set_item("start_sec", start)?;
-            sd.set_item("end_sec", end)?;
-            sd.set_item("energy", energy)?;
+            sd.set_item("start_sec", s.start_sec)?;
+            sd.set_item("end_sec", s.end_sec)?;
+            sd.set_item("energy", s.energy)?;
             list.append(sd)?;
         }
         d.set_item("segments", list)?;

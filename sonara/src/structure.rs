@@ -44,7 +44,7 @@
 //!    spacing, capped at `MAX_BOUNDARIES` interior boundaries. This keeps the
 //!    count sane (typically 4-12 segments for a 5-minute track).
 //!
-//! `segments` is a list of `(start_sec, end_sec, mean_energy)`, contiguous and
+//! `segments` is a list of [`SegmentEvent`]s, contiguous and
 //! covering the whole track (first starts at 0, last ends at the duration).
 //! A constant or silent track yields a single whole-track segment.
 //!
@@ -104,14 +104,26 @@ const NOVELTY_THRESH_FLOOR: Float = 0.25;
 /// Number of MFCC coefficients used for the timbral descriptor.
 const N_MFCC: usize = 13;
 
+/// A structural section with its time span, in seconds.
+///
+/// Segments are contiguous, ordered, and cover the whole track: the first
+/// starts at 0.0 and the last ends at the track duration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentEvent {
+    pub start_sec: Float,
+    pub end_sec: Float,
+    /// Mean perceptual energy (0-1) over the span.
+    pub energy: Float,
+}
+
 /// Result of structural analysis.
 pub struct StructureResult {
     /// Time-resolved perceptual energy (0-1), one value per window.
     pub energy_curve: Vec<Float>,
     /// Seconds between successive `energy_curve` samples.
     pub energy_curve_hop_sec: Float,
-    /// Contiguous sections as `(start_sec, end_sec, mean_energy)`.
-    pub segments: Vec<(Float, Float, Float)>,
+    /// Contiguous sections covering the track. See [`SegmentEvent`].
+    pub segments: Vec<SegmentEvent>,
     /// End of the initial low-energy / pre-first-drop region (seconds).
     pub intro_end_sec: Float,
     /// Start of the final fade / low-energy region (seconds).
@@ -251,17 +263,21 @@ pub fn analyze_structure(
     cuts.sort_by(|a, b| a.partial_cmp(b).unwrap());
     cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
 
-    let mut segments: Vec<(Float, Float, Float)> = Vec::new();
+    let mut segments: Vec<SegmentEvent> = Vec::new();
     for w in cuts.windows(2) {
         let (start, end) = (w[0], w[1]);
         if end - start < 1e-3 {
             continue;
         }
         let me = segment_mean_energy(&energy_curve, &win_start_sec, start, end, mean_energy);
-        segments.push((start, end, me));
+        segments.push(SegmentEvent { start_sec: start, end_sec: end, energy: me });
     }
     if segments.is_empty() {
-        segments.push((0.0, duration_sec.max(0.0), mean_energy));
+        segments.push(SegmentEvent {
+            start_sec: 0.0,
+            end_sec: duration_sec.max(0.0),
+            energy: mean_energy,
+        });
     }
 
     // ---- Intro / outro heuristic ----
@@ -480,7 +496,7 @@ fn percentile(values: &[Float], p: Float) -> Float {
 fn intro_outro(
     energy_curve: &[Float],
     win_start_sec: &[Float],
-    segments: &[(Float, Float, Float)],
+    segments: &[SegmentEvent],
     duration_sec: Float,
     hop_sec: Float,
 ) -> (Float, Float) {
@@ -510,7 +526,7 @@ fn intro_outro(
     }
 
     // Snap to a nearby interior segment boundary for cleaner alignment.
-    let interior: Vec<Float> = segments.iter().skip(1).map(|s| s.0).collect();
+    let interior: Vec<Float> = segments.iter().skip(1).map(|s| s.start_sec).collect();
     intro_end = snap(intro_end, &interior);
     outro_start = snap(outro_start, &interior);
 
@@ -621,7 +637,7 @@ mod tests {
         let s = synth_low_high_low();
         let r = run(&s);
         // Expect a boundary near 30s and near 90s.
-        let interior: Vec<Float> = r.segments.iter().skip(1).map(|seg| seg.0).collect();
+        let interior: Vec<Float> = r.segments.iter().skip(1).map(|seg| seg.start_sec).collect();
         let near = |target: Float| interior.iter().any(|&b| (b - target).abs() < 6.0);
         assert!(near(30.0), "expected boundary near 30s, got {:?}", interior);
         assert!(near(90.0), "expected boundary near 90s, got {:?}", interior);
@@ -676,14 +692,14 @@ mod tests {
     fn test_segments_cover_and_order() {
         let s = synth_low_high_low();
         let r = run(&s);
-        assert!(r.segments.first().unwrap().0.abs() < 1e-3, "first must start at 0");
+        assert!(r.segments.first().unwrap().start_sec.abs() < 1e-3, "first must start at 0");
         assert!(
-            (r.segments.last().unwrap().1 - s.dur).abs() < 1e-2,
+            (r.segments.last().unwrap().end_sec - s.dur).abs() < 1e-2,
             "last must end at duration"
         );
         for w in r.segments.windows(2) {
-            assert!((w[0].1 - w[1].0).abs() < 1e-3, "segments must be contiguous");
-            assert!(w[0].1 > w[0].0, "segments must be ordered");
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-3, "segments must be contiguous");
+            assert!(w[0].end_sec > w[0].start_sec, "segments must be ordered");
         }
     }
 
