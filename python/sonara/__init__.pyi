@@ -185,6 +185,13 @@ AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[s
 #     "mode":               str        # "compact" | "playlist" | "full"
 #     "requested_features": List[str]  # sorted; only when features=[...] given
 #   }
+#
+# When chords are computed (playlist/full modes or features=["chords"]), the
+# dict also carries typed time-spanned chord events alongside chord_sequence:
+#   chord_events: List[Dict]  # {"label": str, "start_sec": float,
+#                             #  "end_sec": float} — merged runs of
+#                             # chord_sequence; contiguous, covering the track;
+#                             # label "N" = no chord detected in that span
 def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> AnalysisResult: ...
 def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> AnalysisResult: ...
 def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> List[AnalysisResult]: ...

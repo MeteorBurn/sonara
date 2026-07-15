@@ -347,6 +347,36 @@ def _check_provenance_feature_override():
 test("analyze_signal carries provenance", _check_provenance_fields)
 test("provenance records feature override (sorted)", _check_provenance_feature_override)
 
+
+def _check_chord_events():
+    r = sonara.analyze_signal(y_clicks, sr=22050, mode="playlist")
+    assert "chord_sequence" in r, "playlist mode should compute chords"
+    assert "chord_events" in r, "chord_events should mirror chord_sequence"
+    events = r["chord_events"]
+    seq = r["chord_sequence"]
+    if not seq:
+        assert events == []
+        return
+    for e in events:
+        assert set(e) == {"label", "start_sec", "end_sec"}, f"bad event shape {e}"
+        assert e["end_sec"] > e["start_sec"], f"empty span {e}"
+    assert events[0]["start_sec"] == 0.0
+    assert abs(events[-1]["end_sec"] - r["duration_sec"]) < 1e-4
+    # Contiguous + merged (no two adjacent events share a label)
+    for a, b in zip(events, events[1:]):
+        assert abs(a["end_sec"] - b["start_sec"]) < 1e-9, "gap between events"
+        assert a["label"] != b["label"], "adjacent events not merged"
+
+
+def _check_chord_events_absent_when_not_requested():
+    r = sonara.analyze_signal(y_clicks, sr=22050)  # compact: no chords
+    assert "chord_events" not in r
+    assert "chord_sequence" not in r
+
+
+test("chord_events typed spans (playlist)", _check_chord_events)
+test("chord_events absent in compact", _check_chord_events_absent_when_not_requested)
+
 # ============================================================
 # Summary
 # ============================================================

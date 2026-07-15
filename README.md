@@ -113,6 +113,9 @@ r['key_confidence']   # How confident the key detection is (0.0 - 1.0)
 
 # Tonal analysis
 r['chord_sequence']        # Beat-synchronous chord labels, e.g. ["Am", "F", "C", "G"]
+r['chord_events']          # Time-spanned chords (merged runs of chord_sequence):
+                           # [{"label": "Am", "start_sec": 0.0, "end_sec": 4.1}, ...]
+                           # contiguous, covering the whole track
 r['predominant_chord']     # Most frequent chord
 r['chord_change_rate']     # Chord changes per second (harmonic complexity)
 r['dissonance']            # Sensory dissonance (0 = consonant, 1 = rough)

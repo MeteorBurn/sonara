@@ -64,6 +64,19 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
 
     // Tonal (playlist/full modes)
     if let Some(ref v) = r.chord_sequence { d.set_item("chord_sequence", v.clone())?; }
+    // Time-spanned chord events (merged runs of chord_sequence), list of dicts
+    // mirroring the segments shape: {"label", "start_sec", "end_sec"}.
+    if let Some(ref events) = r.chord_events {
+        let list = pyo3::types::PyList::empty(py);
+        for e in events {
+            let ed = PyDict::new(py);
+            ed.set_item("label", e.label.as_str())?;
+            ed.set_item("start_sec", e.start_sec)?;
+            ed.set_item("end_sec", e.end_sec)?;
+            list.append(ed)?;
+        }
+        d.set_item("chord_events", list)?;
+    }
     if let Some(v) = r.chord_change_rate { d.set_item("chord_change_rate", v)?; }
     if let Some(ref v) = r.predominant_chord { d.set_item("predominant_chord", v.as_str())?; }
     if let Some(v) = r.dissonance { d.set_item("dissonance", v)?; }

@@ -292,6 +292,20 @@ pub struct AnalysisProvenance {
     pub requested_features: Option<Vec<String>>,
 }
 
+/// A chord with its time span, in seconds.
+///
+/// Derived from the same beat-aligned windows as `chord_sequence`, with runs
+/// of consecutive identical labels merged into one event. Events are
+/// contiguous and cover the track: the first starts at 0.0 and the last ends
+/// at `duration_sec`. `label` uses the `chord_sequence` vocabulary (e.g.
+/// "C", "Am"; "N" = no chord detected in that span).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChordEvent {
+    pub label: String,
+    pub start_sec: Float,
+    pub end_sec: Float,
+}
+
 /// Complete analysis result for a single track.
 ///
 /// Core fields are always populated. Extended/perceptual fields are `Some`
@@ -355,6 +369,9 @@ pub struct TrackAnalysis {
 
     // -- Tonal (extended or full) --
     pub chord_sequence: Option<Vec<String>>,
+    /// Time-spanned chord events (merged runs of `chord_sequence`); `Some`
+    /// exactly when `chord_sequence` is. See [`ChordEvent`].
+    pub chord_events: Option<Vec<ChordEvent>>,
     pub chord_change_rate: Option<Float>,
     pub predominant_chord: Option<String>,
     pub dissonance: Option<Float>,
@@ -1103,7 +1120,7 @@ fn analyze_signal_inner(
     let wants_chords = extended && config.wants("chords");
     let wants_diss = extended && config.wants("dissonance");
 
-    let (chord_sequence, chord_change_rate, predominant_chord, dissonance_val) =
+    let (chord_sequence, chord_events, chord_change_rate, predominant_chord, dissonance_val) =
         if (wants_chords || wants_diss) && n_frames > 0 {
             // L1-normalize HPCP per frame (in-place on hpcp_raw)
             for t in 0..n_frames {
@@ -1113,21 +1130,24 @@ fn analyze_signal_inner(
                 }
             }
 
-            let (cs, ccr, pc) = if wants_chords {
+            let (cs, ce, ccr, pc) = if wants_chords {
                 let chords = crate::tonal::chords_from_beats(hpcp_raw.view(), &beats);
                 let desc = crate::tonal::chord_descriptors(&chords, duration_sec);
-                (Some(chords), Some(desc.change_rate), Some(desc.predominant_chord))
+                let events = chord_events_from_labels(
+                    &chords, &beats, n_frames, sr_f, hop_length, duration_sec,
+                );
+                (Some(chords), Some(events), Some(desc.change_rate), Some(desc.predominant_chord))
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
 
             let dv = if wants_diss {
                 Some(dissonance_acc / n_frames as Float)
             } else { None };
 
-            (cs, ccr, pc, dv)
+            (cs, ce, ccr, pc, dv)
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
     // ================================================================
@@ -1285,6 +1305,7 @@ fn analyze_signal_inner(
         time_signature,
         time_signature_confidence,
         chord_sequence,
+        chord_events,
         chord_change_rate,
         predominant_chord,
         dissonance: dissonance_val,
@@ -1427,6 +1448,41 @@ pub fn full() -> AnalysisConfig {
     AnalysisConfig { mode: AnalysisMode::Full, ..Default::default() }
 }
 
+/// Build merged [`ChordEvent`]s from per-window labels. Windows are the
+/// `tonal::chord_boundaries` spans that produced `chords` (so the two stay
+/// aligned by construction); runs of identical labels merge, the first event
+/// starts at 0.0 and the last ends at `duration_sec` (the STFT tail past the
+/// final frame belongs to the last chord).
+fn chord_events_from_labels(
+    chords: &[String],
+    beats: &[usize],
+    n_frames: usize,
+    sr_f: Float,
+    hop_length: usize,
+    duration_sec: Float,
+) -> Vec<ChordEvent> {
+    if chords.is_empty() || beats.is_empty() {
+        return Vec::new();
+    }
+    let boundaries = crate::tonal::chord_boundaries(beats, n_frames);
+    debug_assert_eq!(boundaries.len(), chords.len() + 1);
+    let to_sec = |frame: usize| frame as Float * hop_length as Float / sr_f;
+
+    let mut events: Vec<ChordEvent> = Vec::new();
+    for (i, label) in chords.iter().enumerate() {
+        let start_sec = if i == 0 { 0.0 } else { to_sec(boundaries[i]) };
+        let end_sec = to_sec(boundaries[i + 1]);
+        match events.last_mut() {
+            Some(last) if last.label == *label => last.end_sec = end_sec,
+            _ => events.push(ChordEvent { label: label.clone(), start_sec, end_sec }),
+        }
+    }
+    if let Some(last) = events.last_mut() {
+        last.end_sec = duration_sec;
+    }
+    events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,6 +1574,64 @@ mod tests {
             p.requested_features.as_deref(),
             Some(&["chroma".to_string(), "energy".to_string(), "key".to_string()][..])
         );
+    }
+
+    #[test]
+    fn test_chord_events_merge_and_cover() {
+        let chords: Vec<String> = ["Am", "Am", "C", "C", "C", "G"]
+            .iter().map(|s| s.to_string()).collect();
+        // beats[0] > 0 and last beat < n_frames → boundaries = [0] + beats + [n_frames]
+        let beats = vec![10, 20, 30, 40, 50];
+        let n_frames = 60;
+        let (sr_f, hop) = (22050.0, 512);
+        let dur = 2.0;
+        let events = chord_events_from_labels(&chords, &beats, n_frames, sr_f, hop, dur);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].label, "Am");
+        assert_eq!(events[1].label, "C");
+        assert_eq!(events[2].label, "G");
+        // Contiguous, covering [0, dur]
+        assert_eq!(events[0].start_sec, 0.0);
+        assert_eq!(events[2].end_sec, dur);
+        for w in events.windows(2) {
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-9, "not contiguous");
+        }
+        // Merge boundary: Am ends where C starts = boundary frame 20
+        let expect = 20.0 * hop as Float / sr_f;
+        assert!((events[0].end_sec - expect).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_chord_events_populated_with_sequence() {
+        let y = sine(440.0, 22050, 2.0);
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(["chords"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        let seq = result.chord_sequence.expect("chord_sequence requested");
+        let events = result.chord_events.expect("chord_events mirror chord_sequence");
+        if seq.is_empty() {
+            assert!(events.is_empty());
+            return;
+        }
+        // Events are the run-length merge of the sequence.
+        let mut merged: Vec<&String> = Vec::new();
+        for label in &seq {
+            if merged.last() != Some(&label) { merged.push(label); }
+        }
+        let labels: Vec<&String> = events.iter().map(|e| &e.label).collect();
+        assert_eq!(labels, merged);
+        // Spans are monotone, contiguous, and cover [0, duration].
+        assert_eq!(events[0].start_sec, 0.0);
+        assert!((events.last().unwrap().end_sec - result.duration_sec).abs() < 1e-6);
+        for e in &events {
+            assert!(e.end_sec > e.start_sec, "empty span {:?}", e);
+        }
+        for w in events.windows(2) {
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-9);
+        }
     }
 
     #[test]

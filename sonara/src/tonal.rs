@@ -270,6 +270,22 @@ fn format_chord(root: usize, quality: &str) -> String {
 /// - `beats`: Beat frame indices from beat tracker
 ///
 /// Returns chord label per beat segment.
+/// Frame boundaries of the per-beat chord segments: `[0?] + beats + [n_frames?]`.
+/// `chords_from_beats` labels the windows between consecutive boundaries, so
+/// `boundaries.len() == labels.len() + 1`. Shared with the typed
+/// `chord_events` derivation in `analyze` — the two must never diverge.
+pub(crate) fn chord_boundaries(beats: &[usize], n_frames: usize) -> Vec<usize> {
+    let mut boundaries: Vec<usize> = Vec::with_capacity(beats.len() + 2);
+    if beats[0] > 0 {
+        boundaries.push(0);
+    }
+    boundaries.extend_from_slice(beats);
+    if *beats.last().unwrap() < n_frames {
+        boundaries.push(n_frames);
+    }
+    boundaries
+}
+
 pub fn chords_from_beats(
     hpcp: ArrayView2<Float>,
     beats: &[usize],
@@ -281,14 +297,7 @@ pub fn chords_from_beats(
     }
 
     // Create segment boundaries from beats
-    let mut boundaries: Vec<usize> = Vec::with_capacity(beats.len() + 2);
-    if beats[0] > 0 {
-        boundaries.push(0);
-    }
-    boundaries.extend_from_slice(beats);
-    if *beats.last().unwrap() < n_frames {
-        boundaries.push(n_frames);
-    }
+    let boundaries = chord_boundaries(beats, n_frames);
 
     let mut chords = Vec::with_capacity(boundaries.len() - 1);
 
