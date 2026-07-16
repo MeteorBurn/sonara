@@ -18,6 +18,39 @@ use crate::types::{AudioBuffer, Float};
 // Audio I/O
 // ============================================================
 
+/// Container/stream metadata tags (ID3v2, Vorbis comments, etc.) read straight
+/// from an audio file.
+///
+/// Populated only by `analyze_file`/`analyze_batch` when the `"tags"` feature is
+/// requested (`features=["tags"]`); always `None` otherwise and for
+/// `analyze_signal` (a bare signal has no container to read). Each field is
+/// `Some` only when the file actually carries that tag.
+///
+/// Tags are read from **symphonia-decoded** containers (FLAC/Vorbis comments,
+/// MP3/AAC ID3v2, MP4, etc.). The WAV fast path (hound) does **not** read tags,
+/// so a `.wav` input always yields `None` here.
+///
+/// Note: `genre` here is the *file's* metadata genre string (e.g. "Electronic"),
+/// which is distinct from `TrackAnalysis::genre` — the latter is a reserved
+/// placeholder for a future computed/ML genre and is unrelated to this tag.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrackTags {
+    /// Track title (`TrackTitle`).
+    pub title: Option<String>,
+    /// Track artist (`Artist`).
+    pub artist: Option<String>,
+    /// Album name (`Album`).
+    pub album: Option<String>,
+    /// Genre string as stored in the file (`Genre`).
+    pub genre: Option<String>,
+    /// Release year, derived from the leading 4 digits of the first parseable
+    /// `Date`/`ReleaseDate`/`OriginalDate` tag (there is no dedicated year tag).
+    pub year: Option<u32>,
+    /// Track number (`TrackNumber`); the leading integer of values like
+    /// `"3"` or `"3/12"`.
+    pub track_no: Option<u32>,
+}
+
 /// Load an audio file as a floating-point time series.
 ///
 /// Audio is automatically resampled to the given rate (default 22050 Hz).
@@ -35,12 +68,31 @@ pub fn load(
     offset: Float,
     duration: Float,
 ) -> Result<(Array1<Float>, u32)> {
-    // Try hound first for WAV files (fastest path)
+    let (y, sr, _tags) = load_with_tags(path, sr, mono, offset, duration, false)?;
+    Ok((y, sr))
+}
+
+/// Like [`load`], but optionally also extracts container/stream metadata tags.
+///
+/// When `want_tags` is `false` this does exactly the same work as [`load`] and
+/// returns `None` for the tags — the default fast path pays nothing. When
+/// `true`, tags are read from symphonia-decoded containers (see [`TrackTags`]);
+/// WAV files go through the hound fast path and always yield `None`.
+pub fn load_with_tags(
+    path: &Path,
+    sr: u32,
+    mono: bool,
+    offset: Float,
+    duration: Float,
+    want_tags: bool,
+) -> Result<(Array1<Float>, u32, Option<TrackTags>)> {
+    // Try hound first for WAV files (fastest path). WAV carries no tags here.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let (samples, native_sr, n_channels) = if ext.eq_ignore_ascii_case("wav") {
-        load_wav(path)?
+    let (samples, native_sr, n_channels, tags) = if ext.eq_ignore_ascii_case("wav") {
+        let (s, r, c) = load_wav(path)?;
+        (s, r, c, None)
     } else {
-        load_symphonia(path)?
+        load_symphonia(path, want_tags)?
     };
 
     let native_sr = native_sr;
@@ -91,7 +143,7 @@ pub fn load(
         audio = resample(audio.view(), native_sr, target_sr)?;
     }
 
-    Ok((audio, target_sr))
+    Ok((audio, target_sr, tags))
 }
 
 /// Load WAV file using hound (fast path).
@@ -162,7 +214,10 @@ fn codec_short_name(codec: symphonia::core::codecs::CodecType) -> Option<&'stati
 }
 
 /// Load audio file using symphonia (supports mp3, flac, ogg, etc.).
-fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
+///
+/// When `want_tags` is `true`, container/stream metadata tags are also collected
+/// (see [`TrackTags`]); when `false`, no tag work is done at all.
+fn load_symphonia(path: &Path, want_tags: bool) -> Result<(Vec<Float>, u32, usize, Option<TrackTags>)> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -179,11 +234,34 @@ fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
         hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe()
+    let mut probed = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|e| map_symphonia_err(path, "probe", None, e))?;
 
     let mut format = probed.format;
+
+    // Extract tags (opt-in). Merge two sources: the probe-level metadata (e.g.
+    // an ID3v2 tag ahead of the stream) first, then any container-internal
+    // revision (e.g. FLAC/Vorbis comments) for fields the probe did not fill.
+    // Read now, before the decode loop consumes `format`. First value per field
+    // wins.
+    let tags = if want_tags {
+        let mut t = TrackTags::default();
+        if let Some(mut probe_meta) = probed.metadata.get() {
+            if let Some(rev) = probe_meta.skip_to_latest() {
+                merge_tags(&mut t, rev.tags());
+            }
+        }
+        {
+            let mut fmt_meta = format.metadata();
+            if let Some(rev) = fmt_meta.skip_to_latest() {
+                merge_tags(&mut t, rev.tags());
+            }
+        }
+        Some(t)
+    } else {
+        None
+    };
 
     let track = format
         .default_track()
@@ -252,7 +330,74 @@ fn load_symphonia(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
         samples.extend(buf.samples().iter().copied());
     }
 
-    Ok((samples, sr, n_channels))
+    Ok((samples, sr, n_channels, tags))
+}
+
+/// Fill any still-empty [`TrackTags`] fields from a slice of symphonia `Tag`s.
+///
+/// First value per field wins (so calling this on the probe metadata first,
+/// then container metadata, prefers the probe source). `year` is derived from
+/// the leading 4 digits of the first parseable `Date`/`ReleaseDate`/
+/// `OriginalDate`; `track_no` from the leading integer of `TrackNumber`.
+fn merge_tags(t: &mut TrackTags, tags: &[symphonia::core::meta::Tag]) {
+    use symphonia::core::meta::StandardTagKey;
+
+    for tag in tags {
+        let Some(std_key) = tag.std_key else { continue };
+        match std_key {
+            StandardTagKey::TrackTitle => set_str(&mut t.title, tag),
+            StandardTagKey::Artist => set_str(&mut t.artist, tag),
+            StandardTagKey::Album => set_str(&mut t.album, tag),
+            StandardTagKey::Genre => set_str(&mut t.genre, tag),
+            StandardTagKey::Date | StandardTagKey::ReleaseDate | StandardTagKey::OriginalDate => {
+                if t.year.is_none() {
+                    if let Some(y) = parse_year(&tag.value.to_string()) {
+                        t.year = Some(y);
+                    }
+                }
+            }
+            StandardTagKey::TrackNumber => {
+                if t.track_no.is_none() {
+                    if let Some(n) = parse_leading_u32(&tag.value.to_string()) {
+                        t.track_no = Some(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Set `slot` to the tag's string value if not already set and non-empty.
+fn set_str(slot: &mut Option<String>, tag: &symphonia::core::meta::Tag) {
+    if slot.is_none() {
+        let s = tag.value.to_string();
+        let s = s.trim();
+        if !s.is_empty() {
+            *slot = Some(s.to_string());
+        }
+    }
+}
+
+/// Parse the leading 4-digit year out of a date string (e.g. "2024",
+/// "2024-05-01", "2024/05").
+fn parse_year(s: &str) -> Option<u32> {
+    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 4 {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Parse the leading integer of a track-number string (e.g. "3" or "3/12").
+fn parse_leading_u32(s: &str) -> Option<u32> {
+    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
 }
 
 /// Convert a multi-channel signal to mono by averaging channels.
@@ -432,7 +577,7 @@ pub fn get_duration(path: &Path) -> Result<Float> {
         Ok(n_samples / spec.sample_rate as Float)
     } else {
         // Fallback: load and measure (not ideal for large files)
-        let (samples, sr, _) = load_symphonia(path)?;
+        let (samples, sr, _, _) = load_symphonia(path, false)?;
         Ok(samples.len() as Float / sr as Float)
     }
 }
@@ -445,7 +590,7 @@ pub fn get_samplerate(path: &Path) -> Result<u32> {
             .map_err(|e| SonaraError::AudioFile(format!("{}: {}", path.display(), e)))?;
         Ok(reader.spec().sample_rate)
     } else {
-        let (_, sr, _) = load_symphonia(path)?;
+        let (_, sr, _, _) = load_symphonia(path, false)?;
         Ok(sr)
     }
 }
@@ -974,6 +1119,61 @@ mod tests {
         let y = Array1::from_shape_fn(44100, |i| (i as Float * 0.1).sin());
         let decimated = resample(y.view(), 44100, 22050).unwrap();
         assert_eq!(decimated.len(), 22050);
+    }
+
+    #[test]
+    fn test_load_with_tags_flac() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.flac"
+        ));
+        let (y, _sr, tags) = load_with_tags(path, 22050, true, 0.0, 0.0, true).unwrap();
+        assert!(!y.is_empty());
+        let t = tags.expect("tags requested → Some");
+        assert_eq!(t.title.as_deref(), Some("Test Title"));
+        assert_eq!(t.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(t.album.as_deref(), Some("Test Album"));
+        assert_eq!(t.genre.as_deref(), Some("Electronic"));
+        assert_eq!(t.year, Some(2024));
+        assert_eq!(t.track_no, Some(3));
+    }
+
+    #[test]
+    fn test_load_with_tags_mp3_id3() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.mp3"
+        ));
+        let (y, _sr, tags) = load_with_tags(path, 22050, true, 0.0, 0.0, true).unwrap();
+        assert!(!y.is_empty());
+        let t = tags.expect("tags requested → Some");
+        assert_eq!(t.title.as_deref(), Some("Test Title"));
+        assert_eq!(t.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(t.album.as_deref(), Some("Test Album"));
+        assert_eq!(t.genre.as_deref(), Some("Electronic"));
+        assert_eq!(t.year, Some(2024));
+        assert_eq!(t.track_no, Some(3));
+    }
+
+    #[test]
+    fn test_load_without_tags_is_none() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.flac"
+        ));
+        let (_y, _sr, tags) = load_with_tags(path, 22050, true, 0.0, 0.0, false).unwrap();
+        assert!(tags.is_none(), "want_tags=false must not read tags");
+    }
+
+    #[test]
+    fn test_parse_year_and_track() {
+        assert_eq!(parse_year("2024"), Some(2024));
+        assert_eq!(parse_year("2024-05-01"), Some(2024));
+        assert_eq!(parse_year("24"), None);
+        assert_eq!(parse_year(""), None);
+        assert_eq!(parse_leading_u32("3"), Some(3));
+        assert_eq!(parse_leading_u32("3/12"), Some(3));
+        assert_eq!(parse_leading_u32(""), None);
     }
 
     #[test]

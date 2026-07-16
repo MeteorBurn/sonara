@@ -242,7 +242,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `structure`, `embedding`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `structure`, `embedding`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
 ### Structure & energy (opt-in)
 
@@ -351,6 +351,28 @@ is harmonic → low flatness), and the 4–8 Hz modulation energy of the vocal-b
 envelope (the syllabic rate), gating harmonicity and syllabic modulation together
 so sustained pads and percussion score low while modulated harmonic content
 scores high. Treat it as a soft hint.
+
+#### File metadata tags — `features=["tags"]`
+
+Pass through the container/stream metadata (ID3v2, Vorbis comments, …) already
+embedded in the file. Available on `analyze_file`/`analyze_batch` only — a bare
+signal (`analyze_signal`) has no container, so it never carries tags.
+
+```python
+r = sonara.analyze_file("track.mp3", features=["tags"])
+r['tags']
+# {"title": "...", "artist": "...", "album": "...",
+#  "genre": "Electronic", "year": 2024, "track_no": 3}
+```
+
+Keys appear only when the file actually carries that tag: `title`, `artist`,
+`album`, `genre` (strings), `year` and `track_no` (ints). `year` is derived from
+the leading 4 digits of the file's date tag; `track_no` from the leading integer
+of a `"3/12"`-style value. Tags come from **symphonia**-decoded containers
+(FLAC/Vorbis, MP3/AAC ID3v2, MP4, …); **WAV** goes through a separate fast path
+that carries no tags, so `.wav` inputs yield no `tags` values. Note that
+`tags['genre']` is the *file's* metadata genre and is unrelated to the reserved
+top-level `genre` placeholder (a future computed field).
 
 ### Batch analysis
 

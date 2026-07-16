@@ -149,6 +149,23 @@ class TrackAnalysis(dict):
         if "zero_crossing_rate" in self:
             spectral.append(("ZCR", f"{self['zero_crossing_rate']:.3f}"))
 
+        # --- tags ---
+        tags: list[tuple[str, str]] = []
+        if "tags" in self and self["tags"]:
+            t = self["tags"]
+            for key, label in (
+                ("title", "Title"),
+                ("artist", "Artist"),
+                ("album", "Album"),
+                ("genre", "Genre"),
+            ):
+                if key in t:
+                    tags.append((label, str(t[key])))
+            if "year" in t:
+                tags.append(("Year", str(t["year"])))
+            if "track_no" in t:
+                tags.append(("Track", str(t["track_no"])))
+
         # --- structure ---
         structure: list[tuple[str, str]] = []
         if "energy_level" in self:
@@ -169,6 +186,8 @@ class TrackAnalysis(dict):
             ("Beat grid", beatgrid),
             # --- structure ---
             ("Structure", structure),
+            # --- tags ---
+            ("Tags", tags),
         ):
             if not rows:
                 continue

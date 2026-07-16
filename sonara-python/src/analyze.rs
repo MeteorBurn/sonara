@@ -148,6 +148,21 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         d.set_item("fingerprint_version", sonara::fingerprint::FINGERPRINT_VERSION)?;
     }
 
+    // --- tags ---
+    // Opt-in file metadata (features=["tags"], analyze_file/analyze_batch only).
+    // Nested "tags" dict mirroring the provenance pattern; each key present only
+    // when that tag was found in the file.
+    if let Some(ref t) = r.tags {
+        let td = PyDict::new(py);
+        if let Some(ref v) = t.title { td.set_item("title", v.as_str())?; }
+        if let Some(ref v) = t.artist { td.set_item("artist", v.as_str())?; }
+        if let Some(ref v) = t.album { td.set_item("album", v.as_str())?; }
+        if let Some(ref v) = t.genre { td.set_item("genre", v.as_str())?; }
+        if let Some(v) = t.year { td.set_item("year", v)?; }
+        if let Some(v) = t.track_no { td.set_item("track_no", v)?; }
+        d.set_item("tags", td)?;
+    }
+
     Ok(d)
 }
 

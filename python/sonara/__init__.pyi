@@ -236,6 +236,14 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 #   "key_candidates": List[Tuple[str, str, float]]  # top-3 (key, camelot, score); [0] == "key"
 # --- vocalness --- features=["vocalness"]
 #   "vocalness": float             # vocal-presence heuristic in [0, 1] (rough, not a classifier)
+# --- tags --- features=["tags"]  (analyze_file / analyze_batch only)
+#   "tags": Dict  # container/stream metadata read from the file; each key present
+#                 # only when that tag exists. Keys: "title", "artist", "album",
+#                 # "genre" (str), "year", "track_no" (int). Read from
+#                 # symphonia containers (FLAC/Vorbis, MP3/ID3v2, MP4, ...); WAV
+#                 # (hound fast path) carries no tags. Never set by analyze_signal.
+#                 # NOTE: tags["genre"] is the file's metadata genre, distinct
+#                 # from the reserved top-level "genre" placeholder.
 # ============================================================
 # Duplicate detection (acoustic fingerprint) — fingerprint
 # ============================================================

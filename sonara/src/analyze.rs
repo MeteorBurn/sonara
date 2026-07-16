@@ -212,6 +212,10 @@ const OPT_IN_ONLY_FEATURES: &[&str] = &[
     "silence",
     "key_candidates",
     "vocalness",
+    // File metadata passthrough — read by analyze_file/analyze_batch only, never
+    // by analyze_signal. NOT in EXTENDED_FEATURES: tags must not trigger the
+    // extended DSP pass.
+    "tags",
 ];
 // --- similarity ---
 /// Feature names the similarity embedding is assembled from. Requesting
@@ -293,6 +297,7 @@ pub struct AnalysisProvenance {
 }
 
 pub use crate::structure::SegmentEvent;
+pub use crate::core::audio::TrackTags;
 
 /// A chord with its time span, in seconds.
 ///
@@ -462,6 +467,15 @@ pub struct TrackAnalysis {
     /// `crate::similarity::SIMILARITY_VERSION`). `Some` iff `embedding` is `Some`.
     /// Present only when the `"embedding"` feature is explicitly requested.
     pub embedding_version: Option<u32>,
+    // --- tags ---
+    /// Container/stream metadata tags (title, artist, album, genre, year,
+    /// track number) read from the file. `Some` only when the `"tags"` feature
+    /// is requested via `analyze_file`/`analyze_batch`; always `None` for
+    /// `analyze_signal` (no container) and when not requested. WAV inputs yield
+    /// `Some(TrackTags::default())`-style empty fields at most, since the hound
+    /// fast path carries no tags. See [`TrackTags`]. Note: `TrackTags::genre`
+    /// (file metadata) is distinct from the `genre` placeholder field above.
+    pub tags: Option<TrackTags>,
 }
 
 impl TrackAnalysis {
@@ -512,8 +526,14 @@ struct FrameResult {
 
 /// Analyze a track from a file path with the given configuration.
 pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
-    let (y, actual_sr) = audio::load(path, sr, true, 0.0, 0.0)?;
-    analyze_signal(y.view(), actual_sr, config)
+    // Tags are file-only metadata (see `TrackTags`): read them during load when
+    // requested, then post-fill the result. When not requested, `load_with_tags`
+    // does zero extra work — identical to the plain `load` fast path.
+    let want_tags = config.wants("tags");
+    let (y, actual_sr, tags) = audio::load_with_tags(path, sr, true, 0.0, 0.0, want_tags)?;
+    let mut result = analyze_signal(y.view(), actual_sr, config)?;
+    result.tags = tags;
+    Ok(result)
 }
 
 /// Analyze a pre-loaded audio signal with the given configuration.
@@ -1387,6 +1407,9 @@ fn analyze_signal_inner(
         fingerprint,
         // --- similarity ---
         embedding_version: None,
+        // --- tags ---
+        // Populated by analyze_file when requested; analyze_signal has no file.
+        tags: None,
     };
 
     // --- similarity ---
@@ -1544,6 +1567,53 @@ mod tests {
         assert!(result.spectral_bandwidth_mean.is_none());
         assert!(result.mfcc_mean.is_none());
         assert!(result.energy.is_none());
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures"))
+            .join(name)
+    }
+
+    #[test]
+    fn test_analyze_file_tags_populated() {
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(["tags"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_file(&fixture("tagged.flac"), 22050, &config).unwrap();
+        let t = result.tags.expect("tags requested → Some");
+        assert_eq!(t.title.as_deref(), Some("Test Title"));
+        assert_eq!(t.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(t.album.as_deref(), Some("Test Album"));
+        assert_eq!(t.genre.as_deref(), Some("Electronic"));
+        assert_eq!(t.year, Some(2024));
+        assert_eq!(t.track_no, Some(3));
+        // tags must NOT trigger the extended DSP pass.
+        assert!(result.mfcc_mean.is_none(), "tags must not enable extended features");
+        assert!(result.energy.is_none());
+        assert!(result.chroma_mean.is_none());
+        // The computed `genre` placeholder is distinct from the tag genre.
+        assert!(result.genre.is_none());
+    }
+
+    #[test]
+    fn test_analyze_file_default_no_tags() {
+        let result = analyze_file(&fixture("tagged.flac"), 22050, &compact()).unwrap();
+        assert!(result.tags.is_none(), "tags not requested → None");
+    }
+
+    #[test]
+    fn test_analyze_signal_never_has_tags() {
+        let y = sine(440.0, 22050, 2.0);
+        // Even when "tags" is (meaninglessly) requested for a bare signal.
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(["tags"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        assert!(result.tags.is_none(), "analyze_signal has no file → tags None");
     }
 
     #[test]

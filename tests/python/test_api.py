@@ -377,6 +377,36 @@ def _check_chord_events_absent_when_not_requested():
 test("chord_events typed spans (playlist)", _check_chord_events)
 test("chord_events absent in compact", _check_chord_events_absent_when_not_requested)
 
+
+# --- tags --- opt-in file metadata passthrough (analyze_file only)
+import os
+
+_FLAC_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "tagged.flac")
+
+
+def _check_tags_present():
+    r = sonara.analyze_file(_FLAC_FIXTURE, features=["tags"])
+    assert "tags" in r, "features=['tags'] should add a 'tags' sub-dict"
+    t = r["tags"]
+    assert t["title"] == "Test Title", t
+    assert t["artist"] == "Test Artist", t
+    assert t["album"] == "Test Album", t
+    assert t["genre"] == "Electronic", t
+    assert t["year"] == 2024, t
+    assert t["track_no"] == 3, t
+    # tags must not trigger the extended DSP pass.
+    assert "mfcc_mean" not in r, "tags must not enable extended features"
+    assert "energy" not in r
+
+
+def _check_tags_absent_when_not_requested():
+    r = sonara.analyze_file(_FLAC_FIXTURE)  # compact, no tags feature
+    assert "tags" not in r, "tags key should be absent unless features=['tags']"
+
+
+test("tags sub-dict populated (analyze_file)", _check_tags_present)
+test("tags absent without feature", _check_tags_absent_when_not_requested)
+
 # ============================================================
 # Summary
 # ============================================================
