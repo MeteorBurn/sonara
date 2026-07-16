@@ -569,7 +569,34 @@ pub fn analyze_signal(
 /// rest of the batch. This is the robustness contract the Python `analyze_batch`
 /// binding relies on when analyzing large libraries.
 pub fn analyze_batch(paths: &[&Path], sr: u32, config: &AnalysisConfig) -> Vec<Result<TrackAnalysis>> {
-    paths.par_iter().map(|path| analyze_file(path, sr, config)).collect()
+    analyze_batch_with(paths, sr, config, |_, _| {})
+}
+
+/// Like [`analyze_batch`], invoking `on_done(done, total)` after each file
+/// completes (success or failure). `done` counts completions in completion
+/// order — not input order; the returned Vec is input-ordered. The callback
+/// runs on rayon worker threads: keep it cheap and non-blocking.
+pub fn analyze_batch_with<F>(
+    paths: &[&Path],
+    sr: u32,
+    config: &AnalysisConfig,
+    on_done: F,
+) -> Vec<Result<TrackAnalysis>>
+where
+    F: Fn(usize, usize) + Sync,
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let total = paths.len();
+    let done = AtomicUsize::new(0);
+    paths
+        .par_iter()
+        .map(|path| {
+            let r = analyze_file(path, sr, config);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            on_done(n, total);
+            r
+        })
+        .collect()
 }
 
 // ============================================================
@@ -2245,5 +2272,40 @@ mod tests {
         let r = analyze_signal(y.view(), SR, &feature_config(&["vocalness"])).unwrap();
         let v = r.vocalness.unwrap();
         assert!(v >= 0.0 && v <= 1.0 && v.is_finite(), "vocalness {}", v);
+    }
+
+    #[test]
+    fn test_analyze_batch_with_progress() {
+        use std::sync::Mutex;
+        // Mix a real fixture (Ok) with nonexistent paths (Err). Errors still
+        // count as completions, so the callback must fire for every input.
+        let real = fixture("tagged.flac");
+        let paths: Vec<&Path> = vec![
+            real.as_path(),
+            Path::new("/nonexistent/one.flac"),
+            Path::new("/nonexistent/two.flac"),
+        ];
+        let len = paths.len();
+        // Fn + Sync: record (done, total) pairs from the worker threads.
+        let calls: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+        let results = analyze_batch_with(&paths, 22050, &compact(), |done, total| {
+            calls.lock().unwrap().push((done, total));
+        });
+
+        // One result per input, in input order.
+        assert_eq!(results.len(), len);
+        assert!(results[0].is_ok(), "real fixture should analyze");
+        assert!(results[1].is_err(), "nonexistent path should error");
+        assert!(results[2].is_err(), "nonexistent path should error");
+
+        // Callback fired exactly once per input; total constant == len.
+        let mut recorded = calls.into_inner().unwrap();
+        assert_eq!(recorded.len(), len, "callback fires once per file");
+        assert!(recorded.iter().all(|&(_, total)| total == len), "total is constant == len");
+
+        // `done` values are a permutation of 1..=len (completion order varies).
+        let mut dones: Vec<usize> = recorded.drain(..).map(|(d, _)| d).collect();
+        dones.sort_unstable();
+        assert_eq!(dones, (1..=len).collect::<Vec<_>>(), "done values are 1..=len");
     }
 }

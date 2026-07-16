@@ -296,28 +296,20 @@ pub fn py_analyze_batch<'py>(
                     "progress must be callable: progress(done: int, total: int) -> None",
                 ));
             }
-            use rayon::prelude::*;
-            use std::sync::atomic::{AtomicUsize, Ordering};
             // A thread-shareable (`Send`) handle to the callback for the workers.
             let cb_py: Py<PyAny> = cb.unbind();
-            let total = path_refs.len();
-            let done = AtomicUsize::new(0);
-            // Release the GIL around the parallel map; workers re-attach only to
-            // fire the callback. `config`/`path_refs` are plain Rust data.
+            // Release the GIL around the parallel batch; workers re-attach only
+            // to fire the callback. `config`/`path_refs` are plain Rust data.
+            // The core owns the parallel map + completion counter; the closure
+            // just re-attaches to Python and forwards (done, total).
             py.detach(|| {
-                path_refs
-                    .par_iter()
-                    .map(|p| {
-                        let r = rs::analyze_file(p, sr, &config);
-                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Per-file isolation: a raising callback must never abort
-                        // the batch — drop its error (the `Err` carries + clears it).
-                        Python::attach(|py| {
-                            let _ = cb_py.call1(py, (n, total));
-                        });
-                        r
-                    })
-                    .collect()
+                rs::analyze_batch_with(&path_refs, sr, &config, |n, total| {
+                    // Per-file isolation: a raising callback must never abort
+                    // the batch — drop its error (the `Err` carries + clears it).
+                    Python::attach(|py| {
+                        let _ = cb_py.call1(py, (n, total));
+                    });
+                })
             })
         }
     };
