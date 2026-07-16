@@ -2,6 +2,45 @@
 
 All notable changes to sonara are documented in this file.
 
+## [0.2.3] - 2026-07-17
+
+### Validated on real music
+
+The chroma fix was validated on a 100-track random sample from a commercial
+library (seed-pinned, analyzed at both 22050 Hz and native 44.1 kHz): before,
+native-rate key detection collapsed to "F major" on **72/100** tracks with
+near-zero confidence; after, the native histogram matches the healthy 22050
+spread (top key ≤ 16%), cross-rate key agreement on a 15-track spot set went
+from 4/15 to **13/15**, and native F-major dropped to 1/15. A 400-track tonal
+batch confirms chords/dissonance (separate HPCP path) unaffected: 400/400
+analyzed, all sanity checks pass, flat key distribution (top key 9%).
+Deterministic multi-rate regression tests (C-major cadence at
+22050/44100/48000) now pin the behavior.
+
+### Fixed
+
+- **Chroma filterbank corrupted all chroma-derived output at sample rates
+  above 22050** (key, key_candidates, key_camelot, valence, mood, tonnetz,
+  embedding dims 13-25). Two librosa-parity gaps: the missing octave-domain
+  Gaussian weighting let broadband energy above the 22050 Nyquist flood the
+  chroma sum, and linear two-class bin assignment concentrated wide
+  low-frequency bins arbitrarily. Both fixed to librosa 0.10 semantics.
+  Chroma values change at every rate: **`ANALYSIS_SCHEMA_VERSION` → 2** and
+  **`SIMILARITY_VERSION` → 2** (persisted analyses and stored embeddings
+  should be re-generated). Known cost: extended-path (playlist/full) analysis
+  +8-13%; the compact default path is unaffected.
+
+### Added
+
+- **Bring-your-own genre model** — `analyze_*(..., genre_model=<path>)` runs a
+  user-trained classifier (JSON: softmax/ReLU layers over the versioned 48-dim
+  similarity embedding) in pure Rust, populating `genre` + `genre_confidence`.
+  Training is numpy-only: `sonara.genre.train(X, y)` → `.save(path)` — no
+  PyTorch/ONNX/sklearn. Models carry `embedding_version` and fail fast on
+  mismatch. sonara ships no model; the field stays `None` without one.
+- **Core-side batch progress** — `analyze_batch_with(paths, sr, config,
+  on_done)` for Rust consumers; the Python `progress=` callback now wraps it.
+
 ## [0.2.2] - 2026-07-16
 
 ### Added
