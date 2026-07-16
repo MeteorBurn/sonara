@@ -34,7 +34,7 @@ def analyze_signal(y, *, sr=22050, mode="compact", features=None, bpm_min=None, 
     ))
 
 
-def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None):
+def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, progress=None):
     """Analyze a list of audio files in parallel; returns a `list[TrackAnalysis]`.
 
     Errors are isolated per file: the returned list has exactly one entry per
@@ -44,11 +44,19 @@ def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=Non
     ``path``, ``error`` (human-readable, includes container/codec and cause) and
     ``error_kind`` (a short stable category such as ``"decode"``, ``"io"`` or
     ``"unsupported_format"``). Use ``result.failed`` to distinguish them.
+
+    ``progress``, if given, must be callable and is invoked as
+    ``progress(done, total)`` after **each** file finishes (success or failure).
+    ``done`` counts completions in *completion order* (not input order) and
+    ``total == len(paths)``. A raising/broken callback never aborts the batch —
+    its exception is swallowed (per-file isolation is a contract). Passing
+    ``progress=None`` (the default) runs the original zero-overhead path.
     """
     return [
         TrackAnalysis(r)
         for r in _analyze_batch(
             paths, sr=sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
+            progress=progress,
         )
     ]
 

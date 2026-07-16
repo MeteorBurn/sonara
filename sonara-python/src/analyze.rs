@@ -229,30 +229,15 @@ fn error_to_dict<'py>(
     Ok(d)
 }
 
-/// Analyze many files in parallel, returning one entry per input path in order.
+/// Turn per-file analysis `Result`s into the input-ordered list of dicts.
 ///
-/// Unlike `analyze_file`, this never raises on a per-file decode/IO failure.
-/// Every input path yields exactly one dict, in input order:
-/// - success → the usual feature dict (unchanged);
-/// - failure → `{ "path", "error", "error_kind" }`.
-///
-/// A single bad file therefore cannot abort analysis of a large library.
-/// `ValueError` is still raised only for whole-call configuration errors
-/// (e.g. an invalid `mode`), which apply to every path.
-#[pyfunction]
-#[pyo3(name = "analyze_batch", signature = (paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None))]
-pub fn py_analyze_batch<'py>(
+/// Shared by both the plain and progress-callback code paths so the mapping
+/// (success → feature dict + `"path"`; failure → error dict) lives in one place.
+fn batch_results_to_dicts<'py>(
     py: Python<'py>,
-    paths: Vec<String>,
-    sr: u32,
-    mode: &str,
-    features: Option<Vec<String>>,
-    bpm_min: Option<f32>,
-    bpm_max: Option<f32>,
+    results: Vec<Result<rs::TrackAnalysis, sonara::SonaraError>>,
+    paths: &[String],
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let config = parse_config(mode, features, bpm_min, bpm_max)?;
-    let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
-    let results = rs::analyze_batch(&path_refs, sr, &config);
     results
         .into_iter()
         .zip(paths.iter())
@@ -267,6 +252,77 @@ pub fn py_analyze_batch<'py>(
             Err(err) => error_to_dict(py, path, &err),
         })
         .collect()
+}
+
+/// Analyze many files in parallel, returning one entry per input path in order.
+///
+/// Unlike `analyze_file`, this never raises on a per-file decode/IO failure.
+/// Every input path yields exactly one dict, in input order:
+/// - success → the usual feature dict (unchanged);
+/// - failure → `{ "path", "error", "error_kind" }`.
+///
+/// A single bad file therefore cannot abort analysis of a large library.
+/// `ValueError` is still raised only for whole-call configuration errors
+/// (e.g. an invalid `mode`), which apply to every path.
+///
+/// `progress`, if given, must be callable and is invoked as `progress(done,
+/// total)` after **each** file finishes (success or failure), where `done`
+/// counts completions in completion order (not input order) and `total ==
+/// len(paths)`. A raising/broken callback never aborts the batch — its error is
+/// swallowed (per-file isolation). `progress=None` (the default) takes exactly
+/// the original code path with zero overhead.
+#[pyfunction]
+#[pyo3(name = "analyze_batch", signature = (paths, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, progress=None))]
+pub fn py_analyze_batch<'py>(
+    py: Python<'py>,
+    paths: Vec<String>,
+    sr: u32,
+    mode: &str,
+    features: Option<Vec<String>>,
+    bpm_min: Option<f32>,
+    bpm_max: Option<f32>,
+    progress: Option<Bound<'py, PyAny>>,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let config = parse_config(mode, features, bpm_min, bpm_max)?;
+    let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
+
+    let results = match progress {
+        // Fast path: no callback → exactly the original code, zero overhead.
+        None => rs::analyze_batch(&path_refs, sr, &config),
+        Some(cb) => {
+            // Fail fast on a non-callable so a typo can't silently no-op.
+            if !cb.is_callable() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "progress must be callable: progress(done: int, total: int) -> None",
+                ));
+            }
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            // A thread-shareable (`Send`) handle to the callback for the workers.
+            let cb_py: Py<PyAny> = cb.unbind();
+            let total = path_refs.len();
+            let done = AtomicUsize::new(0);
+            // Release the GIL around the parallel map; workers re-attach only to
+            // fire the callback. `config`/`path_refs` are plain Rust data.
+            py.detach(|| {
+                path_refs
+                    .par_iter()
+                    .map(|p| {
+                        let r = rs::analyze_file(p, sr, &config);
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Per-file isolation: a raising callback must never abort
+                        // the batch — drop its error (the `Err` carries + clears it).
+                        Python::attach(|py| {
+                            let _ = cb_py.call1(py, (n, total));
+                        });
+                        r
+                    })
+                    .collect()
+            })
+        }
+    };
+
+    batch_results_to_dicts(py, results, &paths)
 }
 
 // --- fingerprint ---

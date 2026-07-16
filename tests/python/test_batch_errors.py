@@ -93,6 +93,46 @@ def main():
 
     print(f"\n  error_kinds: "
           f"{[r.get('error_kind') for r in results]}")
+
+    # 5. Progress callback: fires once per file (completion order), reporting
+    #    a monotonic `done` count and a constant `total == len(paths)`.
+    calls = []
+    prog_results = sonara.analyze_batch(
+        paths, mode="compact",
+        progress=lambda d, t: calls.append((d, t)),
+    )
+    check("progress called once per file", len(calls) == len(paths))
+    check("progress total always == len(paths)",
+          all(t == len(paths) for _, t in calls))
+    check("progress done reports each completion exactly once",
+          sorted(d for d, _ in calls) == list(range(1, len(paths) + 1)))
+    check("progress run returns one entry per path", len(prog_results) == len(paths))
+    check("progress run entries all carry 'path'",
+          all(r.get("path") for r in prog_results))
+
+    # 6. A raising callback must never abort the batch nor propagate.
+    def boom(d, t):
+        raise ZeroDivisionError("callback intentionally broken")
+
+    try:
+        raising_results = sonara.analyze_batch(paths, mode="compact", progress=boom)
+        check("raising callback does not propagate", True)
+        check("raising callback still returns all entries",
+              len(raising_results) == len(paths))
+    except Exception as e:  # noqa: BLE001
+        check("raising callback does not propagate", False)
+        print(f"    unexpected exception: {e!r}")
+
+    # 7. A non-callable progress fails fast with TypeError.
+    try:
+        sonara.analyze_batch(paths, mode="compact", progress=42)
+        check("non-callable progress raises TypeError", False)
+    except TypeError:
+        check("non-callable progress raises TypeError", True)
+    except Exception as e:  # noqa: BLE001
+        check("non-callable progress raises TypeError", False)
+        print(f"    wrong exception type: {e!r}")
+
     print(f"\n{'='*60}")
     print(f"  RESULTS: {passed} PASSED, {failed} FAILED")
     print(f"{'='*60}")

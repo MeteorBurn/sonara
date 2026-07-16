@@ -1,6 +1,6 @@
 """Type stubs for sonara — high-performance audio analysis."""
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -194,11 +194,14 @@ AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[s
 #                             # label "N" = no chord detected in that span
 def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> AnalysisResult: ...
 def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> AnalysisResult: ...
-def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> List[AnalysisResult]: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, progress: Optional[Callable[[int, int], None]] = None) -> List[AnalysisResult]: ...
 # analyze_batch never raises on a per-file decode/IO error. Each input path yields
 # exactly one entry in input order, and every entry carries its input `path`.
 # A failed file's entry has `path`, `error`, and `error_kind` (e.g. "decode",
 # "io", "unsupported_format") instead of feature fields.
+# `progress`, if given, is called as progress(done, total) after each completed
+# file — `done` counts completions in COMPLETION order (not input order),
+# `total == len(paths)`. Callback exceptions are ignored (never abort the batch).
 
 # --- beat grid ---
 # Opt-in via features=["beatgrid"]. When requested, the analyze_* result dict
@@ -265,7 +268,7 @@ def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
 # analysis dicts containing one. A score above ~0.30 means "same recording".
 def analyze_file(path: str, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
 def analyze_signal(y: AudioArray, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
-def analyze_batch(paths: List[str], *, sr: int = 22050) -> List[Dict[str, Union[float, int, List[int]]]]: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050, progress: Optional[Callable[[int, int], None]] = None) -> List[Dict[str, Union[float, int, List[int]]]]: ...
 
 # ============================================================
 # Similarity & embeddings

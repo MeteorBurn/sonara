@@ -411,7 +411,14 @@ import sonara
 from pathlib import Path
 
 files = [str(p) for p in Path("~/Music").rglob("*.mp3")]
-results = sonara.analyze_batch(files, mode="playlist")
+
+# Optional progress callback: called as progress(done, total) after each file
+# finishes (success or failure). `done` counts completions in completion order
+# (not input order); a raising callback never aborts the batch.
+results = sonara.analyze_batch(
+    files, mode="playlist",
+    progress=lambda done, total: print(f"\r{done}/{total}", end="", flush=True),
+)
 
 for r in results:
     if r.failed:            # a file that could not be decoded/read
