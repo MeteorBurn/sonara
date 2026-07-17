@@ -2,6 +2,46 @@
 
 All notable changes to sonara are documented in this file.
 
+## [0.2.4] - 2026-07-17
+
+### Validated on real music
+
+All changes validated on labeled samples from a commercial library.
+**Vocalness v2** (62-track probe set: 21 harsh-vocal metal, 23 clean-vocal
+pop, 18 instrumental): the v1 heuristic was inverted on real music (pooled
+AUC 0.29 — screamed metal scored lowest, solo sax/flute high); v2 scores
+monotone harsh (0.92 mean) > clean (0.57) > instrumental (0.23), AUC 0.92;
+acceptance tracks: Slipknot/Slayer 1.00, Kenny G/Galway 0.00. Known
+ambiguous cases documented (sparse voice+piano ballads, voice-mimicking solo
+violin). **Acousticness/danceability** (199-track distributions + 28 genre
+anchors): electronic anchors now 0.11 mean acousticness (was 0.45), acoustic
+anchors 0.71; danceability spreads to p5 0.20 / p95 0.90 (was p5 0.69).
+**bpm_confidence** separates rhythmic from ambient/rubato material at
+d=+1.07 (implausible ambient tempi score ~0.39, steady dance 0.83-0.90).
+
+### Fixed
+
+- **`vocalness`/`instrumentalness` inverted on real music.** v2 derives
+  vocal presence from mid-band spectral contrast (voice and screams fill the
+  0.8-5.6 kHz spectral valleys; clean solo instruments leave them deep)
+  instead of tonality+modulation. Both features now require the extended
+  pass. `vocal.rs` remains as a documented legacy pitched-melodic-content
+  heuristic. **`ANALYSIS_SCHEMA_VERSION` → 3.**
+- **`acousticness` and `danceability` were compressed rankers, not absolute
+  scales** (floors of ~0.37 / ~0.39 baked into their normalizations).
+  Recalibrated; rankings preserved (Spearman 0.97 / 1.00). Consumers with
+  pre-0.2.4 cutoffs must re-derive them.
+
+### Added
+
+- **`bpm_confidence`** — always-present [0,1] trust signal for the tempo
+  estimate (dominant ACF-peak strength + bpm/beat-rate agreement + onset
+  density). Low values flag ambient/rubato material where BPM is unreliable.
+- **`tags.original_year`** — original release year from ID3v2.4 `TDOR` /
+  v2.3 `TORY` / Vorbis `ORIGINALDATE` (+ tolerant `TXXX:originalyear`-style
+  raw keys). `tags.year` now reflects only the file/edition date — on
+  reissues prefer `original_year` for era reasoning.
+
 ## [0.2.3] - 2026-07-17
 
 ### Validated on real music
