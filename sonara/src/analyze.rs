@@ -211,16 +211,19 @@ impl AnalysisConfig {
                 "bandwidth", "rolloff", "flatness", "contrast", "mfcc", "chroma",
                 "chords", "dissonance",
                 "energy", "danceability", "key", "valence", "acousticness",
-                // mood needs chroma/key (extended pass). instrumentalness derives
-                // from the always-computed mel_spec (via vocalness) and is NOT
-                // listed here — like silence/vocalness it needs no extended pass.
+                // mood needs chroma/key (extended pass).
                 "mood",
                 // --- structure ---
                 "structure",
                 // key_candidates needs the chroma filterbank (extended pass).
-                // silence + vocalness derive from always-computed RMS / mel data
-                // and do NOT require the extended pass.
+                // silence derives from the always-computed RMS frames and does
+                // NOT require the extended pass.
                 "key_candidates",
+                // vocalness/instrumentalness (heuristic v2, 0.2.4) derive from
+                // the mid-band spectral-contrast + flatness means, both computed
+                // only in the extended pass — so they now require it (silence,
+                // by contrast, still does not).
+                "vocalness", "instrumentalness",
                 // --- similarity ---: embedding needs the playlist-level features
                 "embedding",
             ];
@@ -244,8 +247,9 @@ const OPT_IN_ONLY_FEATURES: &[&str] = &[
     "fingerprint",
     "silence",
     "key_candidates",
+    // vocalness/instrumentalness: heuristic v2 (not ML), contrast-based.
     "vocalness",
-    // Heuristic v1 (not ML): mood_* affinities and instrumentalness.
+    // Heuristic v1 (not ML): mood_* affinities.
     "mood",
     "instrumentalness",
     // File metadata passthrough — read by analyze_file/analyze_batch only, never
@@ -273,7 +277,11 @@ const EMBEDDING_DEPS: &[&str] = &[
 /// v2 (2026-07-17): chroma filterbank gained librosa-parity octave-domain
 /// Gaussian weighting, changing all chroma-derived fields (chroma, key,
 /// tonal features) at every sample rate — most visibly at sr > 22050.
-pub const ANALYSIS_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 (2026-07-17): `vocalness`/`instrumentalness` re-derived from mid-band
+/// spectral contrast (heuristic v2) instead of the mel-based v1 heuristic —
+/// different semantics and values, and they now require the extended pass.
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 3;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
 /// fields on [`TrackAnalysis`] (`beats`, `onset_frames`, `downbeats`) convert
@@ -455,7 +463,9 @@ pub struct TrackAnalysis {
     pub mood_relaxed: Option<Float>,
     pub mood_sad: Option<Float>,
     /// Inverse of the vocalness heuristic (`1 - vocalness`, clamped `[0, 1]`),
-    /// **heuristic v1 (not ML)**. Opt-in via `features=["instrumentalness"]`.
+    /// **heuristic v2 (not ML)**. Opt-in via `features=["instrumentalness"]`;
+    /// requires the extended pass (shares `vocalness`'s contrast/flatness inputs).
+    /// Semantics changed in 0.2.4 — see [`vocalness`](Self::vocalness).
     pub instrumentalness: Option<Float>,
     /// Predicted genre label — populated only when a user-supplied genre model
     /// is set (`AnalysisConfig::genre_model`); `None` otherwise. sonara ships no
@@ -502,8 +512,15 @@ pub struct TrackAnalysis {
     pub key_candidates: Option<Vec<(String, String, Float)>>,
 
     // --- vocalness ---
-    /// Vocal-presence heuristic in `[0, 1]` (rough indicator, not a classifier).
-    /// Opt-in via `features=["vocalness"]`. `None` unless requested.
+    /// Vocal-presence heuristic in `[0, 1]` (**heuristic v2**, not a classifier).
+    /// Measures the prominence of vocal/broadband energy filling the ~0.8-5.6 kHz
+    /// spectral valleys (low mid-band peak-to-valley contrast → high vocalness):
+    /// it rises harsh > clean > instrumental (screamed metal ≈ 1.0, clean singing
+    /// mid, solo sax/flute/violin low). Semantics changed in 0.2.4 (was a mel-based
+    /// tonal+syllabic heuristic that inverted on distorted vocals). Known ambiguous
+    /// cases: sparse voice+piano ballads read mid-low; a voice-mimicking solo violin
+    /// reads borderline. Opt-in via `features=["vocalness"]`; requires the extended
+    /// pass (mid-band spectral contrast). `None` unless requested.
     pub vocalness: Option<Float>,
     // --- fingerprint ---
     /// Acoustic fingerprint (raw sub-fingerprint sequence, ~8 `u32`/sec) for
@@ -1428,13 +1445,43 @@ fn analyze_signal_inner(
         None
     };
 
-    // --- vocalness / instrumentalness ---
-    // Both derive from the always-computed mel spectrogram (no extra FFT work).
-    // instrumentalness (heuristic v1) is the inverse of the vocalness heuristic,
-    // so we compute vocalness whenever either is wanted, but only emit the
-    // `vocalness` field when "vocalness" itself was requested.
+    // --- vocalness / instrumentalness (heuristic v2, 0.2.4) ---
+    // Mid-band spectral contrast, from the extended pass. Voice and (especially)
+    // screamed/broadband vocals fill the ~0.8-5.6 kHz spectral valleys → LOW
+    // peak-to-valley contrast → HIGH vocalness; clean solo pitched instruments
+    // leave deep valleys → HIGH contrast → LOW vocalness. A lift-only flatness
+    // term nudges harsh/broadband material further up. instrumentalness (still
+    // the inverse) shares the value; we compute it whenever either is wanted and
+    // split the emission. Requires spectral_contrast_mean + spectral_flatness_mean
+    // (extended pass) — hence both are in EXTENDED_FEATURES. See `crate::vocal`
+    // for the superseded v1 mel-based heuristic.
     let vocalness_val = if config.wants("vocalness") || config.wants("instrumentalness") {
-        Some(crate::vocal::vocalness(mel_spec.view(), sr, hop_length))
+        // Peak-to-valley contrast at C_HI reads as fully instrumental, at C_LO as
+        // fully vocal. Bands 2..=4 cover ~0.8-5.6 kHz (geometric edges over
+        // [200, sr/2], see the contrast-band setup above).
+        const C_HI: Float = 2.05;
+        const C_LO: Float = 1.35;
+        // Defensive: without contrast (theoretical — the extended pass always
+        // computes it when these are wanted) emit no vocalness rather than a
+        // wrong one.
+        spectral_contrast_mean.as_ref().and_then(|c| {
+            if c.len() < 5 {
+                return None;
+            }
+            // Degenerate guard: on (near-)silence every band floors to the same
+            // noise value, so mid-band contrast collapses to ~0 and the formula
+            // below would read it as maximally vocal. Silence carries no vocal
+            // energy → report 0.0 (instrumentalness then 1.0), not a wrong high.
+            if rms_mean < 1e-5 {
+                return Some(0.0);
+            }
+            let c_mid = (c[2] + c[3] + c[4]) / 3.0;
+            let v_contrast = ((C_HI - c_mid) / (C_HI - C_LO)).clamp(0.0, 1.0);
+            // Lift-only harsh/broadband boost from spectral flatness.
+            let flat = spectral_flatness_mean.unwrap_or(0.0);
+            let lift = 0.15 * ((flat - 0.02) / 0.05).clamp(0.0, 1.0);
+            Some((v_contrast + lift).min(1.0))
+        })
     } else {
         None
     };
@@ -1871,7 +1918,7 @@ mod tests {
     #[test]
     fn test_analysis_schema_version_pinned() {
         // Bump deliberately (with a changelog note), never accidentally.
-        assert_eq!(ANALYSIS_SCHEMA_VERSION, 2);
+        assert_eq!(ANALYSIS_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -2334,8 +2381,73 @@ mod tests {
     fn test_vocalness_pipeline_in_range() {
         let y = sine(440.0, SR, 3.0);
         let r = analyze_signal(y.view(), SR, &feature_config(&["vocalness"])).unwrap();
-        let v = r.vocalness.unwrap();
+        // vocalness now requires the extended pass (mid-band spectral contrast);
+        // requesting it alone must trigger that pass and yield Some in [0, 1].
+        // This Some doubles as the proof the extended pass ran.
+        let v = r.vocalness.expect("vocalness must be Some (extended pass runs for it)");
         assert!(v >= 0.0 && v <= 1.0 && v.is_finite(), "vocalness {}", v);
+    }
+
+    #[test]
+    fn test_vocalness_requesting_triggers_extended() {
+        // features=["vocalness"] alone must flip needs_extended() on (v2 is
+        // contrast-based). A side-effect of the extended pass is that
+        // spectral_flatness_mean gets computed — assert it's Some, which proves
+        // the pass ran solely from requesting vocalness.
+        let cfg = feature_config(&["vocalness"]);
+        assert!(cfg.needs_extended(), "vocalness must require the extended pass");
+        let y = sine(440.0, SR, 3.0);
+        let r = analyze_signal(y.view(), SR, &cfg).unwrap();
+        assert!(
+            r.spectral_flatness_mean.is_some(),
+            "extended pass (flatness) must have run when vocalness requested"
+        );
+    }
+
+    #[test]
+    fn test_vocalness_broadband_high_tonal_low() {
+        // v2 semantics: broadband/flat content fills the mid-band spectral valleys
+        // → LOW contrast → HIGH vocalness; harmonically rich tonal content leaves
+        // deep valleys → HIGH contrast → LOW vocalness.
+        //
+        // A pure sine is degenerate for spectral contrast (a single line has no
+        // valley structure), so we use a richly harmonic sawtooth-like tone for the
+        // "tonal/instrumental" pole — many sharp harmonic peaks over quiet valleys,
+        // exactly the deep-valley case the contrast score is built to catch — and
+        // white noise for the "broadband/vocal-like" pole. This pair reliably
+        // demonstrates the ordering; see the acceptance means in the plan.
+        let sr = SR;
+        let dur = 4.0;
+        let n = (sr as Float * dur) as usize;
+
+        // White noise: flat spectrum, shallow valleys → low contrast → high vocalness.
+        let mut noise = Array1::<Float>::zeros(n);
+        let mut state: u32 = 0x1234_5678;
+        for s in noise.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *s = (state as Float / u32::MAX as Float) * 2.0 - 1.0;
+        }
+        let rn = analyze_signal(noise.view(), sr, &feature_config(&["vocalness"])).unwrap();
+        let v_noise = rn.vocalness.unwrap();
+
+        // Harmonic-rich tone: many sharp partials with deep valleys between →
+        // high contrast → low vocalness.
+        let mut tone = Array1::<Float>::zeros(n);
+        let f0 = 220.0_f32;
+        for (i, s) in tone.iter_mut().enumerate() {
+            let t = i as Float / sr as Float;
+            let mut acc = 0.0;
+            for h in 1..=20 {
+                acc += (1.0 / h as Float) * (2.0 * PI * f0 * h as Float * t).sin();
+            }
+            *s = 0.3 * acc;
+        }
+        let rt = analyze_signal(tone.view(), sr, &feature_config(&["vocalness"])).unwrap();
+        let v_tone = rt.vocalness.unwrap();
+
+        assert!(v_noise > v_tone, "broadband {v_noise} should out-score tonal {v_tone}");
+        assert!(v_noise > 0.6, "broadband vocalness {v_noise} should be high");
+        assert!(v_tone < 0.5, "harmonic-tone vocalness {v_tone} should be low");
     }
 
     #[test]

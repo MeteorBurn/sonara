@@ -338,19 +338,27 @@ and in descending order; `camelot` is the Camelot-wheel code for harmonic mixing
 
 #### Vocal presence — `features=["vocalness"]`
 
-A single **heuristic** score in `[0, 1]` indicating how vocal-like the vocal band
-(~200–4000 Hz) looks. This is a rough indicator, **not** a trained classifier.
+A single **heuristic v2** score in `[0, 1]` for the prominence of vocal/broadband
+energy — **changed semantics in 0.2.4** (the old v1 heuristic inverted on real
+music, scoring distorted vocals low and solo instruments high). This is a rough
+indicator, **not** a trained classifier.
 
 ```python
 r = sonara.analyze_file("track.mp3", features=["vocalness"])
 r['vocalness']   # e.g. 0.72
 ```
 
-It combines the vocal-band energy ratio, spectral flatness there (voiced content
-is harmonic → low flatness), and the 4–8 Hz modulation energy of the vocal-band
-envelope (the syllabic rate), gating harmonicity and syllabic modulation together
-so sustained pads and percussion score low while modulated harmonic content
-scores high. Treat it as a soft hint.
+It measures how much energy fills the ~0.8–5.6 kHz **spectral valleys** (low
+mid-band peak-to-valley contrast → high vocalness): voice and broadband/screamed
+vocals fill the valleys, while clean solo pitched instruments leave them deep. It
+therefore rises **harsh > clean > instrumental** (screamed metal ≈ 1.0, clean
+singing mid, solo sax/flute/violin low). Known ambiguous cases: sparse
+voice+piano ballads read mid-low, and a voice-mimicking solo violin reads
+borderline. Treat it as a soft hint.
+
+For higher precision, train a small model over the similarity embedding on your
+own labeled library — the same **socket** used for [genre](#bring-your-own-genre-model)
+works for a vocal/instrumental classifier.
 
 #### Mood — `features=["mood"]`
 
@@ -372,8 +380,9 @@ r['mood_happy'], r['mood_aggressive'], r['mood_relaxed'], r['mood_sad']
 
 A single **heuristic** score in `[0, 1]`, the inverse of the vocalness heuristic
 (`1 - vocalness`, clamped): higher means less vocal-like / more instrumental.
-**Heuristic v1, not an ML classifier** — a soft hint, not a trained
-speech/vocal detector.
+**Heuristic v2, not an ML classifier** — **changed semantics in 0.2.4** (now
+contrast-based, tracking `vocalness`); a soft hint, not a trained speech/vocal
+detector.
 
 ```python
 r = sonara.analyze_file("track.mp3", features=["instrumentalness"])
@@ -749,7 +758,7 @@ sonara/src/
   structure.rs    — Energy curve + novelty segmentation (Foote), intro/outro
   similarity.rs   — 48-dim similarity embedding + calibrated distance
   fingerprint.rs  — Gain-invariant acoustic fingerprint for duplicate detection
-  vocal.rs        — Vocal-presence heuristic (vocalness)
+  vocal.rs        — Legacy v1 pitched-melodic heuristic (vocalness now contrast-based in analyze.rs)
   sequence.rs     — DTW, RQA, Viterbi, transition matrices
   core/
     audio.rs      — Audio I/O, resampling, fast 2:1 decimation

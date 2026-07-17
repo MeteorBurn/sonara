@@ -238,7 +238,9 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 # --- key candidates --- features=["key_candidates"]
 #   "key_candidates": List[Tuple[str, str, float]]  # top-3 (key, camelot, score); [0] == "key"
 # --- vocalness --- features=["vocalness"]
-#   "vocalness": float             # vocal-presence heuristic in [0, 1] (rough, not a classifier)
+#   "vocalness": float             # heuristic v2 in [0, 1] (rough, not a classifier); changed semantics in 0.2.4.
+#                                  # Prominence of vocal/broadband energy filling the ~0.8-5.6 kHz spectral
+#                                  # valleys; rises harsh > clean > instrumental.
 # --- mood --- features=["mood"]
 #   "mood_happy": float            # heuristic v1, not an ML classifier — in [0, 1]
 #   "mood_aggressive": float       # heuristic v1, not an ML classifier — in [0, 1]
@@ -246,7 +248,7 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 #   "mood_sad": float              # heuristic v1, not an ML classifier — in [0, 1]
 #                                  # All four populate together; correlated but not summing to 1.
 # --- instrumentalness --- features=["instrumentalness"]
-#   "instrumentalness": float      # heuristic v1, not an ML classifier — 1 - vocalness, in [0, 1]
+#   "instrumentalness": float      # heuristic v2, not an ML classifier — 1 - vocalness, in [0, 1]; changed semantics in 0.2.4.
 # --- tags --- features=["tags"]  (analyze_file / analyze_batch only)
 #   "tags": Dict  # container/stream metadata read from the file; each key present
 #                 # only when that tag exists. Keys: "title", "artist", "album",

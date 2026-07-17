@@ -1,10 +1,24 @@
-//! Vocal presence heuristic (`vocalness`).
+//! Legacy pitched-melodic-content heuristic (`vocalness` v1).
 //!
-//! This is an **opt-in, rough indicator** — not a trained classifier. It scores
-//! how "vocal-like" a track's vocal band looks, on a 0.0 – 1.0 scale, using only
-//! features that are cheap to derive from the mel spectrogram already computed by
-//! the analysis pipeline (no extra FFT work).
+//! **Superseded.** This module measures *tonal + syllabic modulation* — NOT
+//! vocal presence. It inverts on real music: distorted/screamed vocals are
+//! broadband (they fail the tonal gate and score LOW) while clean solo pitched
+//! instruments (sax, flute, violin) pass both gates and score HIGH. On a labeled
+//! research set its AUC(vocal>instrumental) was 0.289 — worse than chance.
 //!
+//! The `TrackAnalysis::vocalness` field no longer uses this function. As of 0.2.4
+//! it is derived from **mid-band spectral contrast** (voice/broadband energy fills
+//! the ~0.8-5.6 kHz spectral valleys → low contrast → high vocalness), which
+//! orders harsh > clean > instrumental correctly (AUC ≈ 0.92). See
+//! `crate::analyze` for the current implementation.
+//!
+//! This function is retained only because its public signature
+//! (`vocalness(mel_spec, sr, hop)`) may have external callers; its unit tests
+//! verify what it actually computes (tonal+syllabic modulation), which is still
+//! correct for that narrower quantity. Do not treat its output as vocal presence.
+//!
+//! ---
+//! *(v1 mechanism, for reference.)*
 //! Human singing/speech in the ~200–4000 Hz band is (a) harmonic — so the vocal
 //! band is *tonal* (low spectral flatness) — and (b) modulated at the syllabic
 //! rate (~4–8 Hz). Sustained pads are tonal but not syllabically modulated;
@@ -68,7 +82,9 @@ const DEPTH_LO: Float = 0.05;
 /// typically modulates the vocal-band envelope by well over 25%.
 const DEPTH_HI: Float = 0.25;
 
-/// Compute the `vocalness` heuristic (0.0 – 1.0) from a mel power spectrogram.
+/// Compute the legacy v1 `vocalness` heuristic (0.0 – 1.0) from a mel power
+/// spectrogram. **Not vocal presence** — see the module docs; superseded by the
+/// contrast-based `TrackAnalysis::vocalness` field in 0.2.4.
 ///
 /// `mel_spec` is `(n_mels, n_frames)` mel-band **power**, `sr` the sample rate,
 /// and `hop_length` the STFT hop used to build it (needed to map the envelope's

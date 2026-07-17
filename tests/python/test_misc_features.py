@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the opt-in extras: silence offsets, key candidates, vocalness,
-mood (heuristic v1), instrumentalness.
+"""Tests for the opt-in extras: silence offsets, key candidates, vocalness
+(heuristic v2, contrast-based, changed semantics in 0.2.4), mood (heuristic v1),
+instrumentalness.
 
 These features are opt-in only (never enabled by any mode) and must appear in
 the result dict only when requested via `features=[...]`. Runs as a standalone
@@ -143,7 +144,7 @@ test("key_candidates[0] camelot valid / matches key_camelot", test_key_candidate
 
 
 # ------------------------------------------------------------
-# Vocalness
+# Vocalness (heuristic v2, contrast-based; changed semantics in 0.2.4)
 # ------------------------------------------------------------
 
 def test_vocalness_present_and_in_range():
@@ -184,7 +185,7 @@ test("mood present (all four) + in [0,1] + no key/valence leak", test_mood_prese
 
 
 # ------------------------------------------------------------
-# Instrumentalness (heuristic v1: 1 - vocalness)
+# Instrumentalness (heuristic v2: 1 - vocalness)
 # ------------------------------------------------------------
 
 def test_instrumentalness_present_and_inverse():
