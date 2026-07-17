@@ -224,6 +224,34 @@ test("opt-ins are independent (each alone)", test_independent_optins)
 
 
 # ------------------------------------------------------------
+# Always-present bpm_confidence (0.2.4) + recalibrated perceptual fields
+# ------------------------------------------------------------
+
+def test_bpm_confidence_always_present():
+    y = a_minor_triad()
+    for mode in ("compact", "playlist", "full"):
+        r = sonara.analyze_signal(y, sr=SR, mode=mode)
+        assert "bpm_confidence" in r, f"bpm_confidence missing in {mode}"
+        bc = r["bpm_confidence"]
+        assert isinstance(bc, float) and 0.0 <= bc <= 1.0, \
+            f"bpm_confidence {bc} out of [0,1] in {mode}"
+
+
+def test_acousticness_danceability_present_and_bounded():
+    # 0.2.4 recalibrated the absolute scales; still present + in [0, 1].
+    y = a_minor_triad()
+    r = sonara.analyze_signal(y, sr=SR, mode="playlist")
+    for k in ("acousticness", "danceability"):
+        assert k in r, f"{k} missing in playlist mode"
+        assert 0.0 <= r[k] <= 1.0, f"{k} {r[k]} out of [0,1]"
+
+
+test("bpm_confidence present + [0,1] in every mode", test_bpm_confidence_always_present)
+test("acousticness/danceability present + [0,1] (0.2.4 scales)",
+     test_acousticness_danceability_present_and_bounded)
+
+
+# ------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------
 

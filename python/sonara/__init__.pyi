@@ -174,6 +174,16 @@ AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[s
 # Result dicts include string fields such as "key" ("A minor"), "key_camelot"
 # (Camelot wheel code, e.g. "8A"), "time_signature", and "predominant_chord".
 #
+# Every result dict (all modes) carries "bpm_confidence": float in [0, 1] — a
+# trust signal for the reported "bpm" (dominant tempo-peak strength + beat-rate
+# agreement + onset density), high (>0.7) on steady percussive music, low
+# (<0.45) on ambient/rubato/sparse material. A trust signal, not a probability.
+#
+# Recalibrated in 0.2.4 (schema v3): "acousticness" (absolute scale; electronic
+# < 0.3, acoustic > 0.6 on real music) and "danceability" (spread across [0, 1]).
+# Orderings are largely preserved; consumers with 0.2.2/0.2.3-era numeric cutoffs
+# on these fields must re-derive them.
+#
 # Every result dict carries a "provenance" sub-dict describing how it was
 # produced (self-describing time + stale-record detection):
 #   provenance: Dict — {

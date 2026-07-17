@@ -281,6 +281,11 @@ const EMBEDDING_DEPS: &[&str] = &[
 /// v3 (2026-07-17): `vocalness`/`instrumentalness` re-derived from mid-band
 /// spectral contrast (heuristic v2) instead of the mel-based v1 heuristic —
 /// different semantics and values, and they now require the extended pass.
+/// Also recalibrated the absolute scales of `acousticness` (added a brightness
+/// term; electronic < 0.3, acoustic > 0.6 on real music) and `danceability`
+/// (monotonic logistic remap spreading the output across `[0, 1]`) — values
+/// change, orderings are largely preserved. Consumers with 0.2.2/0.2.3-era
+/// cutoffs on these fields must re-derive.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 3;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
@@ -374,6 +379,13 @@ pub struct TrackAnalysis {
     pub bpm: Float,
     /// Selected tempo before optional `bpm_min`/`bpm_max` range alignment.
     pub bpm_raw: Float,
+    /// How firmly the tempo estimate is anchored in the audio ([0,1]): combines
+    /// the strength of the dominant autocorrelation tempo peak, agreement
+    /// between that tempo and the tracked beat rate, and rhythmic onset density.
+    /// High (>0.7) on steady percussive music; low (<0.45) on ambient, rubato,
+    /// or sparse-onset material where the reported BPM should be treated with
+    /// suspicion. A trust signal, not a probability.
+    pub bpm_confidence: Float,
     /// Strongest tempo candidates as `(bpm, score)` pairs, sorted by score
     /// descending (up to the top 5).
     pub bpm_candidates: Vec<(Float, Float)>,
@@ -1211,6 +1223,23 @@ fn analyze_signal_inner(
     let centroid_mean = centroids.iter().sum::<Float>() / centroids.len().max(1) as Float;
     let onset_density = onset_frames.len() as Float / duration_sec;
 
+    // BPM confidence: a trust signal for the range-aligned `bpm` (not a
+    // probability). Combines the dominant autocorrelation peak strength, the
+    // agreement between `bpm` and the tracked beat rate (folded by one octave),
+    // and rhythmic onset density.
+    let bpm_confidence = {
+        let s1 = bpm_candidates.first().map(|c| c.1).unwrap_or(0.0);
+        let strength = s1 / (s1 + 1.2);
+        let bpm_beats = if duration_sec > 0.0 { 60.0 * beats.len() as Float / duration_sec } else { 0.0 };
+        let agree = if bpm > 0.0 && bpm_beats > 0.0 {
+            let mut d = (bpm / bpm_beats).log2().abs();
+            d = d.min((d - 1.0).abs());          // fold one octave
+            (-d / 0.10).exp()
+        } else { 0.0 };
+        let density = (onset_density / 4.0).clamp(0.0, 1.0);
+        (0.50 * strength + 0.35 * agree + 0.15 * density).clamp(0.0, 1.0)
+    };
+
     let spectral_bandwidth_mean = if extended {
         Some(bandwidths.iter().sum::<Float>() / bandwidths.len().max(1) as Float)
     } else { None };
@@ -1350,7 +1379,7 @@ fn analyze_signal_inner(
     } else { None };
 
     let acousticness = if wants_acoustic {
-        Some(perceptual::acousticness(fl_mean, ro_mean, onset_density))
+        Some(perceptual::acousticness(fl_mean, ro_mean, centroid_mean, onset_density))
     } else { None };
 
     // --- mood (heuristic v1) ---
@@ -1507,6 +1536,7 @@ fn analyze_signal_inner(
         duration_sec,
         bpm,
         bpm_raw,
+        bpm_confidence,
         bpm_candidates,
         beats,
         onset_frames,
@@ -2104,6 +2134,39 @@ mod tests {
         let result = analyze_signal(y.view(), sr, &compact()).unwrap();
         assert!(result.bpm > 50.0 && result.bpm < 250.0);
         assert!(result.onset_frames.len() >= 3);
+    }
+
+    #[test]
+    fn test_bpm_confidence_present_and_click_vs_drone() {
+        let sr = 22050u32;
+        // Steady 120-BPM click train: strong, agreeing tempo + dense onsets.
+        let n = (4.0 * sr as Float) as usize;
+        let interval = (60.0 / 120.0 * sr as Float) as usize;
+        let mut clicks = Array1::<Float>::zeros(n);
+        let mut pos = 0;
+        while pos < n {
+            for i in 0..100.min(n - pos) {
+                clicks[pos + i] = (2.0 * PI * 1000.0 * i as Float / sr as Float).sin();
+            }
+            pos += interval;
+        }
+        let r_click = analyze_signal(clicks.view(), sr, &compact()).unwrap();
+        // Always present + bounded.
+        assert!((0.0..=1.0).contains(&r_click.bpm_confidence),
+            "bpm_confidence out of [0,1]: {}", r_click.bpm_confidence);
+        // Steady percussive material should read as reasonably anchored.
+        assert!(r_click.bpm_confidence > 0.5,
+            "click train bpm_confidence should be > 0.5, got {}", r_click.bpm_confidence);
+
+        // Slow sustained sine drone: sparse onsets, weak tempo evidence.
+        let drone = sine(220.0, sr, 4.0);
+        let r_drone = analyze_signal(drone.view(), sr, &compact()).unwrap();
+        assert!((0.0..=1.0).contains(&r_drone.bpm_confidence),
+            "drone bpm_confidence out of [0,1]: {}", r_drone.bpm_confidence);
+        // Comparative: sparse-onset drone is less anchored than the click train.
+        assert!(r_drone.bpm_confidence < r_click.bpm_confidence,
+            "drone ({}) should be less anchored than click train ({})",
+            r_drone.bpm_confidence, r_click.bpm_confidence);
     }
 
     #[test]

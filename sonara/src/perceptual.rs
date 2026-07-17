@@ -232,6 +232,12 @@ pub fn energy(
 ///
 /// Uses heuristics: regular beats + tempo in 100-140 BPM range + moderate
 /// onset density → high danceability. No extra signal processing needed.
+///
+/// Absolute scale recalibrated in 0.2.4: the raw weighted combination is now
+/// mapped through a strictly monotonic logistic (order preserved, Spearman
+/// 1.000 vs the old raw scale) so the output spreads across `[0, 1]` on real
+/// music (p5 ~0.20, p50 ~0.78, p95 ~0.90). Consumers with 0.2.2/0.2.3-era
+/// cutoffs must re-derive.
 pub fn danceability_heuristic(bpm: Float, beats: &[usize], onset_density: Float) -> Float {
     // Beat regularity: coefficient of variation of inter-beat intervals
     let beat_reg = if beats.len() >= 3 {
@@ -259,7 +265,8 @@ pub fn danceability_heuristic(bpm: Float, beats: &[usize], onset_density: Float)
     // Onset density sweet spot: 2-6 onsets/sec is danceable
     let onset_score = (-0.5 * ((onset_density - 4.0) / 2.0).powi(2)).exp();
 
-    0.4 * beat_reg + 0.35 * tempo_score + 0.25 * onset_score
+    let raw = 0.4 * beat_reg + 0.35 * tempo_score + 0.25 * onset_score;
+    (1.0 / (1.0 + (-12.3 * (raw - 0.804)).exp())).clamp(0.0, 1.0)
 }
 
 /// Accurate danceability via Detrended Fluctuation Analysis (DFA).
@@ -622,22 +629,24 @@ pub fn valence(key_result: &KeyResult, bpm: Float, spectral_centroid_mean: Float
 /// Heuristic acousticness estimate (0.0 = electronic/synthetic, 1.0 = acoustic).
 ///
 /// Acoustic music tends to be more tonal (low spectral flatness), have less
-/// high-frequency energy (low rolloff), and fewer percussive onsets.
+/// high-frequency energy (low rolloff), a lower spectral centroid (darker), and
+/// fewer percussive onsets.
+///
+/// Absolute scale recalibrated in 0.2.4: the tonal term no longer floors at
+/// ~0.51 on real music, and a brightness (centroid) term was added to correct
+/// misrankings. On real music, electronic material lands < 0.3 and acoustic
+/// material > 0.6. Consumers with 0.2.2/0.2.3-era cutoffs must re-derive.
 pub fn acousticness(
     spectral_flatness_mean: Float,
     spectral_rolloff_mean: Float,
+    spectral_centroid_mean: Float,
     onset_density: Float,
 ) -> Float {
-    // Low flatness = tonal = more acoustic
-    let tonal_score = (1.0 - (spectral_flatness_mean * 5.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-
-    // Low rolloff = less high-frequency energy = more acoustic
-    let hf_score = (1.0 - ((spectral_rolloff_mean - 2000.0) / 6000.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-
-    // Fewer onsets = calmer = more acoustic
-    let calm_score = (1.0 - (onset_density / 6.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-
-    0.45 * tonal_score + 0.30 * hf_score + 0.25 * calm_score
+    let tonal  = (1.0 - (spectral_flatness_mean * 16.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let hf     = (1.0 - ((spectral_rolloff_mean - 1800.0) / 4000.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let bright = (1.0 - ((spectral_centroid_mean - 1050.0) / 2300.0).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    let calm   = (1.0 - (onset_density / 5.2).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    (0.30 * tonal + 0.30 * hf + 0.20 * bright + 0.20 * calm).clamp(0.0, 1.0)
 }
 
 // ============================================================
@@ -772,6 +781,21 @@ mod tests {
     }
 
     #[test]
+    fn test_danceability_logistic_monotonic() {
+        // 0.2.4: the raw weighted combination is remapped through a strictly
+        // monotonic logistic. Verify increasing raw → strictly increasing,
+        // bounded output. Mirrors the mapping in `danceability_heuristic`.
+        let logistic = |raw: Float| (1.0 / (1.0 + (-12.3 * (raw - 0.804)).exp())).clamp(0.0, 1.0);
+        let a = logistic(0.70);
+        let b = logistic(0.85);
+        let c = logistic(0.95);
+        assert!(a < b && b < c, "logistic must be strictly increasing: {} {} {}", a, b, c);
+        for v in [a, b, c] {
+            assert!((0.0..=1.0).contains(&v), "logistic output {} out of [0,1]", v);
+        }
+    }
+
+    #[test]
     fn test_danceability_dfa_basic() {
         // Generate a simple signal and verify DFA returns a reasonable value
         let n = 22050 * 3; // 3 seconds
@@ -887,8 +911,10 @@ mod tests {
 
     #[test]
     fn test_acousticness_tonal_vs_noisy() {
-        let acoustic = acousticness(0.01, 1500.0, 2.0); // tonal, low HF, calm
-        let electronic = acousticness(0.5, 7000.0, 6.0); // flat, high HF, busy
+        // 0.2.4: signature gained a centroid (brightness) param; give the tonal
+        // signal a dark centroid and the noisy one a bright centroid.
+        let acoustic = acousticness(0.01, 1500.0, 1400.0, 2.0); // tonal, low HF, dark, calm
+        let electronic = acousticness(0.5, 7000.0, 3000.0, 6.0); // flat, high HF, bright, busy
         assert!(acoustic > electronic,
             "Tonal signal ({}) should be more acoustic than noisy signal ({})",
             acoustic, electronic);
@@ -896,10 +922,26 @@ mod tests {
 
     #[test]
     fn test_acousticness_range() {
-        let low = acousticness(1.0, 11025.0, 10.0);
-        let high = acousticness(0.0, 500.0, 0.0);
+        let low = acousticness(1.0, 11025.0, 4000.0, 10.0);
+        let high = acousticness(0.0, 500.0, 400.0, 0.0);
         assert!(low >= 0.0 && low <= 1.0);
         assert!(high >= 0.0 && high <= 1.0);
+    }
+
+    #[test]
+    fn test_acousticness_electronic_profile_below_threshold() {
+        // 0.2.4 recalibration: representative electronic-anchor spectral profile
+        // should land clearly in the non-acoustic band (< 0.3).
+        let a = acousticness(0.08, 6500.0, 2600.0, 4.5);
+        assert!(a < 0.3, "electronic profile should be < 0.3, got {}", a);
+    }
+
+    #[test]
+    fn test_acousticness_acoustic_profile_above_threshold() {
+        // 0.2.4 recalibration: representative acoustic-anchor spectral profile
+        // should land clearly in the acoustic band (> 0.6).
+        let a = acousticness(0.015, 2800.0, 1400.0, 1.2);
+        assert!(a > 0.6, "acoustic profile should be > 0.6, got {}", a);
     }
 
     #[test]

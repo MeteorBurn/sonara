@@ -320,6 +320,18 @@ def _check_bpm_candidate_fields():
 test("analyze_signal exposes bpm_candidates/bpm_raw", _check_bpm_candidate_fields)
 
 
+def _check_bpm_confidence_present_and_bounded():
+    # Always present (all modes), in [0, 1]. 0.2.4 addition.
+    r = sonara.analyze_signal(y_clicks, sr=22050)  # compact
+    assert "bpm_confidence" in r, "missing bpm_confidence in compact result"
+    bc = r["bpm_confidence"]
+    assert isinstance(bc, float), f"bpm_confidence not a float: {bc!r}"
+    assert 0.0 <= bc <= 1.0, f"bpm_confidence {bc} out of [0, 1]"
+
+
+test("analyze_signal exposes bpm_confidence in [0,1]", _check_bpm_confidence_present_and_bounded)
+
+
 def _check_provenance_fields():
     r = sonara.analyze_signal(y_clicks, sr=22050)
     assert "provenance" in r, "missing provenance"

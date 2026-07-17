@@ -25,6 +25,7 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     d.set_item("duration_sec", r.duration_sec)?;
     d.set_item("bpm", r.bpm)?;
     d.set_item("bpm_raw", r.bpm_raw)?;
+    d.set_item("bpm_confidence", r.bpm_confidence)?;
     // Top tempo candidates as [bpm, score] pairs, sorted by score descending.
     let bpm_candidates: Vec<(f32, f32)> = r.bpm_candidates.clone();
     d.set_item("bpm_candidates", bpm_candidates)?;

@@ -75,6 +75,7 @@ r = sonara.analyze_file("track.mp3", mode="compact")
 
 r['bpm']                    # Tempo (BPM)
 r['bpm_raw']                # Tempo before optional bpm_min/bpm_max alignment
+r['bpm_confidence']         # Trust signal for bpm, 0-1 (>0.7 steady, <0.45 suspect)
 r['bpm_candidates']         # Top tempo candidates as [bpm, score] pairs, best first
 r['beats']                  # Beat frame positions
 r['onset_frames']           # Onset positions
@@ -104,7 +105,11 @@ r = sonara.analyze_file("track.mp3", mode="playlist")
 r['energy']           # Perceived intensity (loudness + brightness + activity)
 r['danceability']     # Beat regularity + tempo sweet spot + rhythm
 r['valence']          # Mood (0 = sad/dark, 1 = happy/bright)
-r['acousticness']     # Acoustic vs electronic character
+r['acousticness']     # Acoustic vs electronic character (electronic < 0.3, acoustic > 0.6)
+
+# Note: acousticness and danceability absolute scales were recalibrated in 0.2.4
+# (schema v3). Orderings are largely preserved, but consumers with 0.2.2/0.2.3-era
+# numeric cutoffs on these fields must re-derive them.
 
 # Musical key
 r['key']              # e.g. "C major", "A minor"
@@ -156,6 +161,7 @@ r = sonara.analyze_file("track.mp3", mode="playlist", bpm_min=79.0, bpm_max=192.
 
 r['bpm']              # Tempo folded into [79, 192]
 r['bpm_raw']          # Tempo before alignment (what you'd get without the range)
+r['bpm_confidence']   # How firmly the tempo is anchored, 0-1 (trust signal, not probability)
 r['bpm_candidates']   # Ranked [bpm, score] candidates the estimate was chosen from
 ```
 
