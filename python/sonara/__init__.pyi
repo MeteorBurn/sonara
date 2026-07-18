@@ -1,6 +1,6 @@
 """Type stubs for sonara — high-performance audio analysis."""
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -169,6 +169,166 @@ def mel(*, sr: float = 22050.0, n_fft: int = 2048, n_mels: int = 128, fmin: floa
 # Fused Analysis (sonara-specific, high-performance)
 # ============================================================
 
-def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> Dict[str, Union[float, int, List[int]]]: ...
-def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> Dict[str, Union[float, int, List[int]]]: ...
-def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> List[Dict[str, Union[float, int, List[int]]]]: ...
+AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[str], List[Tuple[float, float]]]]
+
+# Result dicts include string fields such as "key" ("A minor"), "key_camelot"
+# (Camelot wheel code, e.g. "8A"), "time_signature", and "predominant_chord".
+#
+# Every result dict (all modes) carries "bpm_confidence": float in [0, 1] — a
+# trust signal for the reported "bpm" (dominant tempo-peak strength + beat-rate
+# agreement + onset density), high (>0.7) on steady percussive music, low
+# (<0.45) on ambient/rubato/sparse material. A trust signal, not a probability.
+#
+# Recalibrated in 0.2.4 (schema v3): "acousticness" (absolute scale; electronic
+# < 0.3, acoustic > 0.6 on real music) and "danceability" (spread across [0, 1]).
+# Orderings are largely preserved; consumers with 0.2.2/0.2.3-era numeric cutoffs
+# on these fields must re-derive them.
+#
+# Every result dict carries a "provenance" sub-dict describing how it was
+# produced (self-describing time + stale-record detection):
+#   provenance: Dict — {
+#     "schema_version":     int        # bumped when field meaning/units change
+#     "sample_rate":        int        # effective Hz (post-resample); frame
+#                                      # indices are valid against this rate
+#     "hop_length":         int        # STFT hop of the main pass; seconds =
+#                                      # frame * hop_length / sample_rate
+#     "mode":               str        # "compact" | "playlist" | "full"
+#     "requested_features": List[str]  # sorted; only when features=[...] given
+#   }
+#
+# When chords are computed (playlist/full modes or features=["chords"]), the
+# dict also carries typed time-spanned chord events alongside chord_sequence:
+#   chord_events: List[Dict]  # {"label": str, "start_sec": float,
+#                             #  "end_sec": float} — merged runs of
+#                             # chord_sequence; contiguous, covering the track;
+#                             # label "N" = no chord detected in that span
+def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None) -> AnalysisResult: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None) -> AnalysisResult: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, progress: Optional[Callable[[int, int], None]] = None, genre_model: Optional[str] = None) -> List[AnalysisResult]: ...
+# analyze_batch never raises on a per-file decode/IO error. Each input path yields
+# exactly one entry in input order, and every entry carries its input `path`.
+# A failed file's entry has `path`, `error`, and `error_kind` (e.g. "decode",
+# "io", "unsupported_format") instead of feature fields.
+# `progress`, if given, is called as progress(done, total) after each completed
+# file — `done` counts completions in COMPLETION order (not input order),
+# `total == len(paths)`. Callback exceptions are ignored (never abort the batch).
+
+# --- beat grid ---
+# Opt-in via features=["beatgrid"]. When requested, the analyze_* result dict
+# additionally contains:
+#   grid_offset_sec: float        — time (sec) of the first beat (grid anchor)
+#   downbeats:       List[int]    — frame indices of bar-starting beats
+#   grid_stability:  float        — 0..1, how rigidly beats fit a constant grid
+
+# --- structure ---
+# Opt-in structural segmentation & energy curve. Requested via
+# `features=["structure"]`; absent from every default mode (compact/playlist/
+# full). When present, the result dict additionally contains:
+#   energy_curve:         List[float]  # per-window perceptual energy (0-1)
+#   energy_curve_hop_sec: float        # seconds between curve samples
+#   segments:             List[Dict[str, float]]
+#                                      # {"start_sec", "end_sec", "energy"}, contiguous, covering
+#   intro_end_sec:        float        # end of intro / pre-first-drop region
+#   outro_start_sec:      float        # start of outro / final fade
+#   energy_level:         int          # coarse 1-10 level
+# Extended loudness / gain metrics are opt-in via features=["loudness"] (never
+# computed by any mode's defaults, for performance). When requested, the result
+# dict also carries:
+#   "true_peak_db"                — true peak in dBTP (4x oversampled, ITU-R BS.1770-4)
+#   "replaygain_db"               — track gain to reach -18 LUFS (-18 - loudness_lufs)
+#   "loudness_curve"              — List[float] short-term LUFS (3 s window, 1 s hop)
+#   "loudness_momentary_max_db"   — max momentary (400 ms) loudness, dB
+#   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU
+
+# Opt-in analysis keys (present only when requested via `features=[...]`; never
+# enabled by any mode). Values are plain Python types in the returned dict:
+# --- silence --- features=["silence"]
+#   "leading_silence_sec": float   # seconds of leading silence (>= 0, <= duration)
+#   "trailing_silence_sec": float  # seconds of trailing silence (>= 0, <= duration)
+# --- key candidates --- features=["key_candidates"]
+#   "key_candidates": List[Tuple[str, str, float]]  # top-3 (key, camelot, score); [0] == "key"
+# --- vocalness --- features=["vocalness"]
+#   "vocalness": float             # heuristic v2 in [0, 1] (rough, not a classifier); changed semantics in 0.2.4.
+#                                  # Prominence of vocal/broadband energy filling the ~0.8-5.6 kHz spectral
+#                                  # valleys; rises harsh > clean > instrumental.
+# --- mood --- features=["mood"]
+#   "mood_happy": float            # heuristic v1, not an ML classifier — in [0, 1]
+#   "mood_aggressive": float       # heuristic v1, not an ML classifier — in [0, 1]
+#   "mood_relaxed": float          # heuristic v1, not an ML classifier — in [0, 1]
+#   "mood_sad": float              # heuristic v1, not an ML classifier — in [0, 1]
+#                                  # All four populate together; correlated but not summing to 1.
+# --- instrumentalness --- features=["instrumentalness"]
+#   "instrumentalness": float      # heuristic v2, not an ML classifier — 1 - vocalness, in [0, 1]; changed semantics in 0.2.4.
+# --- tags --- features=["tags"]  (analyze_file / analyze_batch only)
+#   "tags": Dict  # container/stream metadata read from the file; each key present
+#                 # only when that tag exists. Keys: "title", "artist", "album",
+#                 # "genre" (str), "year", "original_year", "track_no" (int). Read
+#                 # from symphonia containers (FLAC/Vorbis, MP3/ID3v2, MP4, ...);
+#                 # WAV (hound fast path) carries no tags. Never set by
+#                 # analyze_signal.
+#                 # "year" is the file/edition date; "original_year" the original
+#                 # release year (ID3 TDOR/TORY/TXXX:originalyear, Vorbis
+#                 # ORIGINALDATE) — prefer it for era reasoning on reissues.
+#                 # NOTE: tags["genre"] is the file's metadata genre, distinct
+#                 # from the reserved top-level "genre" placeholder.
+# ============================================================
+# Duplicate detection (acoustic fingerprint) — fingerprint
+# ============================================================
+
+# Opt-in only: pass features=["fingerprint"] to any analyze_* call to add two
+# fields to the result dict — `fingerprint` (a base64 string) and
+# `fingerprint_version` (int). No analysis mode computes them by default.
+def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
+# Similarity in [0, 1] between two fingerprints, robust to gain / re-encoding /
+# small leading-silence differences. Accepts base64 `fingerprint` strings or
+# analysis dicts containing one. A score above ~0.30 means "same recording".
+def analyze_file(path: str, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050, progress: Optional[Callable[[int, int], None]] = None) -> List[Dict[str, Union[float, int, List[int]]]]: ...
+
+# ============================================================
+# Bring-your-own genre model — genre_model=<path>
+# ============================================================
+# sonara ships NO genre model. Pass `genre_model=<path to a JSON model>` to any
+# analyze_* call to classify each track over sonara's similarity embedding; the
+# result dict then carries:
+#   "genre":            str    — predicted label (argmax class)
+#   "genre_confidence": float  — winning softmax probability, in (0, 1]
+# The embedding is computed internally when a model is set, but the "embedding"/
+# "embedding_version" fields are only emitted if you ALSO request
+# features=["embedding"].
+#
+# Model JSON format (hand-writable and numpy-exportable):
+#   {
+#     "format_version": 1,           # schema version this build understands
+#     "embedding_version": 2,        # MUST match sonara.SIMILARITY_VERSION at use
+#                                    # time, else analyze_* raises ValueError
+#     "labels": ["rock", "electronic", ...],
+#     "layers": [                    # feed-forward chain; last activation softmax
+#       {"weights": [[...], ...],    # row-major out_dim x in_dim (W . x)
+#        "bias": [...],              # length out_dim
+#        "activation": "relu"},      # "relu" | "softmax" | "identity"
+#       {"weights": [[...]], "bias": [...], "activation": "softmax"}
+#     ]
+#   }
+# The first layer's in_dim must equal EMBEDDING_DIM (48); the last layer must be
+# softmax with out_dim == len(labels).
+#
+# Train one with the pure-numpy `sonara.genre` module:
+#   from sonara import genre
+#   model = genre.train(X, y, hidden=0, epochs=300, lr=0.1, seed=0)  # X: (n, 48)
+#   model.save("genre_model.json"); genre.load("genre_model.json")
+#   model.predict(x)  # (label, confidence) — numpy parity with the Rust inference
+
+# ============================================================
+# Similarity & embeddings
+# ============================================================
+# The similarity vector is OPT-IN: analyze with features=["embedding"] to add
+# "embedding" (List[float], EMBEDDING_DIM long) and "embedding_version" (int) to
+# the result. It is never produced by a bare mode (compact/playlist/full).
+
+SIMILARITY_VERSION: int
+EMBEDDING_DIM: int
+
+def similarity(a: Union[Dict, List[float], NDArray[np.float32]], b: Union[Dict, List[float], NDArray[np.float32]]) -> float: ...
+def embedding_distance(a: List[float], b: List[float]) -> float: ...

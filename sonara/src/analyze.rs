@@ -72,6 +72,15 @@ impl AnalysisMode {
             _ => None,
         }
     }
+
+    /// Canonical lowercase name (the inverse of [`AnalysisMode::from_str`]).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Playlist => "playlist",
+            Self::Full => "full",
+        }
+    }
 }
 
 impl Default for AnalysisMode {
@@ -101,6 +110,18 @@ pub struct AnalysisConfig {
     /// **Perceptual:**
     /// `energy`, `danceability`, `key`, `valence`, `acousticness`
     ///
+    /// **Rhythm analysis (Full mode or explicit request):**
+    /// `tempo_curve`, `time_signature`
+    ///
+    /// **Opt-in only (never enabled by any mode — see `OPT_IN_ONLY_FEATURES`):**
+    /// `beatgrid` (grid offset, downbeats, grid stability),
+    /// `structure` (energy curve, segments, intro/outro, energy level),
+    /// `embedding` (similarity vector; auto-pulls the features it is built from),
+    /// `fingerprint` (duplicate-detection fingerprint),
+    /// `loudness` (true peak, ReplayGain, loudness curve, momentary max, LRA),
+    /// `silence` (leading/trailing silence offsets),
+    /// `key_candidates` (top-3 keys), `vocalness` (vocal-presence heuristic)
+    ///
     /// Note: `duration` is always included. Some features depend on others
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
     /// are resolved automatically.
@@ -112,6 +133,14 @@ pub struct AnalysisConfig {
     pub bpm_min: Option<Float>,
     /// Optional upper bound for octave-folding tempo normalization.
     pub bpm_max: Option<Float>,
+    /// Optional user-supplied genre classifier over the similarity embedding
+    /// (bring-your-own-model; sonara ships none). When `Some`, analysis computes
+    /// the embedding, runs the model, and populates `genre` + `genre_confidence`.
+    /// The model's `embedding_version` must match
+    /// [`crate::similarity::SIMILARITY_VERSION`], else analysis fails fast with a
+    /// [`SonaraError::ModelError`]. `Arc` so `Clone` (used per-file in batch)
+    /// stays cheap. See [`crate::genre`].
+    pub genre_model: Option<std::sync::Arc<crate::genre::GenreModel>>,
 }
 
 impl Default for AnalysisConfig {
@@ -121,6 +150,7 @@ impl Default for AnalysisConfig {
             features: None,
             bpm_min: None,
             bpm_max: None,
+            genre_model: None,
         }
     }
 }
@@ -128,31 +158,74 @@ impl Default for AnalysisConfig {
 impl AnalysisConfig {
     /// Check if a feature should be computed.
     fn wants(&self, name: &str) -> bool {
+        // A genre model needs the full similarity embedding, which is assembled
+        // from the tonal/perceptual features listed in EMBEDDING_DEPS — so a set
+        // model implies each of them regardless of mode or explicit feature list.
+        if self.genre_model.is_some() && EMBEDDING_DEPS.contains(&name) {
+            return true;
+        }
         if let Some(ref features) = self.features {
             // Explicit feature list — check if requested
-            features.contains(name)
+            if features.contains(name) {
+                return true;
+            }
+            // Requesting "embedding" implies the features it is assembled from.
+            features.contains("embedding") && EMBEDDING_DEPS.contains(&name)
         } else {
+            // Opt-in-only features are never enabled by a mode's defaults —
+            // not even Full — only by an explicit `features=[...]` request
+            // (performance-first policy).
+            if OPT_IN_ONLY_FEATURES.contains(&name) {
+                return false;
+            }
             // Mode-based defaults
             match self.mode {
                 AnalysisMode::Compact => false,
-                AnalysisMode::Playlist => {
-                    // Expensive rhythm analysis features are Full-only
-                    // (metrogram is O(n³) and costs ~445ms for a 3-min track)
-                    !matches!(name, "tempo_curve" | "time_signature")
-                }
+                // Expensive rhythm analysis features are Full-only
+                // (metrogram is O(n³) and costs ~445ms for a 3-min track).
+                AnalysisMode::Playlist => !matches!(name, "tempo_curve" | "time_signature"),
                 AnalysisMode::Full => true,
             }
         }
     }
 
+    /// True if the similarity embedding must be computed: either it was
+    /// explicitly requested (`features=["embedding"]`) or a genre model is set
+    /// (the model classifies over the embedding). Only the explicit-request case
+    /// emits the `embedding`/`embedding_version` fields — a genre model computes
+    /// the vector without leaking it (mirrors how mood computes key silently).
+    fn wants_embedding(&self) -> bool {
+        self.wants("embedding") || self.genre_model.is_some()
+    }
+
     /// Check if extended features (anything beyond compact) are needed.
     fn needs_extended(&self) -> bool {
+        // A genre model needs the embedding, which requires the extended pass
+        // (mfcc/chroma/contrast/spectral scalars).
+        if self.genre_model.is_some() {
+            return true;
+        }
         if let Some(ref features) = self.features {
             // If any non-core feature is requested
             const EXTENDED_FEATURES: &[&str] = &[
                 "bandwidth", "rolloff", "flatness", "contrast", "mfcc", "chroma",
                 "chords", "dissonance",
                 "energy", "danceability", "key", "valence", "acousticness",
+                // mood needs chroma/key (extended pass).
+                "mood",
+                // --- structure ---
+                "structure",
+                // key_candidates needs the chroma filterbank (extended pass).
+                // silence derives from the always-computed RMS frames and does
+                // NOT require the extended pass.
+                "key_candidates",
+                // vocalness/instrumentalness (heuristic v2, 0.2.4) derive from
+                // the mid-band spectral-contrast + flatness means, both computed
+                // only in the extended pass — so they now require it (silence,
+                // by contrast, still does not).
+                "vocalness", "instrumentalness",
+                // --- similarity ---: embedding needs the playlist-level features
+                "embedding",
             ];
             EXTENDED_FEATURES.iter().any(|&f| features.contains(f))
         } else {
@@ -161,6 +234,64 @@ impl AnalysisConfig {
     }
 
 }
+
+/// Feature names that are only ever computed when explicitly requested via
+/// `features=[...]`, never enabled by an analysis mode's defaults — not even
+/// Full. Every new analysis feature belongs here unless it is provably free
+/// (performance-first policy).
+const OPT_IN_ONLY_FEATURES: &[&str] = &[
+    "loudness",
+    "beatgrid",
+    "structure",
+    "embedding",
+    "fingerprint",
+    "silence",
+    "key_candidates",
+    // vocalness/instrumentalness: heuristic v2 (not ML), contrast-based.
+    "vocalness",
+    // Heuristic v1 (not ML): mood_* affinities.
+    "mood",
+    "instrumentalness",
+    // File metadata passthrough — read by analyze_file/analyze_batch only, never
+    // by analyze_signal. NOT in EXTENDED_FEATURES: tags must not trigger the
+    // extended DSP pass.
+    "tags",
+];
+// --- similarity ---
+/// Feature names the similarity embedding is assembled from. Requesting
+/// "embedding" implies each of these (see `AnalysisConfig::wants`). The spectral
+/// timbre features (mfcc/chroma/contrast/bandwidth/rolloff/flatness) are computed
+/// automatically whenever extended analysis runs, so only the wants-gated tonal
+/// and perceptual features need to be listed here.
+const EMBEDDING_DEPS: &[&str] = &[
+    "energy", "danceability", "key", "valence", "dissonance", "chords",
+];
+
+/// Version of the `TrackAnalysis` result schema. Bump whenever the meaning,
+/// unit, or time base of an existing field changes (e.g. a different
+/// `HOP_LENGTH`, a re-derived curve, renamed/retyped fields) — additions of
+/// new fields do NOT require a bump. Consumers persisting analysis results
+/// compare this against `AnalysisProvenance::schema_version` to detect stale
+/// records.
+///
+/// v2 (2026-07-17): chroma filterbank gained librosa-parity octave-domain
+/// Gaussian weighting, changing all chroma-derived fields (chroma, key,
+/// tonal features) at every sample rate — most visibly at sr > 22050.
+///
+/// v3 (2026-07-17): `vocalness`/`instrumentalness` re-derived from mid-band
+/// spectral contrast (heuristic v2) instead of the mel-based v1 heuristic —
+/// different semantics and values, and they now require the extended pass.
+/// Also recalibrated the absolute scales of `acousticness` (added a brightness
+/// term; electronic < 0.3, acoustic > 0.6 on real music) and `danceability`
+/// (monotonic logistic remap spreading the output across `[0, 1]`) — values
+/// change, orderings are largely preserved. Consumers with 0.2.2/0.2.3-era
+/// cutoffs on these fields must re-derive.
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 3;
+
+/// STFT hop length (samples) used by the main analysis pass. All frame-index
+/// fields on [`TrackAnalysis`] (`beats`, `onset_frames`, `downbeats`) convert
+/// to time as `frame * HOP_LENGTH / sample_rate`.
+pub(crate) const HOP_LENGTH: usize = 512;
 
 /// Number of spectral contrast bands.
 const N_CONTRAST_BANDS: usize = 6;
@@ -190,20 +321,106 @@ thread_local! {
     static ANALYSIS_CACHE: RefCell<Option<AnalysisCache>> = const { RefCell::new(None) };
 }
 
+/// Provenance metadata: how an analysis result was produced.
+///
+/// Makes a persisted [`TrackAnalysis`] self-describing — a consumer can
+/// convert frame indices to seconds (`frame * hop_length / sample_rate`) and
+/// detect stale stored records by comparing `schema_version` against
+/// [`ANALYSIS_SCHEMA_VERSION`] without out-of-band knowledge.
+///
+/// `sample_rate`/`hop_length` describe the main analysis pass only; the
+/// `fingerprint` field lives in its own fixed internal sample-rate space and
+/// carries its own version (see [`crate::fingerprint`]), as does `embedding`
+/// (`embedding_version`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisProvenance {
+    /// Value of [`ANALYSIS_SCHEMA_VERSION`] at analysis time.
+    pub schema_version: u32,
+    /// Effective sample rate (Hz) the analyzed signal was at — after any
+    /// resampling by `analyze_file`. Frame indices are valid against this
+    /// rate only.
+    pub sample_rate: u32,
+    /// STFT hop length (samples) of the main pass.
+    pub hop_length: usize,
+    /// The configured [`AnalysisMode`]. Ignored by feature selection when
+    /// `requested_features` is `Some` (an explicit list overrides the mode).
+    pub mode: AnalysisMode,
+    /// The explicit `features=[...]` request (sorted), if one was given.
+    pub requested_features: Option<Vec<String>>,
+}
+
+pub use crate::structure::SegmentEvent;
+pub use crate::core::audio::TrackTags;
+
+/// A chord with its time span, in seconds.
+///
+/// Derived from the same beat-aligned windows as `chord_sequence`, with runs
+/// of consecutive identical labels merged into one event. Events are
+/// contiguous and cover the track: the first starts at 0.0 and the last ends
+/// at `duration_sec`. `label` uses the `chord_sequence` vocabulary (e.g.
+/// "C", "Am"; "N" = no chord detected in that span).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChordEvent {
+    pub label: String,
+    pub start_sec: Float,
+    pub end_sec: Float,
+}
+
 /// Complete analysis result for a single track.
 ///
 /// Core fields are always populated. Extended/perceptual fields are `Some`
 /// only when the selected mode or feature list includes them.
 pub struct TrackAnalysis {
     // -- Basic (always computed) --
+    /// How this result was produced (schema version, effective sample rate,
+    /// hop length, mode/features) — see [`AnalysisProvenance`].
+    pub provenance: AnalysisProvenance,
     pub duration_sec: Float,
     pub bpm: Float,
+    /// Selected tempo before optional `bpm_min`/`bpm_max` range alignment.
+    pub bpm_raw: Float,
+    /// How firmly the tempo estimate is anchored in the audio ([0,1]): combines
+    /// the strength of the dominant autocorrelation tempo peak, agreement
+    /// between that tempo and the tracked beat rate, and rhythmic onset density.
+    /// High (>0.7) on steady percussive music; low (<0.45) on ambient, rubato,
+    /// or sparse-onset material where the reported BPM should be treated with
+    /// suspicion. A trust signal, not a probability.
+    pub bpm_confidence: Float,
+    /// Strongest tempo candidates as `(bpm, score)` pairs, sorted by score
+    /// descending (up to the top 5).
+    pub bpm_candidates: Vec<(Float, Float)>,
+    /// Beat positions as main-pass frame indices; seconds =
+    /// `frame * provenance.hop_length / provenance.sample_rate`
+    /// (or use [`TrackAnalysis::beats_sec`]).
     pub beats: Vec<usize>,
+    /// Onset positions as main-pass frame indices (see `beats` for the
+    /// frame→seconds convention, or [`TrackAnalysis::onsets_sec`]).
     pub onset_frames: Vec<usize>,
     pub rms_mean: Float,
     pub rms_max: Float,
     pub loudness_lufs: Float,
     pub dynamic_range_db: Float,
+
+    // --- loudness ---
+    // Extended loudness / gain metrics (opt-in via `features=["loudness"]`).
+    // `Some` only when the "loudness" group was requested; `None` otherwise.
+    /// True peak in dBTP (4x oversampled, ITU-R BS.1770-4 Annex 2). ~0 dBTP is
+    /// full scale; > 0 dBTP means inter-sample overs that can clip on playback.
+    pub true_peak_db: Option<Float>,
+    /// ReplayGain-style track gain in dB to reach the -18 LUFS reference:
+    /// `-18 - loudness_lufs`.
+    pub replaygain_db: Option<Float>,
+    /// Short-term loudness curve: one LUFS value per 3 s window at a 1 s hop
+    /// (ITU-R BS.1770 short-term integration). Empty for tracks under one window.
+    pub loudness_curve: Option<Vec<Float>>,
+    /// Maximum momentary (400 ms window) loudness, dB (EBU R128 momentary).
+    pub loudness_momentary_max_db: Option<Float>,
+    /// EBU R128 loudness range (LRA) in LU: gated 95th-10th percentile spread of
+    /// the short-term loudness distribution. The standardized counterpart to the
+    /// approximate `dynamic_range_db` (which is a raw p95-p5 of RMS).
+    pub loudness_range_lu: Option<Float>,
+    // --- end loudness ---
+
     pub spectral_centroid_mean: Float,
     pub zero_crossing_rate: Float,
     pub onset_density: Float,
@@ -217,13 +434,21 @@ pub struct TrackAnalysis {
     pub chroma_mean: Option<Vec<Float>>,
 
     // -- Rhythm (extended or full) --
+    /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
+    /// the span between `beats[i]` and `beats[i+1]`
+    /// (length = `beats.len() - 1`).
     pub tempo_curve: Option<Vec<Float>>,
     pub tempo_variability: Option<Float>,
     pub time_signature: Option<String>,
     pub time_signature_confidence: Option<Float>,
 
     // -- Tonal (extended or full) --
+    /// One chord label per beat-aligned window (`tonal::chord_boundaries`);
+    /// "N" = no chord. For explicit time spans use `chord_events`.
     pub chord_sequence: Option<Vec<String>>,
+    /// Time-spanned chord events (merged runs of `chord_sequence`); `Some`
+    /// exactly when `chord_sequence` is. See [`ChordEvent`].
+    pub chord_events: Option<Vec<ChordEvent>>,
     pub chord_change_rate: Option<Float>,
     pub predominant_chord: Option<String>,
     pub dissonance: Option<Float>,
@@ -233,6 +458,8 @@ pub struct TrackAnalysis {
     pub danceability: Option<Float>,
     pub key: Option<String>,
     pub key_confidence: Option<Float>,
+    /// Camelot wheel code for the detected key (e.g. "8A" for A minor), for DJ harmonic mixing.
+    pub key_camelot: Option<String>,
     pub valence: Option<Float>,
     pub acousticness: Option<Float>,
 
@@ -240,14 +467,120 @@ pub struct TrackAnalysis {
     /// Learned audio embedding vector (future ONNX integration).
     pub embedding: Option<Vec<Float>>,
 
-    // -- Tier 3 placeholders (future ML models) --
-    /// Requires ML model (future).
+    // -- Mood + instrumentalness (heuristic v1, opt-in) --
+    /// Mood affinities in `[0, 1]`, **heuristic v1 (not ML)**. Opt-in via
+    /// `features=["mood"]`; all four populate together, `None` otherwise.
     pub mood_happy: Option<Float>,
     pub mood_aggressive: Option<Float>,
     pub mood_relaxed: Option<Float>,
     pub mood_sad: Option<Float>,
+    /// Inverse of the vocalness heuristic (`1 - vocalness`, clamped `[0, 1]`),
+    /// **heuristic v2 (not ML)**. Opt-in via `features=["instrumentalness"]`;
+    /// requires the extended pass (shares `vocalness`'s contrast/flatness inputs).
+    /// Semantics changed in 0.2.4 — see [`vocalness`](Self::vocalness).
     pub instrumentalness: Option<Float>,
+    /// Predicted genre label — populated only when a user-supplied genre model
+    /// is set (`AnalysisConfig::genre_model`); `None` otherwise. sonara ships no
+    /// model. See [`crate::genre`].
     pub genre: Option<String>,
+    /// Confidence (softmax probability, `(0, 1]`) of the predicted `genre`.
+    /// Populated only when a user-supplied genre model is set; `None` otherwise.
+    pub genre_confidence: Option<Float>,
+
+    // --- beat grid ---
+    // Opt-in only (request via features=["beatgrid"]); `None` in the default
+    // compact/playlist/full modes.
+    /// Time (seconds) of the first beat — the grid anchor.
+    pub grid_offset_sec: Option<Float>,
+    /// Frame indices of bar-starting beats (subset of `beats`).
+    pub downbeats: Option<Vec<usize>>,
+    /// How rigidly beats fit a constant-tempo grid, in `[0, 1]`.
+    pub grid_stability: Option<Float>,
+    // --- structure ---
+    /// Time-resolved perceptual energy (0-1), one value per window.
+    pub energy_curve: Option<Vec<Float>>,
+    /// Seconds between successive `energy_curve` samples.
+    pub energy_curve_hop_sec: Option<Float>,
+    /// Contiguous structural sections covering the track. See [`SegmentEvent`].
+    pub segments: Option<Vec<SegmentEvent>>,
+    /// End of the initial low-energy / pre-first-drop region (seconds).
+    pub intro_end_sec: Option<Float>,
+    /// Start of the final fade / low-energy region (seconds).
+    pub outro_start_sec: Option<Float>,
+    /// Coarse 1-10 energy level derived from mean energy.
+    pub energy_level: Option<u8>,
+    // --- silence ---
+    /// Leading silence duration in seconds — audio below the silence threshold
+    /// (-60 dBFS relative to full scale) at the very start. Opt-in via
+    /// `features=["silence"]`. `None` unless requested.
+    pub leading_silence_sec: Option<Float>,
+    /// Trailing silence duration in seconds — audio below the silence threshold
+    /// at the very end. Opt-in via `features=["silence"]`. `None` unless requested.
+    pub trailing_silence_sec: Option<Float>,
+
+    // --- key candidates ---
+    /// Top-3 ranked key candidates as `(key string, Camelot code, score)`.
+    /// Opt-in via `features=["key_candidates"]`. The first entry equals `key`.
+    pub key_candidates: Option<Vec<(String, String, Float)>>,
+
+    // --- vocalness ---
+    /// Vocal-presence heuristic in `[0, 1]` (**heuristic v2**, not a classifier).
+    /// Measures the prominence of vocal/broadband energy filling the ~0.8-5.6 kHz
+    /// spectral valleys (low mid-band peak-to-valley contrast → high vocalness):
+    /// it rises harsh > clean > instrumental (screamed metal ≈ 1.0, clean singing
+    /// mid, solo sax/flute/violin low). Semantics changed in 0.2.4 (was a mel-based
+    /// tonal+syllabic heuristic that inverted on distorted vocals). Known ambiguous
+    /// cases: sparse voice+piano ballads read mid-low; a voice-mimicking solo violin
+    /// reads borderline. Opt-in via `features=["vocalness"]`; requires the extended
+    /// pass (mid-band spectral contrast). `None` unless requested.
+    pub vocalness: Option<Float>,
+    // --- fingerprint ---
+    /// Acoustic fingerprint (raw sub-fingerprint sequence, ~8 `u32`/sec) for
+    /// duplicate detection. `Some` only when the `"fingerprint"` feature is
+    /// explicitly requested; `None` in every mode by default. See
+    /// [`crate::fingerprint`]. Compare two with [`crate::fingerprint::match_score`].
+    pub fingerprint: Option<Vec<u32>>,
+    // --- similarity ---
+    /// Version of the `embedding` layout + normalization (see
+    /// `crate::similarity::SIMILARITY_VERSION`). `Some` iff `embedding` is `Some`.
+    /// Present only when the `"embedding"` feature is explicitly requested.
+    pub embedding_version: Option<u32>,
+    // --- tags ---
+    /// Container/stream metadata tags (title, artist, album, genre, year,
+    /// track number) read from the file. `Some` only when the `"tags"` feature
+    /// is requested via `analyze_file`/`analyze_batch`; always `None` for
+    /// `analyze_signal` (no container) and when not requested. WAV inputs yield
+    /// `Some(TrackTags::default())`-style empty fields at most, since the hound
+    /// fast path carries no tags. See [`TrackTags`]. Note: `TrackTags::genre`
+    /// (file metadata) is distinct from the `genre` placeholder field above.
+    pub tags: Option<TrackTags>,
+}
+
+impl TrackAnalysis {
+    /// Convert a main-pass frame index (as in `beats`, `onset_frames`,
+    /// `downbeats`) to seconds using the carried provenance:
+    /// `frame * hop_length / sample_rate`.
+    pub fn frame_to_sec(&self, frame: usize) -> Float {
+        frame as Float * self.provenance.hop_length as Float
+            / self.provenance.sample_rate as Float
+    }
+
+    /// Beat times in seconds (see [`Self::frame_to_sec`]).
+    pub fn beats_sec(&self) -> Vec<Float> {
+        self.beats.iter().map(|&f| self.frame_to_sec(f)).collect()
+    }
+
+    /// Onset times in seconds (see [`Self::frame_to_sec`]).
+    pub fn onsets_sec(&self) -> Vec<Float> {
+        self.onset_frames.iter().map(|&f| self.frame_to_sec(f)).collect()
+    }
+
+    /// Downbeat times in seconds; `None` unless `features=["beatgrid"]`.
+    pub fn downbeats_sec(&self) -> Option<Vec<Float>> {
+        self.downbeats
+            .as_ref()
+            .map(|d| d.iter().map(|&f| self.frame_to_sec(f)).collect())
+    }
 }
 
 /// Per-frame results from the fused FFT pass.
@@ -271,8 +604,14 @@ struct FrameResult {
 
 /// Analyze a track from a file path with the given configuration.
 pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
-    let (y, actual_sr) = audio::load(path, sr, true, 0.0, 0.0)?;
-    analyze_signal(y.view(), actual_sr, config)
+    // Tags are file-only metadata (see `TrackTags`): read them during load when
+    // requested, then post-fill the result. When not requested, `load_with_tags`
+    // does zero extra work — identical to the plain `load` fast path.
+    let want_tags = config.wants("tags");
+    let (y, actual_sr, tags) = audio::load_with_tags(path, sr, true, 0.0, 0.0, want_tags)?;
+    let mut result = analyze_signal(y.view(), actual_sr, config)?;
+    result.tags = tags;
+    Ok(result)
 }
 
 /// Analyze a pre-loaded audio signal with the given configuration.
@@ -286,8 +625,41 @@ pub fn analyze_signal(
 }
 
 /// Analyze multiple files in parallel.
+///
+/// Failures are isolated per file: the returned vector has exactly one entry
+/// per input path, in the same order as `paths`, and a decode/IO failure on one
+/// file yields an `Err` for that entry only — it never aborts or poisons the
+/// rest of the batch. This is the robustness contract the Python `analyze_batch`
+/// binding relies on when analyzing large libraries.
 pub fn analyze_batch(paths: &[&Path], sr: u32, config: &AnalysisConfig) -> Vec<Result<TrackAnalysis>> {
-    paths.par_iter().map(|path| analyze_file(path, sr, config)).collect()
+    analyze_batch_with(paths, sr, config, |_, _| {})
+}
+
+/// Like [`analyze_batch`], invoking `on_done(done, total)` after each file
+/// completes (success or failure). `done` counts completions in completion
+/// order — not input order; the returned Vec is input-ordered. The callback
+/// runs on rayon worker threads: keep it cheap and non-blocking.
+pub fn analyze_batch_with<F>(
+    paths: &[&Path],
+    sr: u32,
+    config: &AnalysisConfig,
+    on_done: F,
+) -> Vec<Result<TrackAnalysis>>
+where
+    F: Fn(usize, usize) + Sync,
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let total = paths.len();
+    let done = AtomicUsize::new(0);
+    paths
+        .par_iter()
+        .map(|path| {
+            let r = analyze_file(path, sr, config);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            on_done(n, total);
+            r
+        })
+        .collect()
 }
 
 // ============================================================
@@ -300,9 +672,23 @@ fn analyze_signal_inner(
     extended: bool,
     config: &AnalysisConfig,
 ) -> Result<TrackAnalysis> {
+    // Fail fast (before any heavy DSP) if a supplied genre model was trained
+    // against a different embedding layout — classifying on a mismatched
+    // embedding is silently wrong, so refuse rather than produce a bogus label.
+    if let Some(ref model) = config.genre_model {
+        if model.embedding_version != crate::similarity::SIMILARITY_VERSION {
+            return Err(SonaraError::ModelError(format!(
+                "genre model embedding_version {} does not match this build's embedding version {}; \
+                 re-export the model against the current embedding",
+                model.embedding_version,
+                crate::similarity::SIMILARITY_VERSION
+            )));
+        }
+    }
+
     let sr_f = sr as Float;
     let n_fft = 2048;
-    let hop_length = 512;
+    let hop_length = HOP_LENGTH;
     let n_mels = 128;
     let n_bins = n_fft / 2 + 1;
 
@@ -708,10 +1094,13 @@ fn analyze_signal_inner(
     // BEAT TRACKING + ONSET DETECTION
     // ================================================================
 
-    let (bpm, beats) = crate::beat::beat_track_with_bpm_range(
+    let (tempo_estimate, beats) = crate::beat::beat_track_detailed(
         None, Some(oenv_padded.view()), sr, hop_length, 120.0, 100.0, true,
         config.bpm_min, config.bpm_max,
     )?;
+    let bpm = tempo_estimate.tempo;
+    let bpm_raw = tempo_estimate.tempo_raw;
+    let bpm_candidates = tempo_estimate.candidates;
 
     let onset_frames = crate::onset::onset_detect(
         None, Some(oenv_padded.view()), sr, hop_length, false, 0.07, 0,
@@ -729,6 +1118,27 @@ fn analyze_signal_inner(
     // ================================================================
 
     let loudness_lufs = perceptual::loudness_lufs(y, sr);
+
+    // --- loudness ---
+    // Extended loudness / gain metrics — strictly opt-in via `features=["loudness"]`.
+    // Default modes (compact/playlist/full) skip this entirely, so they pay nothing.
+    let (
+        true_peak_db,
+        replaygain_db,
+        loudness_curve,
+        loudness_momentary_max_db,
+        loudness_range_lu,
+    ) = if config.wants("loudness") {
+        let tp = crate::loudness_ext::true_peak_db(y);
+        let rg = crate::loudness_ext::replaygain_db(loudness_lufs);
+        // Short-term curve: 3 s window, 1 s hop (ITU-R BS.1770 short-term).
+        // One K-weighting pass feeds the curve, momentary max and LRA.
+        let m = crate::loudness_ext::loudness_metrics(y, sr, 3.0, 1.0);
+        (Some(tp), Some(rg), Some(m.curve), Some(m.momentary_max_db), Some(m.range_lu))
+    } else {
+        (None, None, None, None, None)
+    };
+    // --- end loudness ---
 
     // ================================================================
     // EXTENDED: MFCCs via pre-computed DCT matrix (no per-frame cos())
@@ -813,6 +1223,23 @@ fn analyze_signal_inner(
     let centroid_mean = centroids.iter().sum::<Float>() / centroids.len().max(1) as Float;
     let onset_density = onset_frames.len() as Float / duration_sec;
 
+    // BPM confidence: a trust signal for the range-aligned `bpm` (not a
+    // probability). Combines the dominant autocorrelation peak strength, the
+    // agreement between `bpm` and the tracked beat rate (folded by one octave),
+    // and rhythmic onset density.
+    let bpm_confidence = {
+        let s1 = bpm_candidates.first().map(|c| c.1).unwrap_or(0.0);
+        let strength = s1 / (s1 + 1.2);
+        let bpm_beats = if duration_sec > 0.0 { 60.0 * beats.len() as Float / duration_sec } else { 0.0 };
+        let agree = if bpm > 0.0 && bpm_beats > 0.0 {
+            let mut d = (bpm / bpm_beats).log2().abs();
+            d = d.min((d - 1.0).abs());          // fold one octave
+            (-d / 0.10).exp()
+        } else { 0.0 };
+        let density = (onset_density / 4.0).clamp(0.0, 1.0);
+        (0.50 * strength + 0.35 * agree + 0.15 * density).clamp(0.0, 1.0)
+    };
+
     let spectral_bandwidth_mean = if extended {
         Some(bandwidths.iter().sum::<Float>() / bandwidths.len().max(1) as Float)
     } else { None };
@@ -858,13 +1285,37 @@ fn analyze_signal_inner(
     };
 
     // ================================================================
+    // BEAT GRID: offset, downbeats, stability (opt-in via features)
+    // Reuses the already-computed beats + onset envelope (O(n_beats)),
+    // so it never runs in the default modes — only when explicitly
+    // requested via features=["beatgrid"].
+    // ================================================================
+
+    let (grid_offset_sec, downbeats, grid_stability) = if config.wants("beatgrid") {
+        // Prefer the detected meter (full mode) when it was also requested;
+        // otherwise assume 4/4.
+        let beats_per_bar = time_signature
+            .as_deref()
+            .and_then(|ts| ts.split('/').next())
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(crate::beatgrid::DEFAULT_BEATS_PER_BAR);
+        let grid = crate::beatgrid::analyze_grid(
+            &beats, oenv_padded.view(), sr, hop_length, beats_per_bar,
+        );
+        (Some(grid.grid_offset_sec), Some(grid.downbeats), Some(grid.grid_stability))
+    } else {
+        (None, None, None)
+    };
+
+    // ================================================================
     // TONAL: chords from fused HPCP, dissonance from fused accumulator
     // ================================================================
 
     let wants_chords = extended && config.wants("chords");
     let wants_diss = extended && config.wants("dissonance");
 
-    let (chord_sequence, chord_change_rate, predominant_chord, dissonance_val) =
+    let (chord_sequence, chord_events, chord_change_rate, predominant_chord, dissonance_val) =
         if (wants_chords || wants_diss) && n_frames > 0 {
             // L1-normalize HPCP per frame (in-place on hpcp_raw)
             for t in 0..n_frames {
@@ -874,21 +1325,24 @@ fn analyze_signal_inner(
                 }
             }
 
-            let (cs, ccr, pc) = if wants_chords {
+            let (cs, ce, ccr, pc) = if wants_chords {
                 let chords = crate::tonal::chords_from_beats(hpcp_raw.view(), &beats);
                 let desc = crate::tonal::chord_descriptors(&chords, duration_sec);
-                (Some(chords), Some(desc.change_rate), Some(desc.predominant_chord))
+                let events = chord_events_from_labels(
+                    &chords, &beats, n_frames, sr_f, hop_length, duration_sec,
+                );
+                (Some(chords), Some(events), Some(desc.change_rate), Some(desc.predominant_chord))
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
 
             let dv = if wants_diss {
                 Some(dissonance_acc / n_frames as Float)
             } else { None };
 
-            (cs, ccr, pc, dv)
+            (cs, ce, ccr, pc, dv)
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
     // ================================================================
@@ -904,6 +1358,8 @@ fn analyze_signal_inner(
     let wants_key = extended && config.wants("key");
     let wants_valence = extended && (config.wants("valence") || config.wants("key"));
     let wants_acoustic = extended && config.wants("acousticness");
+    // mood (heuristic v1) is extended-gated (needs chroma/key).
+    let wants_mood = extended && config.wants("mood");
 
     let energy = if wants_energy {
         Some(perceptual::energy(rms_mean, centroid_mean, onset_density, bw_mean))
@@ -913,8 +1369,8 @@ fn analyze_signal_inner(
         Some(perceptual::danceability_heuristic(bpm, &beats, onset_density))
     } else { None };
 
-    // Key detection requires chroma (resolved as dependency)
-    let key_result = if wants_key || wants_valence {
+    // Key detection requires chroma (resolved as dependency). mood also needs it.
+    let key_result = if wants_key || wants_valence || wants_mood {
         chroma_mean.as_ref().map(|c| perceptual::detect_key(c))
     } else { None };
 
@@ -923,21 +1379,178 @@ fn analyze_signal_inner(
     } else { None };
 
     let acousticness = if wants_acoustic {
-        Some(perceptual::acousticness(fl_mean, ro_mean, onset_density))
+        Some(perceptual::acousticness(fl_mean, ro_mean, centroid_mean, onset_density))
     } else { None };
 
-    let key = key_result.as_ref().map(|kr| perceptual::format_key(kr));
-    let key_confidence = key_result.as_ref().map(|kr| kr.confidence);
+    // --- mood (heuristic v1) ---
+    // Extended-gated; recomputes energy/danceability internally so it does not
+    // depend on whether those fields were also requested. Only the four mood_*
+    // fields are emitted — `key`/`valence` stay `None` unless individually wanted.
+    let mood = if wants_mood {
+        Some(perceptual::mood_scores(
+            key_result.as_ref(),
+            bpm,
+            rms_mean,
+            centroid_mean,
+            onset_density,
+            bw_mean,
+            &beats,
+            dissonance_val,
+            dynamic_range_db,
+        ))
+    } else { None };
 
-    Ok(TrackAnalysis {
+    // --- fingerprint ---
+    // Strictly opt-in (see OPT_IN_ONLY_FEATURES): never runs unless
+    // the caller explicitly requested the "fingerprint" feature, so default modes
+    // pay exactly zero cost. Operates on its own downsampled mono copy of `y`.
+    let fingerprint = if config.wants("fingerprint") {
+        let fp = crate::fingerprint::compute(y, sr);
+        if fp.is_empty() { None } else { Some(fp) }
+    } else {
+        None
+    };
+
+    // key_result may also have been computed solely to feed mood; only surface
+    // the key fields when key/valence was actually requested (no mood leakage).
+    let emit_key = wants_key || wants_valence;
+    let key = if emit_key { key_result.as_ref().map(|kr| perceptual::format_key(kr)) } else { None };
+    let key_confidence = if emit_key { key_result.as_ref().map(|kr| kr.confidence) } else { None };
+    let key_camelot = if emit_key {
+        key_result
+            .as_ref()
+            .and_then(|kr| perceptual::camelot(kr.key, kr.mode))
+            .map(|c| c.to_string())
+    } else { None };
+
+    // ================================================================
+    // STRUCTURE (opt-in): energy curve + novelty segmentation
+    // Reuses per-frame RMS/centroid/bandwidth and the mel dB spectrogram
+    // already computed above — no extra decode or FFT pass.
+    // ================================================================
+    // --- structure ---
+    let structure = if extended && config.wants("structure") && n_frames > 0 {
+        let fps = sr_f / hop_length as Float;
+        Some(crate::structure::analyze_structure(
+            rms_frames.as_slice().unwrap(),
+            centroids.as_slice().unwrap(),
+            bandwidths.as_slice().unwrap_or(&[]),
+            s_db.view(),
+            dct_matrix.view(),
+            &onset_frames,
+            fps,
+            duration_sec,
+        ))
+    } else {
+        None
+    };
+
+    // ================================================================
+    // OPT-IN FEATURES (only computed when explicitly requested via
+    // `features=[...]`; never enabled by mode — performance-first policy)
+    // ================================================================
+
+    // --- silence ---
+    // Nearly free: pure arithmetic over the RMS frames already computed above.
+    // Kept opt-in per the performance-first policy so default modes are unchanged.
+    let (leading_silence_sec, trailing_silence_sec) = if config.wants("silence") {
+        let rms_slice = rms_frames.as_slice().unwrap();
+        let (lead, trail) = silence_offsets(rms_slice, sr, hop_length, -60.0);
+        (Some(lead), Some(trail))
+    } else {
+        (None, None)
+    };
+
+    // --- key candidates ---
+    // Requires chroma (resolved as an extended-pass dependency).
+    let key_candidates = if config.wants("key_candidates") {
+        chroma_mean.as_ref().map(|c| {
+            perceptual::detect_key_candidates(c)
+                .into_iter()
+                .map(|kc| (kc.key, kc.camelot.to_string(), kc.score))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+
+    // --- vocalness / instrumentalness (heuristic v2, 0.2.4) ---
+    // Mid-band spectral contrast, from the extended pass. Voice and (especially)
+    // screamed/broadband vocals fill the ~0.8-5.6 kHz spectral valleys → LOW
+    // peak-to-valley contrast → HIGH vocalness; clean solo pitched instruments
+    // leave deep valleys → HIGH contrast → LOW vocalness. A lift-only flatness
+    // term nudges harsh/broadband material further up. instrumentalness (still
+    // the inverse) shares the value; we compute it whenever either is wanted and
+    // split the emission. Requires spectral_contrast_mean + spectral_flatness_mean
+    // (extended pass) — hence both are in EXTENDED_FEATURES. See `crate::vocal`
+    // for the superseded v1 mel-based heuristic.
+    let vocalness_val = if config.wants("vocalness") || config.wants("instrumentalness") {
+        // Peak-to-valley contrast at C_HI reads as fully instrumental, at C_LO as
+        // fully vocal. Bands 2..=4 cover ~0.8-5.6 kHz (geometric edges over
+        // [200, sr/2], see the contrast-band setup above).
+        const C_HI: Float = 2.05;
+        const C_LO: Float = 1.35;
+        // Defensive: without contrast (theoretical — the extended pass always
+        // computes it when these are wanted) emit no vocalness rather than a
+        // wrong one.
+        spectral_contrast_mean.as_ref().and_then(|c| {
+            if c.len() < 5 {
+                return None;
+            }
+            // Degenerate guard: on (near-)silence every band floors to the same
+            // noise value, so mid-band contrast collapses to ~0 and the formula
+            // below would read it as maximally vocal. Silence carries no vocal
+            // energy → report 0.0 (instrumentalness then 1.0), not a wrong high.
+            if rms_mean < 1e-5 {
+                return Some(0.0);
+            }
+            let c_mid = (c[2] + c[3] + c[4]) / 3.0;
+            let v_contrast = ((C_HI - c_mid) / (C_HI - C_LO)).clamp(0.0, 1.0);
+            // Lift-only harsh/broadband boost from spectral flatness.
+            let flat = spectral_flatness_mean.unwrap_or(0.0);
+            let lift = 0.15 * ((flat - 0.02) / 0.05).clamp(0.0, 1.0);
+            Some((v_contrast + lift).min(1.0))
+        })
+    } else {
+        None
+    };
+    let vocalness = if config.wants("vocalness") { vocalness_val } else { None };
+    let instrumentalness = if config.wants("instrumentalness") {
+        vocalness_val.map(|v| (1.0 - v).clamp(0.0, 1.0))
+    } else {
+        None
+    };
+
+    let mut result = TrackAnalysis {
+        provenance: AnalysisProvenance {
+            schema_version: ANALYSIS_SCHEMA_VERSION,
+            sample_rate: sr,
+            hop_length,
+            mode: config.mode,
+            requested_features: config.features.as_ref().map(|f| {
+                let mut v: Vec<String> = f.iter().cloned().collect();
+                v.sort();
+                v
+            }),
+        },
         duration_sec,
         bpm,
+        bpm_raw,
+        bpm_confidence,
+        bpm_candidates,
         beats,
         onset_frames,
         rms_mean,
         rms_max,
         loudness_lufs,
         dynamic_range_db,
+        // --- loudness ---
+        true_peak_db,
+        replaygain_db,
+        loudness_curve,
+        loudness_momentary_max_db,
+        loudness_range_lu,
+        // --- end loudness ---
         spectral_centroid_mean: centroid_mean,
         zero_crossing_rate: zcr,
         onset_density,
@@ -952,6 +1565,7 @@ fn analyze_signal_inner(
         time_signature,
         time_signature_confidence,
         chord_sequence,
+        chord_events,
         chord_change_rate,
         predominant_chord,
         dissonance: dissonance_val,
@@ -959,18 +1573,139 @@ fn analyze_signal_inner(
         danceability,
         key,
         key_confidence,
+        key_camelot,
         valence,
         acousticness,
         // Embedding placeholder — future ONNX integration
         embedding: None,
-        // Tier 3 placeholders — requires ML models
-        mood_happy: None,
-        mood_aggressive: None,
-        mood_relaxed: None,
-        mood_sad: None,
-        instrumentalness: None,
+        // Mood + instrumentalness: heuristic v1 (opt-in), None unless requested.
+        mood_happy: mood.as_ref().map(|m| m.happy),
+        mood_aggressive: mood.as_ref().map(|m| m.aggressive),
+        mood_relaxed: mood.as_ref().map(|m| m.relaxed),
+        mood_sad: mood.as_ref().map(|m| m.sad),
+        instrumentalness,
+        // genre + genre_confidence: populated below iff a genre model is set.
         genre: None,
-    })
+        genre_confidence: None,
+
+        // --- beat grid ---
+        grid_offset_sec,
+        downbeats,
+        grid_stability,
+        // --- structure ---
+        energy_curve: structure.as_ref().map(|s| s.energy_curve.clone()),
+        energy_curve_hop_sec: structure.as_ref().map(|s| s.energy_curve_hop_sec),
+        segments: structure.as_ref().map(|s| s.segments.clone()),
+        intro_end_sec: structure.as_ref().map(|s| s.intro_end_sec),
+        outro_start_sec: structure.as_ref().map(|s| s.outro_start_sec),
+        energy_level: structure.as_ref().map(|s| s.energy_level),
+        // --- silence ---
+        leading_silence_sec,
+        trailing_silence_sec,
+        // --- key candidates ---
+        key_candidates,
+        // --- vocalness ---
+        vocalness,
+        // --- fingerprint ---
+        fingerprint,
+        // --- similarity ---
+        embedding_version: None,
+        // --- tags ---
+        // Populated by analyze_file when requested; analyze_signal has no file.
+        tags: None,
+    };
+
+    // --- similarity ---
+    // Populate the hand-crafted similarity vector only when explicitly opted in
+    // via `features=["embedding"]`. This keeps compact/playlist/full unchanged
+    // and adds near-zero cost (the vector is assembled from features already
+    // computed above). A future ML embedding can replace `embed` behind the same
+    // version field.
+    // Compute the embedding whenever it is needed — an explicit request OR a
+    // genre model that classifies over it.
+    if config.wants_embedding() {
+        let emb = crate::similarity::embed(&result);
+        // Run the user-supplied genre model, if any (the version match was
+        // verified up front). Populate genre + genre_confidence.
+        if let Some(ref model) = config.genre_model {
+            let (label, conf) = model.predict(&emb);
+            result.genre = Some(label);
+            result.genre_confidence = Some(conf);
+        }
+        // Only surface the embedding fields when explicitly requested — a genre
+        // model uses the vector internally without leaking it.
+        if config.wants("embedding") {
+            result.embedding = Some(emb);
+            result.embedding_version = Some(crate::similarity::SIMILARITY_VERSION);
+        }
+    }
+
+    Ok(result)
+}
+
+// ============================================================
+// Silence offsets (opt-in)
+// ============================================================
+
+/// Leading/trailing silence duration (seconds) from per-frame RMS.
+///
+/// A frame counts as silent when its RMS is below `threshold_db` dBFS relative to
+/// full scale (amplitude `10^(threshold_db/20)`; default -60 dBFS ≈ 0.001).
+///
+/// Hysteresis rule: leading silence ends at the first frame that *begins a
+/// sustained run* of at least `HYST_FRAMES` consecutive above-threshold frames.
+/// A single loud click surrounded by silence is shorter than the run and is
+/// therefore ignored — it does not terminate the silence. Trailing silence is
+/// the symmetric quantity measured from the end.
+///
+/// Returns `(leading_sec, trailing_sec)`, each clamped to `[0, duration]`.
+fn silence_offsets(
+    rms: &[Float],
+    sr: u32,
+    hop_length: usize,
+    threshold_db: Float,
+) -> (Float, Float) {
+    /// Consecutive above-threshold frames required to count as real audio onset.
+    const HYST_FRAMES: usize = 3;
+
+    let n = rms.len();
+    let sec_per_frame = hop_length as Float / sr as Float;
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let thresh = 10.0_f32.powf(threshold_db / 20.0);
+    let need = HYST_FRAMES.min(n);
+
+    // Leading: first index that starts a sustained above-threshold run.
+    let mut lead_frames = n; // all-silence fallback
+    for i in 0..n {
+        if rms[i] >= thresh {
+            let end = (i + need).min(n);
+            if (end - i) >= need && (i..end).all(|k| rms[k] >= thresh) {
+                lead_frames = i;
+                break;
+            }
+        }
+    }
+
+    // Trailing: last index that ends a sustained above-threshold run.
+    let mut trail_frames = n; // all-silence fallback
+    for i in (0..n).rev() {
+        if rms[i] >= thresh {
+            let start = i + 1 - need; // i - (need-1)
+            // `start` underflow-safe because i >= need-1 is required for a run.
+            if i + 1 >= need && (i + 1 - need..=i).all(|k| rms[k] >= thresh) {
+                trail_frames = n - 1 - i;
+                break;
+            }
+            let _ = start;
+        }
+    }
+
+    let dur = n as Float * sec_per_frame;
+    let lead = (lead_frames as Float * sec_per_frame).clamp(0.0, dur);
+    let trail = (trail_frames as Float * sec_per_frame).clamp(0.0, dur);
+    (lead, trail)
 }
 
 // ============================================================
@@ -990,6 +1725,41 @@ pub fn playlist() -> AnalysisConfig {
 /// Shorthand for full mode analysis.
 pub fn full() -> AnalysisConfig {
     AnalysisConfig { mode: AnalysisMode::Full, ..Default::default() }
+}
+
+/// Build merged [`ChordEvent`]s from per-window labels. Windows are the
+/// `tonal::chord_boundaries` spans that produced `chords` (so the two stay
+/// aligned by construction); runs of identical labels merge, the first event
+/// starts at 0.0 and the last ends at `duration_sec` (the STFT tail past the
+/// final frame belongs to the last chord).
+fn chord_events_from_labels(
+    chords: &[String],
+    beats: &[usize],
+    n_frames: usize,
+    sr_f: Float,
+    hop_length: usize,
+    duration_sec: Float,
+) -> Vec<ChordEvent> {
+    if chords.is_empty() || beats.is_empty() {
+        return Vec::new();
+    }
+    let boundaries = crate::tonal::chord_boundaries(beats, n_frames);
+    debug_assert_eq!(boundaries.len(), chords.len() + 1);
+    let to_sec = |frame: usize| frame as Float * hop_length as Float / sr_f;
+
+    let mut events: Vec<ChordEvent> = Vec::new();
+    for (i, label) in chords.iter().enumerate() {
+        let start_sec = if i == 0 { 0.0 } else { to_sec(boundaries[i]) };
+        let end_sec = to_sec(boundaries[i + 1]);
+        match events.last_mut() {
+            Some(last) if last.label == *label => last.end_sec = end_sec,
+            _ => events.push(ChordEvent { label: label.clone(), start_sec, end_sec }),
+        }
+    }
+    if let Some(last) = events.last_mut() {
+        last.end_sec = duration_sec;
+    }
+    events
 }
 
 #[cfg(test)]
@@ -1014,6 +1784,53 @@ mod tests {
         assert!(result.spectral_bandwidth_mean.is_none());
         assert!(result.mfcc_mean.is_none());
         assert!(result.energy.is_none());
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures"))
+            .join(name)
+    }
+
+    #[test]
+    fn test_analyze_file_tags_populated() {
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(["tags"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_file(&fixture("tagged.flac"), 22050, &config).unwrap();
+        let t = result.tags.expect("tags requested → Some");
+        assert_eq!(t.title.as_deref(), Some("Test Title"));
+        assert_eq!(t.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(t.album.as_deref(), Some("Test Album"));
+        assert_eq!(t.genre.as_deref(), Some("Electronic"));
+        assert_eq!(t.year, Some(2024));
+        assert_eq!(t.track_no, Some(3));
+        // tags must NOT trigger the extended DSP pass.
+        assert!(result.mfcc_mean.is_none(), "tags must not enable extended features");
+        assert!(result.energy.is_none());
+        assert!(result.chroma_mean.is_none());
+        // The computed `genre` placeholder is distinct from the tag genre.
+        assert!(result.genre.is_none());
+    }
+
+    #[test]
+    fn test_analyze_file_default_no_tags() {
+        let result = analyze_file(&fixture("tagged.flac"), 22050, &compact()).unwrap();
+        assert!(result.tags.is_none(), "tags not requested → None");
+    }
+
+    #[test]
+    fn test_analyze_signal_never_has_tags() {
+        let y = sine(440.0, 22050, 2.0);
+        // Even when "tags" is (meaninglessly) requested for a bare signal.
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(["tags"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        assert!(result.tags.is_none(), "analyze_signal has no file → tags None");
     }
 
     #[test]
@@ -1043,6 +1860,208 @@ mod tests {
         assert_eq!(max_bin, 9, "A440 should map to chroma bin 9 (A), got {}", max_bin);
     }
 
+    /// Sum of equal-amplitude pure sines over `dur` seconds at `sr`.
+    fn chord(freqs: &[Float], sr: u32, dur: Float) -> Vec<Float> {
+        let n = (sr as Float * dur) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as Float / sr as Float;
+                freqs.iter().map(|&f| (2.0 * PI * f * t).sin()).sum::<Float>()
+                    / freqs.len() as Float
+            })
+            .collect()
+    }
+
+    /// A C-major triad progression — the authentic cadence I–IV–V–I, repeated
+    /// `reps` times, as pure sines. The tonic-triad pitch classes dominate:
+    /// C appears in 3 of 4 chords, G in 3, E in 2, while every non-tonic-triad
+    /// class (A, F, B, D) appears only once — so chroma top-3 is unambiguously
+    /// {C, E, G} and the cadence pins the key to C major.
+    fn c_major_progression(sr: u32, reps: usize) -> Array1<Float> {
+        // I: C5 E5 G5 / IV: F4 A4 C5 / V: G4 B4 D5 / I: C5 E5 G5 — voiced in the
+        // well-resolved mid register near the octave-weighting centre (~880 Hz)
+        // so a fixed 2048-pt FFT resolves each note at 48 kHz without smearing
+        // into neighbouring pitch classes.
+        let chords: [&[Float]; 4] = [
+            &[523.25, 659.26, 783.99],
+            &[349.23, 440.00, 523.25],
+            &[392.00, 493.88, 587.33],
+            &[523.25, 659.26, 783.99],
+        ];
+        let mut samples: Vec<Float> = Vec::new();
+        for _ in 0..reps {
+            for c in &chords {
+                samples.extend(chord(c, sr, 1.0));
+            }
+        }
+        Array1::from(samples)
+    }
+
+    /// THE regression test for the chroma sr-bias bug: without the librosa
+    /// octave-domain weighting in `filters::chroma`, the >11 kHz broadband band
+    /// floods chroma at 44.1k/48k and real-music tonality collapses (e.g. every
+    /// track reads as F major). A C-major progression must yield chroma top-3
+    /// {C,E,G} == bins {0,4,7} and key "C major" at every sample rate.
+    #[test]
+    fn test_chroma_key_multirate_c_major() {
+        for &sr in &[22050u32, 44100, 48000] {
+            let y = c_major_progression(sr, 3);
+            let r = analyze_signal(y.view(), sr, &feature_config(&["key", "chroma"])).unwrap();
+
+            let chroma = r.chroma_mean.clone().expect("chroma_mean populated");
+            let mut idx: Vec<usize> = (0..12).collect();
+            idx.sort_by(|&a, &b| chroma[b].partial_cmp(&chroma[a]).unwrap());
+            let top3: HashSet<usize> = idx[..3].iter().copied().collect();
+            let expected: HashSet<usize> = [0usize, 4, 7].into_iter().collect();
+            assert_eq!(
+                top3, expected,
+                "sr={sr}: chroma top-3 should be C/E/G bins {{0,4,7}}, got {top3:?} (chroma={chroma:?})"
+            );
+
+            assert_eq!(
+                r.key.clone().unwrap(),
+                "C major",
+                "sr={sr}: key should be C major, got {:?}",
+                r.key
+            );
+        }
+    }
+
+    /// Single-sine invariance: a 440 Hz tone maps to chroma bin 9 (A) at every
+    /// supported sample rate — the octave weighting must not shift a pure tone.
+    #[test]
+    fn test_chroma_single_sine_invariance_multirate() {
+        for &sr in &[22050u32, 44100, 48000] {
+            let y = sine(440.0, sr, 2.0);
+            let r = analyze_signal(y.view(), sr, &feature_config(&["chroma"])).unwrap();
+            let chroma = r.chroma_mean.expect("chroma_mean populated");
+            let max_bin = chroma
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(max_bin, 9, "sr={sr}: A440 should map to bin 9 (A), got {max_bin}");
+        }
+    }
+
+    #[test]
+    fn test_analysis_schema_version_pinned() {
+        // Bump deliberately (with a changelog note), never accidentally.
+        assert_eq!(ANALYSIS_SCHEMA_VERSION, 3);
+    }
+
+    #[test]
+    fn test_provenance_populated() {
+        let y = sine(440.0, 22050, 2.0);
+        let result = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let p = &result.provenance;
+        assert_eq!(p.schema_version, ANALYSIS_SCHEMA_VERSION);
+        assert_eq!(p.sample_rate, 22050);
+        assert_eq!(p.hop_length, HOP_LENGTH);
+        assert_eq!(p.mode, AnalysisMode::Compact);
+        assert!(p.requested_features.is_none());
+        // Frame→seconds via provenance must agree with the beatgrid convention.
+        if let Some(&f) = result.beats.first() {
+            let via_prov = f as Float * p.hop_length as Float / p.sample_rate as Float;
+            let via_grid = crate::beatgrid::grid_offset(&result.beats, 22050, HOP_LENGTH);
+            assert!((via_prov - via_grid).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_provenance_records_feature_override() {
+        let y = sine(440.0, 22050, 2.0);
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Playlist,
+            features: Some(["key", "energy", "chroma"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        let p = &result.provenance;
+        assert_eq!(p.mode, AnalysisMode::Playlist);
+        // Sorted, so the recorded list is deterministic across runs.
+        assert_eq!(
+            p.requested_features.as_deref(),
+            Some(&["chroma".to_string(), "energy".to_string(), "key".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_frame_to_sec_helpers_match_beatgrid() {
+        let y = sine(440.0, 22050, 2.0);
+        let result = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let beats_sec = result.beats_sec();
+        assert_eq!(beats_sec.len(), result.beats.len());
+        if !result.beats.is_empty() {
+            let via_grid = crate::beatgrid::grid_offset(&result.beats, 22050, HOP_LENGTH);
+            assert!((beats_sec[0] - via_grid).abs() < 1e-9);
+        }
+        for (sec, &frame) in result.onsets_sec().iter().zip(&result.onset_frames) {
+            assert!((sec - result.frame_to_sec(frame)).abs() < 1e-9);
+            assert!(*sec >= 0.0 && *sec <= result.duration_sec + 0.1);
+        }
+        assert!(result.downbeats_sec().is_none(), "beatgrid not requested");
+    }
+
+    #[test]
+    fn test_chord_events_merge_and_cover() {
+        let chords: Vec<String> = ["Am", "Am", "C", "C", "C", "G"]
+            .iter().map(|s| s.to_string()).collect();
+        // beats[0] > 0 and last beat < n_frames → boundaries = [0] + beats + [n_frames]
+        let beats = vec![10, 20, 30, 40, 50];
+        let n_frames = 60;
+        let (sr_f, hop) = (22050.0, 512);
+        let dur = 2.0;
+        let events = chord_events_from_labels(&chords, &beats, n_frames, sr_f, hop, dur);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].label, "Am");
+        assert_eq!(events[1].label, "C");
+        assert_eq!(events[2].label, "G");
+        // Contiguous, covering [0, dur]
+        assert_eq!(events[0].start_sec, 0.0);
+        assert_eq!(events[2].end_sec, dur);
+        for w in events.windows(2) {
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-9, "not contiguous");
+        }
+        // Merge boundary: Am ends where C starts = boundary frame 20
+        let expect = 20.0 * hop as Float / sr_f;
+        assert!((events[0].end_sec - expect).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_chord_events_populated_with_sequence() {
+        let y = sine(440.0, 22050, 2.0);
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(["chords"].iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        let seq = result.chord_sequence.expect("chord_sequence requested");
+        let events = result.chord_events.expect("chord_events mirror chord_sequence");
+        if seq.is_empty() {
+            assert!(events.is_empty());
+            return;
+        }
+        // Events are the run-length merge of the sequence.
+        let mut merged: Vec<&String> = Vec::new();
+        for label in &seq {
+            if merged.last() != Some(&label) { merged.push(label); }
+        }
+        let labels: Vec<&String> = events.iter().map(|e| &e.label).collect();
+        assert_eq!(labels, merged);
+        // Spans are monotone, contiguous, and cover [0, duration].
+        assert_eq!(events[0].start_sec, 0.0);
+        assert!((events.last().unwrap().end_sec - result.duration_sec).abs() < 1e-6);
+        for e in &events {
+            assert!(e.end_sec > e.start_sec, "empty span {:?}", e);
+        }
+        for w in events.windows(2) {
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-9);
+        }
+    }
+
     #[test]
     fn test_analyze_custom_features() {
         let y = sine(440.0, 22050, 2.0);
@@ -1068,9 +2087,35 @@ mod tests {
             features: None,
             bpm_min: Some(79.0),
             bpm_max: Some(192.0),
+            genre_model: None,
         };
         assert_eq!(config.bpm_min, Some(79.0));
         assert_eq!(config.bpm_max, Some(192.0));
+    }
+
+    #[test]
+    fn test_analyze_exposes_bpm_candidates() {
+        let sr = 22050u32;
+        let n = (4.0 * sr as Float) as usize;
+        let interval = (60.0 / 120.0 * sr as Float) as usize;
+        let mut y = Array1::<Float>::zeros(n);
+        let mut pos = 0;
+        while pos < n {
+            for i in 0..100.min(n - pos) {
+                y[pos + i] = (2.0 * PI * 1000.0 * i as Float / sr as Float).sin();
+            }
+            pos += interval;
+        }
+        let result = analyze_signal(y.view(), sr, &compact()).unwrap();
+        assert!(!result.bpm_candidates.is_empty(), "expected tempo candidates");
+        assert!(result.bpm_candidates.len() <= 5);
+        // Candidates are sorted by score descending.
+        for w in result.bpm_candidates.windows(2) {
+            assert!(w[0].1 >= w[1].1, "candidates must be sorted by score descending");
+        }
+        assert!(result.bpm_raw > 30.0 && result.bpm_raw < 320.0);
+        // Without a bpm range, the final bpm equals the raw selection.
+        assert!((result.bpm - result.bpm_raw).abs() < 1e-6);
     }
 
     #[test]
@@ -1089,6 +2134,39 @@ mod tests {
         let result = analyze_signal(y.view(), sr, &compact()).unwrap();
         assert!(result.bpm > 50.0 && result.bpm < 250.0);
         assert!(result.onset_frames.len() >= 3);
+    }
+
+    #[test]
+    fn test_bpm_confidence_present_and_click_vs_drone() {
+        let sr = 22050u32;
+        // Steady 120-BPM click train: strong, agreeing tempo + dense onsets.
+        let n = (4.0 * sr as Float) as usize;
+        let interval = (60.0 / 120.0 * sr as Float) as usize;
+        let mut clicks = Array1::<Float>::zeros(n);
+        let mut pos = 0;
+        while pos < n {
+            for i in 0..100.min(n - pos) {
+                clicks[pos + i] = (2.0 * PI * 1000.0 * i as Float / sr as Float).sin();
+            }
+            pos += interval;
+        }
+        let r_click = analyze_signal(clicks.view(), sr, &compact()).unwrap();
+        // Always present + bounded.
+        assert!((0.0..=1.0).contains(&r_click.bpm_confidence),
+            "bpm_confidence out of [0,1]: {}", r_click.bpm_confidence);
+        // Steady percussive material should read as reasonably anchored.
+        assert!(r_click.bpm_confidence > 0.5,
+            "click train bpm_confidence should be > 0.5, got {}", r_click.bpm_confidence);
+
+        // Slow sustained sine drone: sparse onsets, weak tempo evidence.
+        let drone = sine(220.0, sr, 4.0);
+        let r_drone = analyze_signal(drone.view(), sr, &compact()).unwrap();
+        assert!((0.0..=1.0).contains(&r_drone.bpm_confidence),
+            "drone bpm_confidence out of [0,1]: {}", r_drone.bpm_confidence);
+        // Comparative: sparse-onset drone is less anchored than the click train.
+        assert!(r_drone.bpm_confidence < r_click.bpm_confidence,
+            "drone ({}) should be less anchored than click train ({})",
+            r_drone.bpm_confidence, r_click.bpm_confidence);
     }
 
     #[test]
@@ -1120,5 +2198,429 @@ mod tests {
 
         assert!(r_sine.spectral_flatness_mean.unwrap() < r_noise.spectral_flatness_mean.unwrap());
         assert!(r_sine.spectral_bandwidth_mean.unwrap() < r_noise.spectral_bandwidth_mean.unwrap());
+    }
+
+    // ---- structure (opt-in) ----
+
+    fn structure_config() -> AnalysisConfig {
+        AnalysisConfig {
+            mode: AnalysisMode::Playlist,
+            features: Some(["structure"].iter().map(|s| s.to_string()).collect()),
+            ..AnalysisConfig::default()
+        }
+    }
+
+    // ---- opt-in features: silence, key candidates, vocalness ----
+
+    fn feature_config(names: &[&str]) -> AnalysisConfig {
+        AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: Some(names.iter().map(|s| s.to_string()).collect()),
+            ..AnalysisConfig::default()
+        }
+    }
+
+    const SR: u32 = 22050;
+    const HOP: usize = 512;
+    const SPF: Float = HOP as Float / SR as Float; // seconds per frame
+
+    #[test]
+    fn test_silence_offsets_leading_trailing() {
+        // 65 silent frames, 100 loud, 97 silent → 1.5s lead, 2.25s trail (approx).
+        let mut rms = vec![0.0_f32; 65];
+        rms.extend(std::iter::repeat(0.5).take(100));
+        rms.extend(std::iter::repeat(0.0).take(97));
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        assert!((lead - 65.0 * SPF).abs() < SPF, "lead {} vs {}", lead, 65.0 * SPF);
+        assert!((trail - 97.0 * SPF).abs() < SPF, "trail {} vs {}", trail, 97.0 * SPF);
+        assert!((lead - 1.5).abs() < 2.0 * SPF);
+        assert!((trail - 2.25).abs() < 2.0 * SPF);
+    }
+
+    #[test]
+    fn test_silence_offsets_no_silence() {
+        let rms = vec![0.5_f32; 200];
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        assert_eq!(lead, 0.0);
+        assert_eq!(trail, 0.0);
+    }
+
+    #[test]
+    fn test_silence_offsets_all_silence() {
+        let rms = vec![0.0_f32; 200];
+        let dur = 200.0 * SPF;
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        assert!((lead - dur).abs() < 1e-4, "leading {} should ~= duration {}", lead, dur);
+        assert!((trail - dur).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_silence_offsets_click_hysteresis() {
+        // 30 silent, 1 loud click, 30 silent, then 100 sustained loud, then silent.
+        let mut rms = vec![0.0_f32; 30];
+        rms.push(0.9); // isolated click
+        rms.extend(std::iter::repeat(0.0).take(30));
+        rms.extend(std::iter::repeat(0.5).take(100));
+        rms.extend(std::iter::repeat(0.0).take(20));
+        let (lead, _trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        // Sustained audio starts at frame 61, not at the click (frame 30).
+        assert!((lead - 61.0 * SPF).abs() < SPF,
+            "click should not end silence: lead {} expected ~{}", lead, 61.0 * SPF);
+    }
+
+    #[test]
+    fn test_silence_pipeline_optin_and_bounds() {
+        // Real pipeline: 1.5s leading + 2.25s trailing silence around a tone.
+        let sr = SR;
+        let lead_n = (1.5 * sr as Float) as usize;
+        let trail_n = (2.25 * sr as Float) as usize;
+        let mid_n = (3.0 * sr as Float) as usize;
+        let mut y = Array1::<Float>::zeros(lead_n + mid_n + trail_n);
+        for i in 0..mid_n {
+            y[lead_n + i] = 0.5 * (2.0 * PI * 440.0 * i as Float / sr as Float).sin();
+        }
+        let r = analyze_signal(y.view(), sr, &feature_config(&["silence"])).unwrap();
+        let lead = r.leading_silence_sec.unwrap();
+        let trail = r.trailing_silence_sec.unwrap();
+        assert!((lead - 1.5).abs() < 0.05, "lead {}", lead);
+        assert!((trail - 2.25).abs() < 0.05, "trail {}", trail);
+        assert!(lead >= 0.0 && lead <= r.duration_sec);
+        assert!(trail >= 0.0 && trail <= r.duration_sec);
+    }
+
+    #[test]
+    fn test_optin_absent_by_default() {
+        let y = sine(440.0, SR, 3.0);
+        for cfg in [compact(), playlist(), full()] {
+            let r = analyze_signal(y.view(), SR, &cfg).unwrap();
+            assert!(r.leading_silence_sec.is_none(), "silence must be opt-in");
+            assert!(r.trailing_silence_sec.is_none());
+            assert!(r.key_candidates.is_none(), "key_candidates must be opt-in");
+            assert!(r.vocalness.is_none(), "vocalness must be opt-in");
+            assert!(r.mood_happy.is_none(), "mood must be opt-in");
+            assert!(r.mood_aggressive.is_none());
+            assert!(r.mood_relaxed.is_none());
+            assert!(r.mood_sad.is_none());
+            assert!(r.instrumentalness.is_none(), "instrumentalness must be opt-in");
+        }
+    }
+
+    #[test]
+    fn test_mood_pipeline_optin_and_no_leak() {
+        let y = sine(440.0, SR, 3.0);
+        let r = analyze_signal(y.view(), SR, &feature_config(&["mood"])).unwrap();
+        for v in [r.mood_happy, r.mood_aggressive, r.mood_relaxed, r.mood_sad] {
+            let v = v.expect("mood_* must be Some when mood requested");
+            assert!((0.0..=1.0).contains(&v) && v.is_finite(), "mood out of range {}", v);
+        }
+        // Requesting mood must NOT leak the key / valence fields.
+        assert!(r.key.is_none(), "mood must not leak key");
+        assert!(r.valence.is_none(), "mood must not leak valence");
+    }
+
+    #[test]
+    fn test_instrumentalness_pipeline_and_inverse() {
+        let y = sine(440.0, SR, 3.0);
+        // instrumentalness alone: Some in range, vocalness field stays None.
+        let r = analyze_signal(y.view(), SR, &feature_config(&["instrumentalness"])).unwrap();
+        let inst = r.instrumentalness.expect("instrumentalness must be Some");
+        assert!((0.0..=1.0).contains(&inst) && inst.is_finite(), "instrumentalness {}", inst);
+        assert!(r.vocalness.is_none(), "vocalness field must stay None");
+        // Both together: instrumentalness == 1 - vocalness.
+        let r2 = analyze_signal(y.view(), SR, &feature_config(&["vocalness", "instrumentalness"])).unwrap();
+        let v = r2.vocalness.expect("vocalness Some");
+        let i = r2.instrumentalness.expect("instrumentalness Some");
+        assert!((i - (1.0 - v)).abs() < 1e-5, "inst {} should equal 1 - vocalness {}", i, v);
+    }
+
+    #[test]
+    fn test_structure_is_opt_in() {
+        let y = sine(440.0, 22050, 15.0);
+        // Default playlist/full modes must NOT compute structure.
+        for cfg in [playlist(), full()] {
+            let r = analyze_signal(y.view(), 22050, &cfg).unwrap();
+            assert!(r.energy_curve.is_none(), "structure must be absent by default");
+            assert!(r.segments.is_none());
+            assert!(r.energy_level.is_none());
+        }
+        // Compact obviously not.
+        let rc = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        assert!(rc.energy_curve.is_none());
+        // Opt-in via features=["structure"] turns it on.
+        let rs = analyze_signal(y.view(), 22050, &structure_config()).unwrap();
+        assert!(rs.energy_curve.as_ref().unwrap().len() > 0);
+        assert!(rs.segments.is_some());
+        assert!(rs.energy_curve_hop_sec.unwrap() > 0.0);
+        let lvl = rs.energy_level.unwrap();
+        assert!((1..=10).contains(&lvl));
+    }
+
+    #[test]
+    fn test_structure_pipeline_known_shape() {
+        // Synthetic audio with known structure:
+        // 30s quiet 200 Hz sine -> 60s loud broadband -> 30s quiet sine.
+        let sr = 22050u32;
+        let seg = |dur: Float, loud: bool| -> Vec<Float> {
+            let n = (dur * sr as Float) as usize;
+            (0..n)
+                .map(|i| {
+                    if loud {
+                        // Broadband: sum of several partials, high amplitude.
+                        let t = i as Float / sr as Float;
+                        0.5 * ((2.0 * PI * 200.0 * t).sin()
+                            + (2.0 * PI * 1500.0 * t).sin()
+                            + (2.0 * PI * 4000.0 * t).sin())
+                            / 3.0
+                            * 3.0
+                    } else {
+                        0.04 * (2.0 * PI * 200.0 * i as Float / sr as Float).sin()
+                    }
+                })
+                .collect()
+        };
+        let mut samples = seg(30.0, false);
+        samples.extend(seg(60.0, true));
+        samples.extend(seg(30.0, false));
+        let y = Array1::from(samples);
+
+        let r = analyze_signal(y.view(), sr, &structure_config()).unwrap();
+        let segs = r.segments.as_ref().unwrap();
+        // Covering + ordered + non-overlapping.
+        assert!(segs.first().unwrap().start_sec.abs() < 1e-2, "first segment must start at 0");
+        assert!((segs.last().unwrap().end_sec - r.duration_sec).abs() < 0.5, "last must end at duration");
+        for w in segs.windows(2) {
+            assert!((w[0].end_sec - w[1].start_sec).abs() < 1e-2, "segments must be contiguous");
+        }
+        // Boundaries near 30s and 90s.
+        let interior: Vec<Float> = segs.iter().skip(1).map(|s| s.start_sec).collect();
+        let near = |target: Float| interior.iter().any(|&b| (b - target).abs() < 8.0);
+        assert!(near(30.0), "expected boundary near 30s, interior={:?}", interior);
+        assert!(near(90.0), "expected boundary near 90s, interior={:?}", interior);
+        // Intro/outro land in the quiet regions.
+        assert!(r.intro_end_sec.unwrap() < 45.0);
+        assert!(r.outro_start_sec.unwrap() > 80.0);
+        // Middle (loud) segment has clearly higher mean energy than the ends.
+        let mid = segs.iter()
+            .find(|s| s.start_sec < 60.0 && s.end_sec > 60.0)
+            .map(|s| s.energy)
+            .unwrap_or(0.0);
+        assert!(mid > segs.first().unwrap().energy + 0.15, "loud section should be more energetic");
+    }
+
+    #[test]
+    fn test_key_candidates_pipeline_a_minor() {
+        // Synthesized A-minor triad: A(220), C(~261.6), E(~329.6).
+        let sr = SR;
+        let n = (4.0 * sr as Float) as usize;
+        let y = Array1::from_shape_fn(n, |i| {
+            let t = i as Float / sr as Float;
+            0.5 * (2.0 * PI * 220.0 * t).sin()
+                + 0.4 * (2.0 * PI * 261.63 * t).sin()
+                + 0.35 * (2.0 * PI * 329.63 * t).sin()
+        });
+        let r = analyze_signal(y.view(), sr, &feature_config(&["key_candidates"])).unwrap();
+        let cands = r.key_candidates.unwrap();
+        assert_eq!(cands.len(), 3, "exactly 3 candidates");
+        // Scores descending, finite, in [0,1].
+        for (_, _, s) in &cands {
+            assert!(*s >= 0.0 && *s <= 1.0 && s.is_finite());
+        }
+        assert!(cands[0].2 >= cands[1].2 && cands[1].2 >= cands[2].2);
+        // Camelot codes valid.
+        let valid: HashSet<&str> = [
+            "1A","2A","3A","4A","5A","6A","7A","8A","9A","10A","11A","12A",
+            "1B","2B","3B","4B","5B","6B","7B","8B","9B","10B","11B","12B",
+        ].into_iter().collect();
+        for (_, cam, _) in &cands {
+            assert!(valid.contains(cam.as_str()), "invalid camelot {}", cam);
+        }
+        // First candidate is A minor and matches the separately requested `key`.
+        assert_eq!(cands[0].0, "A minor", "got {}", cands[0].0);
+        let r2 = analyze_signal(y.view(), sr, &feature_config(&["key", "key_candidates"])).unwrap();
+        assert_eq!(r2.key_candidates.unwrap()[0].0, r2.key.unwrap());
+    }
+
+    #[test]
+    fn test_vocalness_pipeline_in_range() {
+        let y = sine(440.0, SR, 3.0);
+        let r = analyze_signal(y.view(), SR, &feature_config(&["vocalness"])).unwrap();
+        // vocalness now requires the extended pass (mid-band spectral contrast);
+        // requesting it alone must trigger that pass and yield Some in [0, 1].
+        // This Some doubles as the proof the extended pass ran.
+        let v = r.vocalness.expect("vocalness must be Some (extended pass runs for it)");
+        assert!(v >= 0.0 && v <= 1.0 && v.is_finite(), "vocalness {}", v);
+    }
+
+    #[test]
+    fn test_vocalness_requesting_triggers_extended() {
+        // features=["vocalness"] alone must flip needs_extended() on (v2 is
+        // contrast-based). A side-effect of the extended pass is that
+        // spectral_flatness_mean gets computed — assert it's Some, which proves
+        // the pass ran solely from requesting vocalness.
+        let cfg = feature_config(&["vocalness"]);
+        assert!(cfg.needs_extended(), "vocalness must require the extended pass");
+        let y = sine(440.0, SR, 3.0);
+        let r = analyze_signal(y.view(), SR, &cfg).unwrap();
+        assert!(
+            r.spectral_flatness_mean.is_some(),
+            "extended pass (flatness) must have run when vocalness requested"
+        );
+    }
+
+    #[test]
+    fn test_vocalness_broadband_high_tonal_low() {
+        // v2 semantics: broadband/flat content fills the mid-band spectral valleys
+        // → LOW contrast → HIGH vocalness; harmonically rich tonal content leaves
+        // deep valleys → HIGH contrast → LOW vocalness.
+        //
+        // A pure sine is degenerate for spectral contrast (a single line has no
+        // valley structure), so we use a richly harmonic sawtooth-like tone for the
+        // "tonal/instrumental" pole — many sharp harmonic peaks over quiet valleys,
+        // exactly the deep-valley case the contrast score is built to catch — and
+        // white noise for the "broadband/vocal-like" pole. This pair reliably
+        // demonstrates the ordering; see the acceptance means in the plan.
+        let sr = SR;
+        let dur = 4.0;
+        let n = (sr as Float * dur) as usize;
+
+        // White noise: flat spectrum, shallow valleys → low contrast → high vocalness.
+        let mut noise = Array1::<Float>::zeros(n);
+        let mut state: u32 = 0x1234_5678;
+        for s in noise.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *s = (state as Float / u32::MAX as Float) * 2.0 - 1.0;
+        }
+        let rn = analyze_signal(noise.view(), sr, &feature_config(&["vocalness"])).unwrap();
+        let v_noise = rn.vocalness.unwrap();
+
+        // Harmonic-rich tone: many sharp partials with deep valleys between →
+        // high contrast → low vocalness.
+        let mut tone = Array1::<Float>::zeros(n);
+        let f0 = 220.0_f32;
+        for (i, s) in tone.iter_mut().enumerate() {
+            let t = i as Float / sr as Float;
+            let mut acc = 0.0;
+            for h in 1..=20 {
+                acc += (1.0 / h as Float) * (2.0 * PI * f0 * h as Float * t).sin();
+            }
+            *s = 0.3 * acc;
+        }
+        let rt = analyze_signal(tone.view(), sr, &feature_config(&["vocalness"])).unwrap();
+        let v_tone = rt.vocalness.unwrap();
+
+        assert!(v_noise > v_tone, "broadband {v_noise} should out-score tonal {v_tone}");
+        assert!(v_noise > 0.6, "broadband vocalness {v_noise} should be high");
+        assert!(v_tone < 0.5, "harmonic-tone vocalness {v_tone} should be low");
+    }
+
+    #[test]
+    fn test_analyze_batch_with_progress() {
+        use std::sync::Mutex;
+        // Mix a real fixture (Ok) with nonexistent paths (Err). Errors still
+        // count as completions, so the callback must fire for every input.
+        let real = fixture("tagged.flac");
+        let paths: Vec<&Path> = vec![
+            real.as_path(),
+            Path::new("/nonexistent/one.flac"),
+            Path::new("/nonexistent/two.flac"),
+        ];
+        let len = paths.len();
+        // Fn + Sync: record (done, total) pairs from the worker threads.
+        let calls: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+        let results = analyze_batch_with(&paths, 22050, &compact(), |done, total| {
+            calls.lock().unwrap().push((done, total));
+        });
+
+        // One result per input, in input order.
+        assert_eq!(results.len(), len);
+        assert!(results[0].is_ok(), "real fixture should analyze");
+        assert!(results[1].is_err(), "nonexistent path should error");
+        assert!(results[2].is_err(), "nonexistent path should error");
+
+        // Callback fired exactly once per input; total constant == len.
+        let mut recorded = calls.into_inner().unwrap();
+        assert_eq!(recorded.len(), len, "callback fires once per file");
+        assert!(recorded.iter().all(|&(_, total)| total == len), "total is constant == len");
+
+        // `done` values are a permutation of 1..=len (completion order varies).
+        let mut dones: Vec<usize> = recorded.drain(..).map(|(d, _)| d).collect();
+        dones.sort_unstable();
+        assert_eq!(dones, (1..=len).collect::<Vec<_>>(), "done values are 1..=len");
+    }
+
+    // ---- genre (bring-your-own model) ----
+
+    /// A trivial 2-class model (48-dim, zero weights + bias favoring "b") at a
+    /// given embedding_version. Class "b" wins for any embedding.
+    fn genre_model_json(embedding_version: u32) -> String {
+        let zeros48 = "0,".repeat(48);
+        let zeros48 = zeros48.trim_end_matches(',');
+        format!(
+            r#"{{"format_version": 1, "embedding_version": {embedding_version},
+                "labels": ["a", "b"],
+                "layers": [{{"weights": [[{zeros48}],[{zeros48}]], "bias": [0.0, 2.0], "activation": "softmax"}}]}}"#
+        )
+    }
+
+    fn genre_config(features: Option<&[&str]>) -> AnalysisConfig {
+        let model = crate::genre::from_json_str(&genre_model_json(crate::similarity::SIMILARITY_VERSION)).unwrap();
+        AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            features: features.map(|f| f.iter().map(|s| s.to_string()).collect()),
+            genre_model: Some(std::sync::Arc::new(model)),
+            ..AnalysisConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_genre_model_predicts_without_leaking_embedding() {
+        let y = sine(440.0, 22050, 3.0);
+        // No feature list → embedding computed internally but NOT emitted.
+        let r = analyze_signal(y.view(), 22050, &genre_config(None)).unwrap();
+        assert_eq!(r.genre.as_deref(), Some("b"));
+        let conf = r.genre_confidence.expect("genre_confidence populated");
+        assert!(conf > 0.5 && conf <= 1.0, "confidence {conf}");
+        // Embedding fields must NOT leak when features didn't request them.
+        assert!(r.embedding.is_none(), "embedding must not be emitted");
+        assert!(r.embedding_version.is_none());
+    }
+
+    #[test]
+    fn test_genre_model_with_embedding_feature_emits_both() {
+        let y = sine(440.0, 22050, 3.0);
+        let r = analyze_signal(y.view(), 22050, &genre_config(Some(&["embedding"]))).unwrap();
+        assert_eq!(r.genre.as_deref(), Some("b"));
+        assert!(r.genre_confidence.is_some());
+        // Now the embedding fields ARE emitted (explicitly requested).
+        assert!(r.embedding.is_some(), "embedding emitted when requested");
+        assert_eq!(r.embedding_version, Some(crate::similarity::SIMILARITY_VERSION));
+    }
+
+    #[test]
+    fn test_genre_model_version_mismatch_fails_fast() {
+        let y = sine(440.0, 22050, 3.0);
+        let model = crate::genre::from_json_str(&genre_model_json(999)).unwrap();
+        let config = AnalysisConfig {
+            mode: AnalysisMode::Compact,
+            genre_model: Some(std::sync::Arc::new(model)),
+            ..AnalysisConfig::default()
+        };
+        match analyze_signal(y.view(), 22050, &config) {
+            Err(SonaraError::ModelError(msg)) => {
+                assert!(msg.contains("999"), "message should name the model version: {msg}");
+            }
+            Err(other) => panic!("expected ModelError, got {other:?}"),
+            Ok(_) => panic!("expected ModelError, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_genre_none_without_model() {
+        let y = sine(440.0, 22050, 3.0);
+        for cfg in [compact(), playlist(), full()] {
+            let r = analyze_signal(y.view(), 22050, &cfg).unwrap();
+            assert!(r.genre.is_none(), "genre None without a model");
+            assert!(r.genre_confidence.is_none());
+        }
     }
 }

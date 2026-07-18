@@ -9,6 +9,34 @@ use crate::error::{SonaraError, Result};
 use crate::onset;
 use crate::types::Float;
 
+/// Number of strongest tempo candidates surfaced in a [`TempoEstimate`].
+const MAX_TEMPO_CANDIDATES: usize = 5;
+
+/// Result of tempo estimation, including diagnostic tempo candidates.
+///
+/// - `tempo`: final BPM used for beat tracking (after metrical selection,
+///   fractional ACF refinement, optional `bpm_min`/`bpm_max` range alignment,
+///   and clamping to `[30, 320]`).
+/// - `tempo_raw`: the same estimate *before* optional BPM-range alignment.
+/// - `candidates`: the strongest ACF tempo candidates as `(bpm, score)` pairs,
+///   sorted by score descending.
+#[derive(Debug, Clone)]
+pub struct TempoEstimate {
+    /// Final tempo in BPM (post range-alignment and clamping).
+    pub tempo: Float,
+    /// Selected tempo in BPM before optional BPM-range alignment.
+    pub tempo_raw: Float,
+    /// Strongest `(bpm, score)` candidates, sorted by score descending.
+    pub candidates: Vec<(Float, Float)>,
+}
+
+impl TempoEstimate {
+    /// Fallback estimate carrying a single tempo and no ACF candidates.
+    fn fallback(tempo: Float) -> Self {
+        Self { tempo, tempo_raw: tempo, candidates: Vec::new() }
+    }
+}
+
 /// Track beats in an audio signal.
 ///
 /// Returns `(tempo, beat_frames)`:
@@ -42,6 +70,28 @@ pub fn beat_track_with_bpm_range(
     bpm_min: Option<Float>,
     bpm_max: Option<Float>,
 ) -> Result<(Float, Vec<usize>)> {
+    let (estimate, beats) = beat_track_detailed(
+        y, onset_envelope, sr, hop_length, start_bpm, tightness, trim, bpm_min, bpm_max,
+    )?;
+    Ok((estimate.tempo, beats))
+}
+
+/// Track beats and return the full [`TempoEstimate`] alongside the beat frames.
+///
+/// Like [`beat_track_with_bpm_range`], but also surfaces the pre-range-alignment
+/// tempo and the strongest ACF tempo candidates for reporting.
+#[allow(clippy::too_many_arguments)]
+pub fn beat_track_detailed(
+    y: Option<ArrayView1<Float>>,
+    onset_envelope: Option<ArrayView1<Float>>,
+    sr: u32,
+    hop_length: usize,
+    start_bpm: Float,
+    tightness: Float,
+    trim: bool,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+) -> Result<(TempoEstimate, Vec<usize>)> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -58,9 +108,11 @@ pub fn beat_track_with_bpm_range(
     };
 
     if oenv.len() < 4 {
-        return Ok((start_bpm, vec![]));
+        return Ok((TempoEstimate::fallback(start_bpm), vec![]));
     }
 
+    // Guard against flat / degenerate onset envelopes (silence, DC): with no
+    // dynamic range there is no meaningful autocorrelation peak to track.
     let (min_onset, max_onset) = oenv.iter().copied().fold(
         (Float::INFINITY, Float::NEG_INFINITY),
         |(min_v, max_v), v| (min_v.min(v), max_v.max(v)),
@@ -70,15 +122,16 @@ pub fn beat_track_with_bpm_range(
         || max_onset <= 1e-10
         || (max_onset - min_onset) <= 1e-10
     {
-        return Ok((start_bpm, vec![]));
+        return Ok((TempoEstimate::fallback(start_bpm), vec![]));
     }
 
     // Estimate tempo
-    let tempo = estimate_tempo(&oenv, sr, hop_length, start_bpm, bpm_min, bpm_max)?;
+    let estimate = estimate_tempo(&oenv, sr, hop_length, start_bpm, bpm_min, bpm_max)?;
+    let tempo = estimate.tempo;
     let frames_per_beat = (60.0 * frame_rate / tempo).round() as usize;
 
     if frames_per_beat == 0 {
-        return Ok((tempo, vec![]));
+        return Ok((estimate, vec![]));
     }
 
     // Normalize onset envelope
@@ -103,7 +156,7 @@ pub fn beat_track_with_bpm_range(
         beats
     };
 
-    Ok((tempo, beats))
+    Ok((estimate, beats))
 }
 
 /// Estimate tempo from onset envelope using autocorrelation.
@@ -114,7 +167,7 @@ fn estimate_tempo(
     start_bpm: Float,
     bpm_min: Option<Float>,
     bpm_max: Option<Float>,
-) -> Result<Float> {
+) -> Result<TempoEstimate> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -123,7 +176,7 @@ fn estimate_tempo(
     let acf = crate::core::audio::autocorrelate(oenv.view(), Some(max_lag))?;
 
     if acf.is_empty() {
-        return Ok(start_bpm);
+        return Ok(TempoEstimate::fallback(start_bpm));
     }
 
     // Find peaks in BPM range [30, 300]
@@ -132,10 +185,11 @@ fn estimate_tempo(
     let max_lag = max_lag.min(acf.len() - 1);
 
     if min_lag >= max_lag {
-        return Ok(start_bpm);
+        return Ok(TempoEstimate::fallback(start_bpm));
     }
 
-    // Weight by log-normal prior centered at start_bpm
+    // Weight by log-normal prior centered at start_bpm, collecting every
+    // candidate so downstream metrical-multiple lifting can inspect them.
     let mut candidates = Vec::with_capacity(max_lag - min_lag + 1);
 
     for lag in min_lag..=max_lag {
@@ -147,11 +201,25 @@ fn estimate_tempo(
 
     let (lag, _tempo, _score) =
         select_preferred_tempo_candidate(&candidates).unwrap_or((min_lag, start_bpm, 0.0));
-    let tempo = refine_tempo_from_acf_peak(acf.view(), lag, frame_rate);
-    let tempo = align_tempo_to_bpm_range(tempo, bpm_min, bpm_max)?;
-    Ok(tempo.clamp(30.0, 320.0))
+    let refined = refine_tempo_from_acf_peak(acf.view(), lag, frame_rate);
+    let tempo_raw = refined.clamp(30.0, 320.0);
+    let tempo = align_tempo_to_bpm_range(refined, bpm_min, bpm_max)?.clamp(30.0, 320.0);
+
+    // Surface the strongest candidates (by score) as (bpm, score) pairs.
+    let mut ranked: Vec<(Float, Float)> = candidates
+        .iter()
+        .filter(|(_, bpm, score)| bpm.is_finite() && score.is_finite())
+        .map(|&(_, bpm, score)| (bpm, score))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(MAX_TEMPO_CANDIDATES);
+
+    Ok(TempoEstimate { tempo, tempo_raw, candidates: ranked })
 }
 
+/// Refine a tempo from an integer ACF lag using parabolic interpolation of the
+/// autocorrelation peak. This removes the 1–3 BPM quantization drift caused by
+/// snapping tempo to integer lags.
 fn refine_tempo_from_acf_peak(acf: ArrayView1<Float>, lag: usize, frame_rate: Float) -> Float {
     let integer_tempo = if lag > 0 {
         60.0 * frame_rate / lag as Float
@@ -189,6 +257,10 @@ fn refine_tempo_from_acf_peak(acf: ArrayView1<Float>, lag: usize, frame_rate: Fl
     }
 }
 
+/// Choose a preferred tempo candidate, lifting a supported metrical multiple
+/// (2x / 1.5x) when the raw best BPM is suspiciously low. Electronic music
+/// frequently produces a strong half-tempo ACF peak; when a supported
+/// double/dotted multiple exists in the higher, danceable range we prefer it.
 fn select_preferred_tempo_candidate(candidates: &[(usize, Float, Float)]) -> Option<(usize, Float, Float)> {
     let best = candidates
         .iter()
@@ -213,6 +285,8 @@ fn select_preferred_tempo_candidate(candidates: &[(usize, Float, Float)]) -> Opt
     Some(best)
 }
 
+/// Find the strongest candidate that is a supported metrical multiple of `best`
+/// (within the given BPM window, multiple range, and score-ratio floor).
 fn best_supported_metrical_candidate(
     candidates: &[(usize, Float, Float)],
     best: (usize, Float, Float),
@@ -236,6 +310,8 @@ fn best_supported_metrical_candidate(
         .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
 }
 
+/// Deterministically double/halve a tempo into an optional user-supplied BPM
+/// range. Both bounds must be supplied together and span at least one octave.
 fn align_tempo_to_bpm_range(
     mut tempo: Float,
     bpm_min: Option<Float>,

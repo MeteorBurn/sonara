@@ -2,6 +2,199 @@
 
 All notable changes to sonara are documented in this file.
 
+## [0.2.4] - 2026-07-17
+
+### Validated on real music
+
+All changes validated on labeled samples from a commercial library.
+**Vocalness v2** (62-track probe set: 21 harsh-vocal metal, 23 clean-vocal
+pop, 18 instrumental): the v1 heuristic was inverted on real music (pooled
+AUC 0.29 — screamed metal scored lowest, solo sax/flute high); v2 scores
+monotone harsh (0.92 mean) > clean (0.57) > instrumental (0.23), AUC 0.92;
+acceptance tracks: Slipknot/Slayer 1.00, Kenny G/Galway 0.00. Known
+ambiguous cases documented (sparse voice+piano ballads, voice-mimicking solo
+violin). **Acousticness/danceability** (199-track distributions + 28 genre
+anchors): electronic anchors now 0.11 mean acousticness (was 0.45), acoustic
+anchors 0.71; danceability spreads to p5 0.20 / p95 0.90 (was p5 0.69).
+**bpm_confidence** separates rhythmic from ambient/rubato material at
+d=+1.07 (implausible ambient tempi score ~0.39, steady dance 0.83-0.90).
+
+### Fixed
+
+- **`vocalness`/`instrumentalness` inverted on real music.** v2 derives
+  vocal presence from mid-band spectral contrast (voice and screams fill the
+  0.8-5.6 kHz spectral valleys; clean solo instruments leave them deep)
+  instead of tonality+modulation. Both features now require the extended
+  pass. `vocal.rs` remains as a documented legacy pitched-melodic-content
+  heuristic. **`ANALYSIS_SCHEMA_VERSION` → 3.**
+- **`acousticness` and `danceability` were compressed rankers, not absolute
+  scales** (floors of ~0.37 / ~0.39 baked into their normalizations).
+  Recalibrated; rankings preserved (Spearman 0.97 / 1.00). Consumers with
+  pre-0.2.4 cutoffs must re-derive them.
+
+### Added
+
+- **`bpm_confidence`** — always-present [0,1] trust signal for the tempo
+  estimate (dominant ACF-peak strength + bpm/beat-rate agreement + onset
+  density). Low values flag ambient/rubato material where BPM is unreliable.
+- **`tags.original_year`** — original release year from ID3v2.4 `TDOR` /
+  v2.3 `TORY` / Vorbis `ORIGINALDATE` (+ tolerant `TXXX:originalyear`-style
+  raw keys). `tags.year` now reflects only the file/edition date — on
+  reissues prefer `original_year` for era reasoning.
+
+## [0.2.3] - 2026-07-17
+
+### Validated on real music
+
+The chroma fix was validated on a 100-track random sample from a commercial
+library (seed-pinned, analyzed at both 22050 Hz and native 44.1 kHz): before,
+native-rate key detection collapsed to "F major" on **72/100** tracks with
+near-zero confidence; after, the native histogram matches the healthy 22050
+spread (top key ≤ 16%), cross-rate key agreement on a 15-track spot set went
+from 4/15 to **13/15**, and native F-major dropped to 1/15. A 400-track tonal
+batch confirms chords/dissonance (separate HPCP path) unaffected: 400/400
+analyzed, all sanity checks pass, flat key distribution (top key 9%).
+Deterministic multi-rate regression tests (C-major cadence at
+22050/44100/48000) now pin the behavior.
+
+### Fixed
+
+- **Chroma filterbank corrupted all chroma-derived output at sample rates
+  above 22050** (key, key_candidates, key_camelot, valence, mood, tonnetz,
+  embedding dims 13-25). Two librosa-parity gaps: the missing octave-domain
+  Gaussian weighting let broadband energy above the 22050 Nyquist flood the
+  chroma sum, and linear two-class bin assignment concentrated wide
+  low-frequency bins arbitrarily. Both fixed to librosa 0.10 semantics.
+  Chroma values change at every rate: **`ANALYSIS_SCHEMA_VERSION` → 2** and
+  **`SIMILARITY_VERSION` → 2** (persisted analyses and stored embeddings
+  should be re-generated). Known cost: extended-path (playlist/full) analysis
+  +8-13%; the compact default path is unaffected.
+
+### Added
+
+- **Bring-your-own genre model** — `analyze_*(..., genre_model=<path>)` runs a
+  user-trained classifier (JSON: softmax/ReLU layers over the versioned 48-dim
+  similarity embedding) in pure Rust, populating `genre` + `genre_confidence`.
+  Training is numpy-only: `sonara.genre.train(X, y)` → `.save(path)` — no
+  PyTorch/ONNX/sklearn. Models carry `embedding_version` and fail fast on
+  mismatch. sonara ships no model; the field stays `None` without one.
+- **Core-side batch progress** — `analyze_batch_with(paths, sr, config,
+  on_done)` for Rust consumers; the Python `progress=` callback now wraps it.
+
+## [0.2.2] - 2026-07-16
+
+### Added
+
+- **File tag passthrough** — opt-in `features=["tags"]`: `analyze_file` /
+  `analyze_batch` now surface the ID3v2/Vorbis metadata Symphonia already
+  parses during decoding as a `tags` sub-dict (Rust: `tags: Option<TrackTags>`)
+  with `title`, `artist`, `album`, `genre`, `year`, `track_no`. No second file
+  parse needed downstream. Always absent for `analyze_signal`; the WAV fast
+  path carries no tags. Zero cost when not requested.
+- **Mood heuristics (v1)** — opt-in `features=["mood"]` populates
+  `mood_happy`, `mood_aggressive`, `mood_relaxed`, `mood_sad` in `[0, 1]`:
+  documented weighted-term heuristics over key mode, tempo, brightness,
+  energy, onset density, and dissonance. Explicitly rough hints, not an ML
+  classifier; `genre` remains reserved for a real ML tier.
+- **Instrumentalness (v1)** — opt-in `features=["instrumentalness"]`: the
+  inverse of the vocal-presence heuristic (`1 - vocalness`, clamped).
+- **Batch progress** — `analyze_batch(..., progress=callable)` calls
+  `progress(done, total)` after each file completes (completion order;
+  results stay input-ordered). Callback exceptions never abort the batch.
+
+## [0.2.1] - 2026-07-15
+
+### Added
+
+- **Analysis provenance** — every result now carries a `provenance` block
+  (`schema_version`, effective `sample_rate`, `hop_length`, `mode`,
+  `requested_features`), so persisted results are self-describing: frame
+  indices convert to seconds as `frame * hop_length / sample_rate`, and
+  stale records are detectable via `ANALYSIS_SCHEMA_VERSION`.
+- **`chord_events`** — typed, time-spanned chords alongside `chord_sequence`:
+  merged runs as `{label, start_sec, end_sec}`, contiguous and covering the
+  track. Present whenever chords are computed.
+- **Seconds helpers** (Rust) — `TrackAnalysis::frame_to_sec`, `beats_sec`,
+  `onsets_sec`, `downbeats_sec`; `TrackAnalysis.print()` shows a Provenance
+  line.
+
+### Changed
+
+- **`segments` is now a typed `SegmentEvent` struct** in the Rust API
+  (previously a `(start_sec, end_sec, energy)` tuple). The Python dict shape
+  is unchanged. Default-path performance verified unchanged (interleaved A/B,
+  ≤0.4%).
+
+### Validated on real music
+
+All new features were validated against a 9,400-track commercial library
+(60-track random sample + targeted cases): zero batch failures, BPM within
+78-186, `energy_level` spreading across the full 1-10 range, fingerprint
+separating a real library duplicate pair (0.69) and a gain-changed re-encode
+(1.00) from unrelated tracks (0.01), and similarity ranking a same-artist
+track #5 of 61 against random material.
+
+### Changed
+
+- **`analyze_batch` entries always carry `path`** — successful results now
+  include their input path (failures already did), so consumers no longer
+  need to zip results against the input list.
+- **`energy_level` recalibrated to real music** — the 1-10 mapping now
+  stretches the measured 0.25-0.60 mean-energy band of commercial libraries
+  (was 0.30-0.85, which never produced levels above 6 on real tracks).
+- **`vocalness` hardened** — a relative modulation-depth gate stops sustained
+  chords/pads (whose envelope ripple is numerical, not syllabic) from scoring
+  as vocal; per-frame flatness is now energy-weighted. Steady instrumental
+  pads score < 0.3 (previously ~0.8); regression tests cover the failure cases.
+- **`similarity()` rescaled for interpretability** — raw embedding distances on
+  real music occupy a narrow band (~0.08-0.27), so `1 - distance` scored
+  everything ~0.85. A calibrated linear stretch (`SIMILARITY_SCALE`, measured
+  on a commercial library) now puts a median random pair at ~0.5 and close
+  neighbors at 0.65+. The stretch is monotone, so nearest-neighbor rankings
+  are unchanged; `distance()` still returns the raw value.
+- **Segmentation threshold recalibrated** — the novelty peak threshold rose
+  from `mean + 0.5·std` to `mean + 2·std` (named constant). On real pop the
+  old threshold hit the 12-segment cap on most tracks; the new one centres at
+  ~8 segments per 3-4 minute track with the cap binding <10%, while synthetic
+  known-structure boundaries are still recovered. Accuracy-level tuning
+  against annotated structure data remains future work.
+- CI now runs all nine Python test suites (previously only `test_api.py`).
+
+### Added — opt-in analysis features
+
+All of the following are strictly **opt-in** via `features=[...]` — no default mode
+(compact/playlist/full) computes them, and default-mode performance is unchanged
+(verified before/after on a 3-minute track: compact ~37 ms, playlist ~72 ms, full ~517 ms).
+
+- **Beat grid** (`features=["beatgrid"]`) — `grid_offset_sec` (first-beat anchor), `downbeats` (bar-starting beats, 4/4 by default or the detected time signature), and `grid_stability` (0-1 grid rigidity). Reuses tracked beats and onset envelope; ~0.2 ms opt-in cost.
+- **Structure & energy** (`features=["structure"]`) — `energy_curve` (+`energy_curve_hop_sec`), novelty-based `segments` (contiguous `{start_sec, end_sec, energy}`), `intro_end_sec`/`outro_start_sec` heuristics, and a 1-10 `energy_level`. ~1 ms opt-in cost on a 3-minute track.
+- **Similarity embedding** (`features=["embedding"]`) — versioned 48-dim normalized feature vector (`embedding` + `embedding_version`) built from timbre/harmony/rhythm/dynamics/tonal blocks, plus `sonara.similarity(a, b)` (weighted-Euclidean, 0-1) accepting results or raw vectors. No ML dependency; the field is designed so model-based embeddings can replace it behind the same version constant.
+- **Acoustic fingerprint** (`features=["fingerprint"]`) — gain-invariant band-energy-difference fingerprint (base64 `fingerprint` + `fingerprint_version`, ~8 subprints/sec) and `sonara.fingerprint_match(a, b)` (0-1, alignment-searched) for duplicate detection across re-encodes. ~6 ms opt-in cost per 3-minute track.
+- **Loudness/gain suite** (`features=["loudness"]`) — `true_peak_db` (4x oversampled, BS.1770-4), `replaygain_db` (gain to -18 LUFS), `loudness_curve` (short-term LUFS, 3 s/1 s), `loudness_momentary_max_db`, and `loudness_range_lu` (EBU R128 LRA). Existing `loudness_lufs`/`dynamic_range_db` unchanged.
+- **Silence offsets** (`features=["silence"]`) — `leading_silence_sec`/`trailing_silence_sec` at -60 dBFS with click-proof hysteresis, from already-computed frame RMS.
+- **Key candidates** (`features=["key_candidates"]`) — top-3 `(key, camelot, score)` list mirroring `bpm_candidates`; first entry always matches `key`.
+- **Vocal presence** (`features=["vocalness"]`) — documented 0-1 heuristic (vocal-band energy ratio, tonality, 4-8 Hz syllabic modulation via an O(n) band-pass biquad). ~1.4 ms opt-in cost.
+
+### Added
+
+- **Optional BPM range** — `bpm_min` / `bpm_max` parameters on `analyze_file` / `analyze_signal` / `analyze_batch` (and `AnalysisConfig`). When both are set, detected tempos outside the range are deterministically doubled/halved into it (e.g. a house/techno project range of 79–192). `bpm_max` must be at least `2 * bpm_min`.
+- **Tempo candidates in results** — new `bpm_raw` (selected tempo before range alignment) and `bpm_candidates` (top-5 `(bpm, score)` pairs) fields in all modes, so downstream apps can apply their own octave-disambiguation policy. Exposed in Rust via `beat_track_detailed()` returning a `TempoEstimate`.
+- **Camelot wheel notation** — new `key_camelot` field (e.g. A minor → `8A`, C major → `8B`) alongside `key` in playlist/full modes, for harmonic mixing workflows.
+- **Structured per-file batch errors** — `analyze_batch` now always returns one entry per input path in order; a file that fails to decode yields `{path, error, error_kind}` (`io`, `decode`, `unsupported_format`, …) instead of aborting the whole batch. New `TrackAnalysis.failed` property.
+- **Accuracy regression harness** — `sonara/tests/bpm_accuracy.rs` (synthetic ground-truth suite: 15 tempos × 3 patterns, octave-error and drift metrics with hard-asserted thresholds) and `sonara/examples/accuracy_eval.rs` (CSV-driven evaluator for labeled corpora with worst-offenders table).
+- **Contribution infrastructure** — `CONTRIBUTING.md`, issue templates, and PR template; detection changes now require accuracy evidence.
+
+### Fixed
+
+- **Half-BPM octave errors** — tempo estimation now collects all ACF candidates and lifts a well-supported 2x/1.5x metrical multiple when the raw pick is suspiciously low. Fixes the classic electronic-music failure where ~126–140 BPM tracks were reported at half tempo. Synthetic-suite octave errors at 126/140 BPM eliminated across all test patterns.
+- **1–3 BPM quantization drift** — ACF peak selection now uses parabolic (fractional-lag) interpolation instead of integer lags. Synthetic-suite median absolute error dropped from 0.90 to 0.27 BPM.
+- **Degenerate onset envelopes** — flat/silent onset envelopes now fall back to `start_bpm` with no beats instead of producing arbitrary output.
+
+### Known limitations
+
+- 192 BPM material can still be halved to ~96 (outside the metrical-lift tiers); use a `bpm_min`/`bpm_max` range whose floor excludes ~96 to rescue it.
+- The metrical lift can double genuinely slow (60–70 BPM) tracks that have dense offbeat hats; a `bpm_max` bound disambiguates. Beat-grid regularity scoring across candidates is the planned principled fix. Both cases are tracked as `#[ignore]`d tests in the accuracy suite.
+
 ## [0.1.8] - 2026-07-03
 
 ### Added
@@ -14,11 +207,11 @@ All notable changes to sonara are documented in this file.
 ### Fixed
 
 - Improve tempo candidate selection for tracks where upstream `v0.1.7` could report roughly half of the target BPM shown by DJ library tools.
-- Refine BPM autocorrelation peak selection with fractional/parabolic lag interpolation, reducing the 1-3 BPM quantization drift seen in HIGH/LOW near-miss benchmark rows.
+- Refine BPM autocorrelation peak selection with fractional/parabolic lag interpolation, reducing the 1–3 BPM quantization drift seen in HIGH/LOW near-miss benchmark rows.
 
 ### Validation
 
-- On the first 1000 labeled x2 benchmark rows, current optimized logic produced 998 successful analyses, 2 decode errors, and 1 remaining x2-like result before BPM range alignment. Applying the 79-192 BPM range reduced x2-like results to 0 in those 998 successful analyses.
+- On the first 1000 labeled x2 benchmark rows, current optimized logic produced 998 successful analyses, 2 decode errors, and 1 remaining x2-like result before BPM range alignment. Applying the 79–192 BPM range reduced x2-like results to 0 in those 998 successful analyses.
 
 ## [0.1.6] - 2026-04-14
 
