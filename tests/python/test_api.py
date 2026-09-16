@@ -360,6 +360,56 @@ test("analyze_signal carries provenance", _check_provenance_fields)
 test("provenance records feature override (sorted)", _check_provenance_feature_override)
 
 
+def _check_invalid_signal_contract():
+    for mode in ("compact", "full"):
+        cases = [
+            (np.array([], dtype=np.float32), 22050, "empty"),
+            (np.zeros(2048, dtype=np.float32), 0, "zero sample rate"),
+        ]
+        for value, bad_sr, label in cases:
+            try:
+                sonara.analyze_signal(value, sr=bad_sr, mode=mode)
+                raise AssertionError(f"{mode} accepted {label}")
+            except ValueError:
+                pass
+        for invalid in (np.nan, np.inf, -np.inf):
+            value = np.zeros(2048, dtype=np.float32)
+            value[17] = invalid
+            try:
+                sonara.analyze_signal(value, sr=22050, mode=mode)
+                raise AssertionError(f"{mode} accepted non-finite sample {invalid}")
+            except ValueError as exc:
+                assert "not finite" in str(exc), exc
+
+
+def _check_feature_registry_contract():
+    try:
+        sonara.analyze_signal(y_clicks, sr=22050, features=["keyy"])
+        raise AssertionError("unknown feature typo must fail")
+    except ValueError as exc:
+        message = str(exc)
+        assert "unknown feature(s): keyy" in message, message
+        assert "valid features: bpm, beats" in message, message
+
+    r = sonara.analyze_signal(
+        y_clicks,
+        sr=22050,
+        mode="compact",
+        features=["KeY", "EnErGy"],
+    )
+    assert r["provenance"]["requested_features"] == ["energy", "key"], r
+    assert "key" in r and isinstance(r["key"], str), r
+    assert np.isfinite(r["energy"]), r
+    for name in ("duration_sec", "bpm", "rms_mean", "spectral_centroid_mean"):
+        assert np.isfinite(r[name]), (name, r[name])
+
+
+test("analyze_signal rejects empty/zero-rate/non-finite inputs",
+     _check_invalid_signal_contract)
+test("feature registry rejects typos and canonicalizes mixed case",
+     _check_feature_registry_contract)
+
+
 def _check_chord_events():
     r = sonara.analyze_signal(y_clicks, sr=22050, mode="playlist")
     assert "chord_sequence" in r, "playlist mode should compute chords"
@@ -392,6 +442,7 @@ test("chord_events absent in compact", _check_chord_events_absent_when_not_reque
 
 # --- tags --- opt-in file metadata passthrough (analyze_file only)
 import os
+import tempfile
 
 _FLAC_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "tagged.flac")
 _MP3_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "tagged.mp3")
@@ -434,10 +485,47 @@ def _check_tags_absent_when_not_requested():
     assert "tags" not in r, "tags key should be absent unless features=['tags']"
 
 
+def _check_malformed_id3_does_not_block_mp3_audio():
+    with open(_MP3_FIXTURE, "rb") as f:
+        data = bytearray(f.read())
+    assert data[:14] == b"ID3\x03\0\0\0\0\x01,TIT2"
+    data[20] = 4  # Undefined ID3 text encoding.
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = os.path.join(temp_dir, "malformed-text-frame.mp3")
+        with open(path, "wb") as f:
+            f.write(data)
+        y, loaded_sr = sonara.load(path)
+
+    assert loaded_sr == 22050
+    assert len(y) > 0
+    assert np.isfinite(y).all()
+
+
+def _check_false_adts_marker_retries_as_mp3():
+    with open(_MP3_FIXTURE, "rb") as f:
+        source = f.read()
+    # Minimum ADTS header with reserved sample-rate index 13, followed by the
+    # fixture's synthetic MP3 frames (its ID3 tag occupies the first 310 bytes).
+    data = b"\xff\xf1\x7b\x7e\x2e\x58\xe2" + source[310:]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = os.path.join(temp_dir, "false-adts-marker.mp3")
+        with open(path, "wb") as f:
+            f.write(data)
+        y, loaded_sr = sonara.load(path)
+
+    assert loaded_sr == 22050
+    assert len(y) > 0
+    assert np.isfinite(y).all()
+
+
 test("tags sub-dict populated (analyze_file)", _check_tags_present)
 test("original_year passthrough (mp3 TORY)", _check_original_year_mp3)
 test("original_year is int", _check_original_year_type)
 test("tags absent without feature", _check_tags_absent_when_not_requested)
+test("malformed ID3 metadata does not block MP3 audio", _check_malformed_id3_does_not_block_mp3_audio)
+test("false ADTS marker retries through MP3 reader", _check_false_adts_marker_retries_as_mp3)
 
 # ============================================================
 # Pattern 22: Chroma/key are sample-rate invariant

@@ -15,7 +15,7 @@ import sys
 import sonara
 
 DATASET = (
-    "/Volumes/EksternalHome/Downloads/Apps/"
+    "/Volumes/EksternalHome/Downloads/Music/"
     "Greatest Hits - Collection 1958-2021 _1074 ALBUMS_ MP3 Part 2 Of 2-TL"
 )
 N_TRACKS = 400
@@ -29,13 +29,21 @@ def collect_files(root, exts=(".mp3", ".flac", ".wav", ".ogg")):
         for f in filenames:
             if f.lower().endswith(exts):
                 files.append(os.path.join(dirpath, f))
-    return files
+    return sorted(files)
+
+
+def ranked_counts(counts, limit):
+    """Rank counts deterministically: frequency descending, label ascending."""
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
 
 def main():
     print(f"Scanning {DATASET} ...")
     all_files = collect_files(DATASET)
     print(f"Found {len(all_files)} audio files")
+    if not all_files:
+        print("FAIL: tonal sanity corpus is unavailable or empty")
+        return 1
 
     random.seed(SEED)
     sample = random.sample(all_files, min(N_TRACKS, len(all_files)))
@@ -84,6 +92,8 @@ def main():
     # Chord data
     has_chords = [r for r in results if "chord_sequence" in r]
     has_diss = [r for r in results if "dissonance" in r]
+    n_tied_predominant = 0
+    n_wrong_predominant = 0
 
     print(f"\n  Tracks with chord_sequence:   {len(has_chords)}/{n_ok}")
     print(f"  Tracks with dissonance:       {len(has_diss)}/{n_ok}")
@@ -108,7 +118,7 @@ def main():
         from collections import Counter
         chord_counts = Counter(predominant)
         print(f"\n  Top 10 predominant chords:")
-        for chord, count in chord_counts.most_common(10):
+        for chord, count in ranked_counts(chord_counts, 10):
             pct = count / len(has_chords) * 100
             print(f"    {chord:5s}: {count:4d} ({pct:.1f}%)")
 
@@ -119,9 +129,19 @@ def main():
         all_chord_counts = Counter(all_chords_flat)
         print(f"\n  All chord labels seen: {len(all_chord_counts)}")
         print(f"  Top 10 chord labels overall:")
-        for chord, count in all_chord_counts.most_common(10):
+        for chord, count in ranked_counts(all_chord_counts, 10):
             pct = count / len(all_chords_flat) * 100
             print(f"    {chord:5s}: {count:5d} ({pct:.1f}%)")
+
+        for r in has_chords:
+            sequence_counts = Counter(r["chord_sequence"])
+            max_count = max(sequence_counts.values())
+            tied_labels = sorted(
+                chord for chord, count in sequence_counts.items()
+                if count == max_count
+            )
+            n_tied_predominant += len(tied_labels) > 1
+            n_wrong_predominant += r["predominant_chord"] != tied_labels[0]
 
     if has_diss:
         diss_vals = [r["dissonance"] for r in has_diss]
@@ -173,9 +193,12 @@ def main():
 
     print(f"  Invalid chord labels:        {n_invalid_chords}")
     print(f"  Empty chord sequences:       {n_chords_empty}")
+    print(f"  Tied predominant chords:     {n_tied_predominant}")
+    print(f"  Wrong predominant tie-break: {n_wrong_predominant}")
     print(f"  Dissonance out of [0,1]:     {n_diss_out_of_range}")
 
-    all_ok = n_invalid_chords == 0 and n_diss_out_of_range == 0
+    all_ok = (n_invalid_chords == 0 and n_chords_empty == 0
+              and n_wrong_predominant == 0 and n_diss_out_of_range == 0)
     print(f"\n  {'PASS' if all_ok else 'FAIL'}: all sanity checks {'passed' if all_ok else 'FAILED'}")
 
     # ===== EXISTING FEATURES SPOT CHECK =====
@@ -201,11 +224,12 @@ def main():
             from collections import Counter
             key_counts = Counter(keys)
             print(f"  Key distribution (top 5):")
-            for k, c in key_counts.most_common(5):
+            for k, c in ranked_counts(key_counts, 5):
                 print(f"    {k:12s}: {c:4d} ({c/len(keys)*100:.1f}%)")
 
     print("\nDone.")
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

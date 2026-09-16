@@ -134,6 +134,15 @@ class TrackAnalysis(dict):
         # --- vocalness ---
         if "vocalness" in self:
             perceptual.append(("Vocalness", f"{self['vocalness']:.2f}"))
+        if "aggression_score" in self:
+            score = self["aggression_score"]
+            if score is None:
+                perceptual.append((
+                    "Aggression",
+                    f"abstain (support {self.get('aggression_confidence', 0.0):.2f})",
+                ))
+            else:
+                perceptual.append(("Aggression", f"{score:.2f}"))
         # --- mood (heuristic v1) ---
         if "mood_happy" in self:
             perceptual.append((
@@ -224,6 +233,10 @@ class TrackAnalysis(dict):
             ]
             if "requested_features" in p:
                 parts.append(f"features [{', '.join(p['requested_features'])}]")
+            if "genre_model_id" in p:
+                parts.append(f"genre model {p['genre_model_id']}")
+            if "vocalness_model_id" in p:
+                parts.append(f"vocalness model {p['vocalness_model_id']}")
             lines.append("")
             lines.append(f"  Provenance  {' · '.join(parts)}")
 

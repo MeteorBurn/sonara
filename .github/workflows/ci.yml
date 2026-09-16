@@ -10,16 +10,22 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             cargo-features: ""
+            venv-python: ./.venv/bin/python
           - os: macos-latest
             cargo-features: --features accelerate
+            venv-python: ./.venv/bin/python
           - os: windows-latest
             cargo-features: ""
+            venv-python: ./.venv/Scripts/python.exe
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v6
         with:
@@ -28,36 +34,133 @@ jobs:
       - name: Rust tests
         run: cargo test -p sonara ${{ matrix.cargo-features }}
 
+      - name: Rust aggression-feature tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p sonara --features aggression
+
       - name: Build Python bindings
-        if: matrix.os != 'windows-latest'
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/.venv
         run: |
           python -m venv .venv
-          source .venv/bin/activate
-          pip install maturin numpy
-          maturin develop --release -m sonara-python/Cargo.toml
+          ${{ matrix.venv-python }} -m pip install maturin numpy
+          ${{ matrix.venv-python }} -m maturin develop --release -m sonara-python/Cargo.toml
 
       - name: Python tests
-        if: matrix.os != 'windows-latest'
-        # test_tonal_batch.py is excluded: it depends on a large local dataset.
-        run: |
-          source .venv/bin/activate
-          for t in test_api test_batch_errors test_camelot test_beatgrid \
-                   test_structure test_similarity test_fingerprint \
-                   test_loudness test_misc_features test_genre; do
-            echo "=== $t ==="
-            python "tests/python/$t.py"
-          done
+        run: ${{ matrix.venv-python }} scripts/run_python_tests.py
+
+      - name: Fidelity routing
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          FIDELITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: ${{ matrix.venv-python }} scripts/run_fidelity_gate.py --base "$FIDELITY_BASE"
+
+  build_wheels:
+    name: wheel (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            python-version: "3.10"
+            target: x86_64
+            manylinux: "2014"
+          - label: macos-x86_64
+            os: macos-15-intel
+            python-version: "3.12"
+            target: x86_64-apple-darwin
+            manylinux: "off"
+          - label: macos-arm64
+            os: macos-15
+            python-version: "3.12"
+            target: aarch64-apple-darwin
+            manylinux: "off"
+          - label: windows-x64
+            os: windows-latest
+            python-version: "3.12"
+            target: x86_64-pc-windows-msvc
+            manylinux: "off"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          maturin-version: v1.11.5
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --compatibility pypi --out dist -m sonara-python/Cargo.toml
+      - name: Smoke-install wheel
+        run: python scripts/smoke_artifacts.py --artifact-dir dist --kind wheel
+      - name: Upload verified wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-wheel-${{ matrix.label }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          maturin-version: v1.11.5
+          command: sdist
+          args: --out dist -m sonara-python/Cargo.toml
+      - name: Smoke-install sdist
+        run: python scripts/smoke_artifacts.py --artifact-dir dist --kind sdist
+      - name: Upload verified sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  collect_artifacts:
+    name: collect verified release artifacts
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Download verified artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify exact artifact set
+        run: python scripts/check_release_artifacts.py dist
+      - name: Upload exact release set
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-artifacts
+          path: dist/*
+          if-no-files-found: error
 
   publish:
-    needs: [test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, collect_artifacts]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'kkollsga/sonara'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -75,22 +178,36 @@ jobs:
       - name: Check if version exists on PyPI
         id: check
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://pypi.org/pypi/sonara/${{ steps.version.outputs.version }}/json/")
-          if [ "$STATUS" = "200" ]; then
-            echo "Published: version ${{ steps.version.outputs.version }} already on PyPI"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Not published: version ${{ steps.version.outputs.version }} not found on PyPI"
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          # No trailing slash: PyPI 301-redirects `/json/`, which is neither a
+          # hit nor a miss and previously read as "not published".
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+            "https://pypi.org/pypi/sonara/${{ steps.version.outputs.version }}/json")
+          case "$STATUS" in
+            200)
+              echo "Published: version ${{ steps.version.outputs.version }} already on PyPI"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "Not published: version ${{ steps.version.outputs.version }} not found on PyPI"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # Fail closed: an ambiguous answer must not become a duplicate upload.
+              echo "::error::Unexpected HTTP $STATUS from PyPI; refusing to guess publish state"
+              exit 1
+              ;;
+          esac
 
-      - name: Build sdist
+      - name: Download verified release set
         if: steps.check.outputs.exists == 'false'
-        uses: PyO3/maturin-action@v1
+        uses: actions/download-artifact@v8
         with:
-          command: sdist
-          args: -m sonara-python/Cargo.toml --out dist
+          name: release-artifacts
+          path: dist
+
+      - name: Recheck exact artifact set
+        if: steps.check.outputs.exists == 'false'
+        run: python scripts/check_release_artifacts.py dist
 
       - name: Publish to PyPI
         if: steps.check.outputs.exists == 'false'

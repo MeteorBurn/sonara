@@ -16,6 +16,7 @@
 //! {
 //!   "format_version": 1,
 //!   "embedding_version": 2,
+//!   "id": "my-genre-model-v1",
 //!   "labels": ["rock", "electronic"],
 //!   "layers": [
 //!     {"weights": [[...],[...]], "bias": [...], "activation": "relu"},
@@ -30,6 +31,11 @@
 //! `"relu"`, `"softmax"`, `"identity"`. The first layer's `in_dim` must equal
 //! [`crate::similarity::EMBEDDING_DIM`] (48); the last layer's activation must be
 //! `"softmax"` and its `out_dim` must equal `labels.len()`.
+//!
+//! `id` is an optional model-identity string (additive in format v1). When
+//! present it is carried into
+//! [`AnalysisProvenance`](crate::analyze::AnalysisProvenance) so downstream
+//! caches can detect results produced by a different model.
 //!
 //! ## Versioning
 //!
@@ -95,8 +101,27 @@ impl Layer {
         self.weights.len()
     }
 
-    /// Apply the layer to `x` (length must equal `in_dim`).
-    fn forward(&self, x: &[Float]) -> Vec<Float> {
+    /// Apply the layer to `x`, rejecting malformed or non-finite model state.
+    fn try_forward(&self, x: &[Float]) -> Result<Vec<Float>> {
+        if x.len() != self.in_dim() {
+            return Err(err(format!(
+                "inference input length {} does not match layer in_dim {}",
+                x.len(),
+                self.in_dim()
+            )));
+        }
+        if self.bias.len() != self.out_dim() {
+            return Err(err("inference layer bias/output dimensions do not match"));
+        }
+        if self
+            .weights
+            .iter()
+            .flatten()
+            .chain(self.bias.iter())
+            .any(|v| !v.is_finite())
+        {
+            return Err(err("inference layer contains a non-finite parameter"));
+        }
         let mut out: Vec<Float> = self
             .weights
             .iter()
@@ -109,6 +134,9 @@ impl Layer {
                 acc
             })
             .collect();
+        if out.iter().any(|v| !v.is_finite()) {
+            return Err(err("inference produced a non-finite layer output"));
+        }
         match self.activation {
             Activation::Relu => {
                 for v in out.iter_mut() {
@@ -118,16 +146,22 @@ impl Layer {
                 }
             }
             Activation::Identity => {}
-            Activation::Softmax => softmax_in_place(&mut out),
+            Activation::Softmax => softmax_in_place(&mut out)?,
         }
-        out
+        if out.iter().any(|v| !v.is_finite()) {
+            return Err(err("inference produced a non-finite activation"));
+        }
+        Ok(out)
     }
 }
 
 /// Numerically stable softmax (subtract max before exponentiating).
-fn softmax_in_place(v: &mut [Float]) {
+fn softmax_in_place(v: &mut [Float]) -> Result<()> {
     if v.is_empty() {
-        return;
+        return Err(err("softmax requires at least one value"));
+    }
+    if v.iter().any(|x| !x.is_finite()) {
+        return Err(err("softmax logits must be finite"));
     }
     let max = v.iter().copied().fold(Float::NEG_INFINITY, Float::max);
     let mut sum = 0.0;
@@ -135,11 +169,19 @@ fn softmax_in_place(v: &mut [Float]) {
         *x = (*x - max).exp();
         sum += *x;
     }
-    if sum > 0.0 {
-        for x in v.iter_mut() {
-            *x /= sum;
-        }
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(err("softmax normalization is not finite and positive"));
     }
+    for x in v.iter_mut() {
+        *x /= sum;
+    }
+    let normalized_sum: Float = v.iter().sum();
+    if v.iter().any(|x| !x.is_finite() || !(0.0..=1.0).contains(x))
+        || (normalized_sum - 1.0).abs() > 1e-4
+    {
+        return Err(err("softmax probabilities are not finite and normalized"));
+    }
+    Ok(())
 }
 
 /// A loaded, validated genre classifier over the similarity embedding.
@@ -150,6 +192,9 @@ pub struct GenreModel {
     /// The `embedding_version` the model was trained against. Compared to
     /// [`crate::similarity::SIMILARITY_VERSION`] at use time (in `analyze`).
     pub embedding_version: u32,
+    /// Optional model-identity string (`"id"` in the JSON). Carried into
+    /// analysis provenance when the model is used.
+    pub id: Option<String>,
 }
 
 impl GenreModel {
@@ -160,40 +205,86 @@ impl GenreModel {
     /// or longer vector is zero-padded / truncated to the first layer's `in_dim`
     /// so inference never panics.
     pub fn predict(&self, embedding: &[Float]) -> (String, Float) {
-        // Fit the input to the first layer's in_dim defensively.
-        let in_dim = self.layers.first().map(|l| l.in_dim()).unwrap_or(0);
-        let mut x: Vec<Float> = vec![0.0; in_dim];
-        for (slot, &v) in x.iter_mut().zip(embedding.iter()) {
-            *slot = if v.is_finite() { v } else { 0.0 };
-        }
-        for layer in &self.layers {
-            x = layer.forward(&x);
-        }
-        // Last layer is softmax → argmax gives the predicted label.
+        self.try_predict(embedding)
+            .unwrap_or_else(|_| (String::from("unknown"), 0.0))
+    }
+
+    /// Fallible classification used by analysis paths that must surface
+    /// malformed model state instead of silently emitting invalid output.
+    pub fn try_predict(&self, embedding: &[Float]) -> Result<(String, Float)> {
+        let x = self.try_predict_probs(embedding)?;
+        // Last layer is softmax → argmax gives the predicted label. Break
+        // exact ties by lowest label index, matching numpy.argmax.
         let (idx, &conf) = x
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or((0, &0.0));
+            .max_by(|(idx_a, prob_a), (idx_b, prob_b)| {
+                prob_a
+                    .partial_cmp(prob_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| idx_b.cmp(idx_a))
+            })
+            .ok_or_else(|| err("model produced no class probabilities"))?;
         let label = self
             .labels
             .get(idx)
             .cloned()
             .unwrap_or_else(|| String::from("unknown"));
-        (label, conf)
+        Ok((label, conf))
+    }
+
+    /// Run the network and return the full softmax probability vector
+    /// (one entry per label). The embedding is fitted to the first layer's
+    /// `in_dim` (zero-padded / truncated, non-finite values zeroed) so
+    /// inference never panics.
+    pub fn predict_probs(&self, embedding: &[Float]) -> Vec<Float> {
+        self.try_predict_probs(embedding).unwrap_or_else(|_| {
+            if self.labels.is_empty() {
+                Vec::new()
+            } else {
+                vec![1.0 / self.labels.len() as Float; self.labels.len()]
+            }
+        })
+    }
+
+    /// Fallible probability inference with finite/normalization checks.
+    pub fn try_predict_probs(&self, embedding: &[Float]) -> Result<Vec<Float>> {
+        let in_dim = self.layers.first().map(|l| l.in_dim()).unwrap_or(0);
+        if in_dim == 0 || self.layers.is_empty() {
+            return Err(err("model has no usable inference layers"));
+        }
+        let mut x: Vec<Float> = vec![0.0; in_dim];
+        for (slot, &v) in x.iter_mut().zip(embedding.iter()) {
+            *slot = if v.is_finite() { v } else { 0.0 };
+        }
+        for layer in &self.layers {
+            x = layer.try_forward(&x)?;
+        }
+        if x.len() != self.labels.len() {
+            return Err(err("model probability/label dimensions do not match"));
+        }
+        let sum: Float = x.iter().sum();
+        if x.iter().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+            || (sum - 1.0).abs() > 1e-4
+        {
+            return Err(err("model probabilities are not finite and normalized"));
+        }
+        Ok(x)
     }
 }
 
 /// Parse and validate a genre model from a JSON string.
 pub fn from_json_str(s: &str) -> Result<GenreModel> {
-    let value = json::parse(s).map_err(|e| SonaraError::ModelError(format!("invalid model JSON: {e}")))?;
+    let value =
+        json::parse(s).map_err(|e| SonaraError::ModelError(format!("invalid model JSON: {e}")))?;
     build_model(&value)
 }
 
 /// Load and validate a genre model from a JSON file on disk.
 pub fn load(path: &Path) -> Result<GenreModel> {
-    let s = std::fs::read_to_string(path)
-        .map_err(|e| SonaraError::ModelError(format!("could not read model file {}: {e}", path.display())))?;
+    let s = std::fs::read_to_string(path).map_err(|e| {
+        SonaraError::ModelError(format!("could not read model file {}: {e}", path.display()))
+    })?;
     from_json_str(&s)
 }
 
@@ -206,7 +297,9 @@ fn err(msg: impl Into<String>) -> SonaraError {
 }
 
 fn build_model(v: &json::Value) -> Result<GenreModel> {
-    let obj = v.as_object().ok_or_else(|| err("model root must be a JSON object"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| err("model root must be a JSON object"))?;
 
     let format_version = obj
         .lookup("format_version")
@@ -223,37 +316,59 @@ fn build_model(v: &json::Value) -> Result<GenreModel> {
         .and_then(json::Value::as_u32)
         .ok_or_else(|| err("missing/invalid `embedding_version` (expected integer)"))?;
 
-    let labels_val = obj.lookup("labels").ok_or_else(|| err("missing `labels`"))?;
-    let labels_arr = labels_val.as_array().ok_or_else(|| err("`labels` must be an array"))?;
+    let labels_val = obj
+        .lookup("labels")
+        .ok_or_else(|| err("missing `labels`"))?;
+    let labels_arr = labels_val
+        .as_array()
+        .ok_or_else(|| err("`labels` must be an array"))?;
     if labels_arr.is_empty() {
         return Err(err("`labels` must be non-empty"));
     }
     let labels: Vec<String> = labels_arr
         .iter()
-        .map(|l| l.as_str().map(str::to_string).ok_or_else(|| err("every `labels` entry must be a string")))
+        .map(|l| {
+            l.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| err("every `labels` entry must be a string"))
+        })
         .collect::<Result<_>>()?;
 
-    let layers_val = obj.lookup("layers").ok_or_else(|| err("missing `layers`"))?;
-    let layers_arr = layers_val.as_array().ok_or_else(|| err("`layers` must be an array"))?;
+    let layers_val = obj
+        .lookup("layers")
+        .ok_or_else(|| err("missing `layers`"))?;
+    let layers_arr = layers_val
+        .as_array()
+        .ok_or_else(|| err("`layers` must be an array"))?;
     if layers_arr.is_empty() {
         return Err(err("`layers` must be non-empty"));
     }
 
     let mut layers: Vec<Layer> = Vec::with_capacity(layers_arr.len());
     for (li, lv) in layers_arr.iter().enumerate() {
-        let lobj = lv.as_object().ok_or_else(|| err(format!("layer {li} must be an object")))?;
+        let lobj = lv
+            .as_object()
+            .ok_or_else(|| err(format!("layer {li} must be an object")))?;
 
-        let w_val = lobj.lookup("weights").ok_or_else(|| err(format!("layer {li} missing `weights`")))?;
-        let w_rows = w_val.as_array().ok_or_else(|| err(format!("layer {li} `weights` must be an array")))?;
+        let w_val = lobj
+            .lookup("weights")
+            .ok_or_else(|| err(format!("layer {li} missing `weights`")))?;
+        let w_rows = w_val
+            .as_array()
+            .ok_or_else(|| err(format!("layer {li} `weights` must be an array")))?;
         if w_rows.is_empty() {
             return Err(err(format!("layer {li} `weights` must be non-empty")));
         }
         let mut weights: Vec<Vec<Float>> = Vec::with_capacity(w_rows.len());
         let mut row_len: Option<usize> = None;
         for (ri, rv) in w_rows.iter().enumerate() {
-            let cols = rv.as_array().ok_or_else(|| err(format!("layer {li} weights row {ri} must be an array")))?;
+            let cols = rv
+                .as_array()
+                .ok_or_else(|| err(format!("layer {li} weights row {ri} must be an array")))?;
             if cols.is_empty() {
-                return Err(err(format!("layer {li} weights row {ri} must be non-empty")));
+                return Err(err(format!(
+                    "layer {li} weights row {ri} must be non-empty"
+                )));
             }
             match row_len {
                 None => row_len = Some(cols.len()),
@@ -267,16 +382,26 @@ fn build_model(v: &json::Value) -> Result<GenreModel> {
             }
             let row: Vec<Float> = cols
                 .iter()
-                .map(|c| c.as_f32().ok_or_else(|| err(format!("layer {li} weights must be numbers"))))
+                .map(|c| {
+                    c.as_f32()
+                        .ok_or_else(|| err(format!("layer {li} weights must be finite numbers")))
+                })
                 .collect::<Result<_>>()?;
             weights.push(row);
         }
 
-        let b_val = lobj.lookup("bias").ok_or_else(|| err(format!("layer {li} missing `bias`")))?;
-        let b_arr = b_val.as_array().ok_or_else(|| err(format!("layer {li} `bias` must be an array")))?;
+        let b_val = lobj
+            .lookup("bias")
+            .ok_or_else(|| err(format!("layer {li} missing `bias`")))?;
+        let b_arr = b_val
+            .as_array()
+            .ok_or_else(|| err(format!("layer {li} `bias` must be an array")))?;
         let bias: Vec<Float> = b_arr
             .iter()
-            .map(|c| c.as_f32().ok_or_else(|| err(format!("layer {li} bias must be numbers"))))
+            .map(|c| {
+                c.as_f32()
+                    .ok_or_else(|| err(format!("layer {li} bias must be finite numbers")))
+            })
             .collect::<Result<_>>()?;
         if bias.len() != weights.len() {
             return Err(err(format!(
@@ -289,11 +414,22 @@ fn build_model(v: &json::Value) -> Result<GenreModel> {
         let act_str = lobj
             .lookup("activation")
             .and_then(json::Value::as_str)
-            .ok_or_else(|| err(format!("layer {li} missing/invalid `activation` (expected string)")))?;
-        let activation = Activation::from_str(act_str)
-            .ok_or_else(|| err(format!("layer {li} unsupported activation '{act_str}' (use relu/softmax/identity)")))?;
+            .ok_or_else(|| {
+                err(format!(
+                    "layer {li} missing/invalid `activation` (expected string)"
+                ))
+            })?;
+        let activation = Activation::from_str(act_str).ok_or_else(|| {
+            err(format!(
+                "layer {li} unsupported activation '{act_str}' (use relu/softmax/identity)"
+            ))
+        })?;
 
-        layers.push(Layer { weights, bias, activation });
+        layers.push(Layer {
+            weights,
+            bias,
+            activation,
+        });
     }
 
     // First layer must consume the embedding.
@@ -327,7 +463,22 @@ fn build_model(v: &json::Value) -> Result<GenreModel> {
         )));
     }
 
-    Ok(GenreModel { labels, layers, embedding_version })
+    // Optional model identity (additive in format v1).
+    let id = match obj.lookup("id") {
+        Some(v) if !matches!(v, json::Value::Null) => Some(
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| err("`id` must be a string when present"))?,
+        ),
+        _ => None,
+    };
+
+    Ok(GenreModel {
+        labels,
+        layers,
+        embedding_version,
+        id,
+    })
 }
 
 // ============================================================
@@ -378,14 +529,19 @@ mod json {
         }
         pub fn as_f32(&self) -> Option<Float> {
             match self {
-                Value::Num(n) => Some(*n as Float),
+                Value::Num(n) if n.is_finite() => {
+                    let value = *n as Float;
+                    value.is_finite().then_some(value)
+                }
                 _ => None,
             }
         }
         pub fn as_u32(&self) -> Option<u32> {
             match self {
                 // Accept only integral, non-negative numbers in range.
-                Value::Num(n) if n.fract() == 0.0 && *n >= 0.0 && *n <= u32::MAX as f64 => Some(*n as u32),
+                Value::Num(n) if n.fract() == 0.0 && *n >= 0.0 && *n <= u32::MAX as f64 => {
+                    Some(*n as u32)
+                }
                 _ => None,
             }
         }
@@ -408,12 +564,18 @@ mod json {
     }
 
     pub fn parse(s: &str) -> Result<Value, String> {
-        let mut p = Parser { b: s.as_bytes(), i: 0 };
+        let mut p = Parser {
+            b: s.as_bytes(),
+            i: 0,
+        };
         p.skip_ws();
         let v = p.parse_value()?;
         p.skip_ws();
         if p.i != p.b.len() {
-            return Err(format!("trailing characters after JSON value at byte {}", p.i));
+            return Err(format!(
+                "trailing characters after JSON value at byte {}",
+                p.i
+            ));
         }
         Ok(v)
     }
@@ -442,7 +604,10 @@ mod json {
                 Some(b't') | Some(b'f') => self.parse_bool(),
                 Some(b'n') => self.parse_null(),
                 Some(c) if c == b'-' || c.is_ascii_digit() => self.parse_number(),
-                Some(c) => Err(format!("unexpected character '{}' at byte {}", c as char, self.i)),
+                Some(c) => Err(format!(
+                    "unexpected character '{}' at byte {}",
+                    c as char, self.i
+                )),
                 None => Err("unexpected end of input".to_string()),
             }
         }
@@ -543,7 +708,12 @@ mod json {
                                 // code point (reject unpaired surrogates).
                                 match char::from_u32(cp as u32) {
                                     Some(ch) => s.push(ch),
-                                    None => return Err(format!("invalid \\u escape at byte {}", self.i)),
+                                    None => {
+                                        return Err(format!(
+                                            "invalid \\u escape at byte {}",
+                                            self.i
+                                        ))
+                                    }
                                 }
                                 continue;
                             }
@@ -585,7 +755,12 @@ mod json {
                     b'0'..=b'9' => c - b'0',
                     b'a'..=b'f' => c - b'a' + 10,
                     b'A'..=b'F' => c - b'A' + 10,
-                    _ => return Err(format!("invalid hex digit in \\u escape at byte {}", self.i)),
+                    _ => {
+                        return Err(format!(
+                            "invalid hex digit in \\u escape at byte {}",
+                            self.i
+                        ))
+                    }
                 };
                 cp = cp * 16 + d as u16;
                 self.i += 1;
@@ -660,7 +835,8 @@ mod json {
             if !saw_digit {
                 return Err(format!("malformed number at byte {}", start));
             }
-            let text = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "invalid number bytes".to_string())?;
+            let text = std::str::from_utf8(&self.b[start..self.i])
+                .map_err(|_| "invalid number bytes".to_string())?;
             text.parse::<f64>()
                 .map(Value::Num)
                 .map_err(|_| format!("could not parse number '{text}'"))
@@ -745,6 +921,30 @@ mod tests {
     }
 
     #[test]
+    fn test_predict_tie_chooses_first_label() {
+        let zeros48 = "0,".repeat(48);
+        let zeros48 = zeros48.trim_end_matches(',');
+        let json = format!(
+            r#"{{
+              "format_version": 1,
+              "embedding_version": {v},
+              "labels": ["first", "second"],
+              "layers": [
+                {{"weights": [[{z}],[{z}]], "bias": [0.0, 0.0], "activation": "softmax"}}
+              ]
+            }}"#,
+            v = crate::similarity::SIMILARITY_VERSION,
+            z = zeros48
+        );
+        let m = from_json_str(&json).unwrap();
+
+        let (label, conf) = m.predict(&vec![0.0; EMBEDDING_DIM]);
+
+        assert_eq!(label, "first");
+        assert!((conf - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_predict_two_layer_relu_chain() {
         // 48 -> 2 (relu) -> 2 (softmax). Hidden identity-ish, output favors idx 0.
         let zeros48 = "0,".repeat(48);
@@ -803,6 +1003,50 @@ mod tests {
             r#"{"format_version": 1, "embedding_version": 2, "labels": ["a"],
                 "layers": [{"weights": [["x"]], "bias": [0.0], "activation": "softmax"}]}"#,
         );
+    }
+
+    #[test]
+    fn test_reject_overflowing_model_numbers() {
+        let json = two_class_json(crate::similarity::SIMILARITY_VERSION)
+            .replace("[0.0, 2.0]", "[1e999, 1e999]");
+        assert_model_err(&json);
+
+        let zeros47 = "0,".repeat(47);
+        let zeros47 = zeros47.trim_end_matches(',');
+        let zeros48 = "0,".repeat(48);
+        let zeros48 = zeros48.trim_end_matches(',');
+        let json = format!(
+            r#"{{"format_version":1,"embedding_version":{v},"labels":["a","b"],
+                "layers":[{{"weights":[[1e999,{z47}],[{z48}]],"bias":[0,0],"activation":"softmax"}}]}}"#,
+            v = crate::similarity::SIMILARITY_VERSION,
+            z47 = zeros47,
+            z48 = zeros48
+        );
+        assert_model_err(&json);
+    }
+
+    #[test]
+    fn test_fallible_inference_rejects_non_finite_layer_output() {
+        let mut model =
+            from_json_str(&two_class_json(crate::similarity::SIMILARITY_VERSION)).unwrap();
+        model.layers[0].weights[0][0] = Float::MAX;
+        model.layers[0].bias[0] = Float::MAX;
+        let embedding = [2.0; EMBEDDING_DIM];
+
+        assert!(matches!(
+            model.try_predict_probs(&embedding),
+            Err(SonaraError::ModelError(_))
+        ));
+        assert!(matches!(
+            model.try_predict(&embedding),
+            Err(SonaraError::ModelError(_))
+        ));
+
+        // Compatibility methods remain finite and non-panicking.
+        let probabilities = model.predict_probs(&embedding);
+        assert!(probabilities.iter().all(|p| p.is_finite()));
+        let (_, confidence) = model.predict(&embedding);
+        assert!(confidence.is_finite());
     }
 
     #[test]
@@ -915,7 +1159,13 @@ mod tests {
         let mut rows = String::new();
         for r in 0..2 {
             let vals = (0..48)
-                .map(|c| if c == 0 && r == 1 { "1e0".to_string() } else { "0.0".to_string() })
+                .map(|c| {
+                    if c == 0 && r == 1 {
+                        "1e0".to_string()
+                    } else {
+                        "0.0".to_string()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             rows.push_str(&format!("[{vals}]"));

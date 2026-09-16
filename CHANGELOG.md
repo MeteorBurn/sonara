@@ -2,6 +2,367 @@
 
 All notable changes to sonara are documented in this file.
 
+## [0.3.6-meteorburn.1] - 2026-09-16
+
+- Merge upstream 0.3.6 while preserving the fork's history, BPM workbooks and exporter.
+- Carry the verified local Symphonia 0.6.1 port, vendored Hound 3.5.1 RIFF-padding fix, WAV fallback and no-tag metadata-probe reduction.
+- Publish the existing verified Windows x64/Python 3.10+ wheel. Its package version remains 0.3.6; the fork tag distinguishes the patched release.
+- Retain upstream BPM behavior and the optional BPM-range API; no new BPM experiment is included.
+- Restrict upstream PyPI publishing to the upstream repository. See [BUILD-METADATA.md](BUILD-METADATA.md) for verification and the unresolved upstream fidelity-gate coverage.
+
+## [0.3.6] - 2026-08-17
+
+### Validated on real music
+
+The new timbre similarity profile was validated on a 210-track labeled set
+(30 tracks per coarse style across 7 styles, at most 2 per artist, fresh
+default-path embeddings): macro neighbor-precision@10 improves from 0.2124
+(default profile) to 0.2310 (+0.019; paired stratified bootstrap 95% CI
+[+0.005, +0.033]), with the largest gain in folk/country — the style-bleed
+case the profile targets. The default profile is bit-identical to 0.3.5 and
+its precision is pinned as a regression baseline. The default analysis path
+is unchanged (criterion + wall-clock with an unchanged-path control bench:
+held).
+
+### Added
+
+- **Per-feature analysis lane.** `augment_analysis(cached, features, ...)`
+  computes named features onto an existing cached analysis instead of
+  re-running the full pipeline: decode-free where the cached evidence allows
+  (energy, danceability, key, key candidates, valence, acousticness, mood,
+  vocalness, instrumentalness, tempo curve, embedding, and model-driven
+  genre/vocalness), and a single targeted decode at the record's original
+  sample rate for audio-bound features (aggression routes through its
+  dedicated lane without the full extended pass). `can_augment` /
+  `augment_blocker` report per-record augmentability, and
+  `feature_dependencies()` publishes the declared per-feature dependency map
+  (evidence class + required fields) that cache-freshness planners can rely
+  on. Available from Rust and Python; analysis dicts round-trip back into the
+  engine.
+- **Selectable similarity weight profile.** `similarity(..., profile=)` and
+  `embedding_distance(..., profile=)` accept `"default"` or `"timbre"`; the
+  timbre profile re-weights the same stored 48-dim vector at distance time to
+  emphasize spectral character over tempo/energy. Profiles are independently
+  versioned (`SIMILARITY_PROFILES`); stored vectors and `SIMILARITY_VERSION`
+  are unchanged, so no re-scan is needed.
+- Analysis provenance now records the configured BPM detection range
+  (`bpm_min`/`bpm_max`), additively — no schema version bump; existing cached
+  records remain valid.
+- An audio-free frozen similarity gate (91 pinned pairwise distances and 14
+  neighbor orderings per profile) now runs as a mandatory routed CI check;
+  the similarity fidelity domain is no longer blocked.
+
+### Changed
+
+- The consumer contract now documents per-feature freshness: additive fields
+  and APIs ship without an `ANALYSIS_SCHEMA_VERSION` bump, and consumers
+  should key freshness on field presence, per-feature model ids, and the
+  dependency map rather than the whole-record version. The description of the
+  stored similarity vector was corrected: it is unweighted; per-dimension
+  weights apply at distance time.
+
+## [0.3.5] - 2026-07-28
+
+Release and CI infrastructure only. The analysis library is unchanged from
+0.3.4; these wheels are functionally identical to that release.
+
+### Fixed
+
+- The release workflow no longer fails on pushes to `main` that are not
+  releases. Its PyPI version check requested a redirecting URL and read the
+  redirect as "this version is unpublished", so an already-published version
+  was sent to PyPI again and rejected as a duplicate upload. The check now
+  distinguishes published from unpublished explicitly, and stops the job on any
+  answer it cannot interpret rather than attempting an upload.
+- A failing test job no longer cancels the other platforms, which previously
+  reported as failures without having run and hid whether a failure reproduced
+  elsewhere.
+
+### Changed
+
+- The wheel and sdist build action now targets a supported Node runtime.
+
+## [0.3.4] - 2026-07-25
+
+### Validated on real music
+
+On the frozen 117-track audit, the optimized aggression path produced
+bit-identical scores, components, diagnostics, and generic analysis fields at
+native, 22.05, 32, 44.1, and 48 kHz. Wall time improved at every requested
+rate by 3.78% to 28.65%. On the bounded 21-track cold-file cohort, adding
+aggression now costs 8.41%, down from 14.49%. A clean-worktree release gate
+kept default compact analysis within 1.37% at 30 seconds.
+
+### Added
+
+- A representative opt-in cold-file Criterion benchmark covering dense audio,
+  canonical and noncanonical rates, and short and 30-second inputs.
+
+### Changed
+
+- Canonical aggression analysis now extracts only model-required evidence and
+  reuses per-worker DSP scratch and immutable cached tables.
+- Concurrent file analysis avoids nested canonical parallelism while retaining
+  deterministic results and outer-worker throughput.
+
+### Fixed
+
+- Fused 22.05 kHz file analysis no longer performs a duplicate canonical pass.
+- Standalone canonical allocations fell by 99.68%, and fused 48 kHz
+  allocations fell by 33.18%, without changing the public API or model output.
+
+## [0.3.3] - 2026-07-24
+
+### Validated on real music
+
+On a frozen, directory-group-disjoint 117-track audit, file-based aggression
+analysis is identical when requested at 22.05, 32, 44.1, or 48 kHz: 100% of
+scores are within 0.03, maximum score and component deltas are zero, Spearman
+is 1.0, all six anchors are exact, and none of 5,516 decisive pairs flips at
+any rate. Caller-pre-resampled signal input remains a deliberately harsher
+diagnostic: 97.15% is within 0.03 with minimum Spearman 0.9949, but one 44.1 kHz
+round-trip reaches 0.0609 and flips one decisive pair. Default compact analysis
+changed by +0.45%, -0.08%, and -1.50% at 1/5/30 seconds.
+
+### Added
+
+- Public aggression sample-rate metadata and cross-rate Rust/Python contract,
+  semantic, fidelity, allocation, and performance coverage.
+
+### Changed
+
+- Aggression inference now runs in its trained 22.05 kHz feature domain while
+  preserving caller-rate semantics for every generic analysis field.
+- The optional aggression feature now uses FerricML 0.1.2 with default
+  features disabled; the default dependency graph remains FerricML-free.
+- The corrected aggression scale uses model version 3, a new model identity,
+  and analysis schema 6 so persisted results cannot mix incompatible scales.
+
+### Fixed
+
+- File, batch, signal, standalone, and fused aggression routes no longer apply
+  sample-rate-dependent feature definitions; file analysis derives both lanes
+  from one native decode and avoids a lossy caller-rate round-trip.
+- Canonical/native alternating analyses retain both feature-gated cache entries
+  instead of rebuilding analysis tables for every track.
+
+## [0.3.2] - 2026-07-24
+
+### Validated on real music
+
+A proposed aggression-model replacement was frozen and evaluated on a fresh,
+directory-group-disjoint 117-track audit. Its rank point estimates improved
+(Spearman 0.7522 to 0.8022; Kendall 0.5626 to 0.6039), but paired 95%
+intervals included no improvement and MAE changed from 0.2681 to 0.2775,
+crossing the preregistered non-inferiority margin. The candidate was therefore
+rejected: the shipped v2 model, score semantics, and outputs remain
+bit-identical. Focused 1/5/30-second aggression-path benchmarks changed by
+-0.66%, +0.55%, and -1.38%; the default Rust dependency graph remains free of
+the optional ML dependency.
+
+### Changed
+
+- The optional aggression feature now uses FerricML 0.1.1 with default
+  features disabled, backed by explicit hosted feature tests and fixed-input
+  model goldens.
+
+### Fixed
+
+- Removed duplicate Python stub declarations that hid the fused analyzer's
+  `mode`, `features`, BPM-range, and model arguments from type checkers; the
+  contract gate now rejects duplicate or narrowed analyzer signatures.
+
+## [0.3.1] - 2026-07-23
+
+### Validated on real music
+
+On the fixed 80-pair development comparison set, the fused aggression analyzer
+gets 52/64 decisive directions correct (81.3%), including 20/24 hard pairs
+(83.3%), and 12/16 ties correct (75.0%). Its scalar rank reaches Spearman
+0.8709 with MAE 0.0965; the weakest grouped fold remains at Spearman 0.7599.
+Synthesized loudness-matched controls separate harsh from loud-clean audio by
+0.4365, preserve rank under gain changes, and abstain on silence. Default
+compact analysis remains within 1.93% of `main` across 1/5/30-second signals;
+requested aggression adds 6.39–8.19% over the shared embedding analysis.
+
+### Added
+
+- A 39-feature fused aggression analyzer with Rust and Python signal, file,
+  batch, and shared-pipeline APIs, plus support, forcefulness, harshness,
+  tension, rhythm, and model-provenance outputs.
+- Repository-owned semantic, artifact-integrity, physical-control, API-parity,
+  and performance gates for the bundled aggression model.
+
+### Changed
+
+- Aggression analysis now reuses physical and perceptual evidence from the
+  single fused audio pipeline; the retained 48D embedding scorer is explicitly
+  the legacy v1 compatibility API.
+- Pair-ranking thresholds and tie policy are no longer public analyzer API;
+  consumers define their own product-level adjudication.
+- Fidelity routing can retire a protected artifact only through an exact,
+  content-hash-reviewed deletion.
+
+### Fixed
+
+- Removed application-specific research probes, fixtures, and provenance from
+  the generic analyzer repository and release boundary.
+- Kept compiled-but-unrequested aggression work out of the compact hot loop.
+
+## [0.3.0] - 2026-07-22
+
+### Validated on real music
+
+On a locally held 32,890-track library, the learned aggression score ordered
+the intended rough track above its dance control in 8/9 fixed comparisons,
+with group means 0.5556 versus 0.5240. The legacy heuristic's top 20 was
+dance-dominated; the learned score's top 20 included six intended heavy
+tracks. Frozen artifact, signal/embedding parity, and routed fidelity gates
+pass exactly. Default 30-second compact analysis changed by +0.68%, and fused
+embedding plus aggression remained within 0.82% of embedding alone.
+
+### Added
+
+- An opt-in, versioned aggression score for Rust and Python, including scalar,
+  signal, file, batch, fused-analysis, and cached-embedding APIs.
+- Content-addressed model provenance and a validated embedded artifact behind
+  the `aggression` Cargo feature; the default build remains dependency-free.
+- Canonical repository workflow skills and exhaustive, fail-closed fidelity
+  ownership for accuracy-sensitive paths.
+
+### Changed
+
+- Fused analysis now computes aggression from the existing similarity vector
+  without a second decode, FFT, or spectrum pass.
+- Python support now starts at 3.10 and ships `cp310-abi3` wheels, with the
+  runtime floor derived and checked across metadata, bindings, and CI.
+
+### Fixed
+
+- Fidelity routing now derives committed and local changes from Git, rejects
+  uncovered or blocked accuracy domains, and validates reviewed transitions by
+  exact content hash.
+
+## [0.2.9] - 2026-07-20
+
+### Validated on real music
+
+The bundled `sonara-vocalness-v2` model passes the frozen acceptance set
+exactly (5/5 vocals above 0.35 and 6/6 controls below 0.35). On the broader
+205-track labeled set it scores AUC 0.9477, with 6/96 vocal false negatives
+and 19/109 instrumental false positives at that threshold. On disjoint data,
+v1 to v2 AUC improves from 0.943011 to 0.947278 for fresh analysis and from
+0.696583 to 0.864865 for cached embeddings.
+
+### Added
+
+- Linux x86_64, macOS x86_64 and arm64, and Windows x64 abi3 wheels, verified
+  by native clean-install smoke tests alongside the sdist.
+- A content-hash-pinned vocalness acceptance fixture and fail-closed fidelity
+  routing for accuracy-sensitive changes.
+
+### Changed
+
+- Python validation now uses one canonical 11-script suite locally and on all
+  CI platforms, with UTF-8 subprocess output on Windows.
+- NumPy is now declared as a supported runtime dependency.
+
+### Fixed
+
+- Rust and Python model inference reject non-finite inputs, intermediates, and
+  probabilities instead of allowing invalid values to escape.
+- Public signal APIs reject non-finite samples and invalid parameter ranges;
+  feature lookup rejects unknown and misspelled names.
+- The bundled vocalness artifact is now the hash-gated v2 model in both Rust
+  and Python.
+
+## [0.2.8] - 2026-07-20
+
+### Validated on real music
+
+Before the fix, one unchanged track with three equally frequent chord labels
+returned `A`, `Gm`, or `G#m` across five fresh processes. After the fix, a
+seed-pinned 400-track commercial-library sample analyzed 400/400 without
+error, found five tied predominant-chord cases, and selected the documented
+lexicographically smallest winner in all five; every tonal sanity check
+passed.
+
+### Fixed
+
+- `predominant_chord` now resolves equal top counts by lexicographically
+  ascending label instead of process-randomized hash-map iteration.
+  `ANALYSIS_SCHEMA_VERSION` is now 4 so persisted downstream analyses
+  invalidate the potentially nondeterministic cached summary.
+- Exact genre-model probability ties now select the lowest label index in
+  Rust, matching NumPy's documented inference behavior.
+- The real-music tonal gate now sorts its corpus before seeded sampling and
+  uses explicit secondary label ordering in tied frequency reports.
+
+## [0.2.7] - 2026-07-20
+
+### Fixed
+- MP3 loading now retries extension-confirmed streams with the MPEG audio
+  reader when generic probing aborts on malformed ID3 text metadata or a false
+  ADTS marker. Invalid metadata no longer hides decodable audio; fake MP3s
+  remain rejected and failed recovery preserves the original probe diagnostic.
+
+## [0.2.6] - 2026-07-20
+
+### Added
+- `sonara::vocal_model::bundled()`: Rust-native accessor for the validated
+  vocalness model (`sonara-vocalness-v1`). The artifact is embedded in the
+  crate at compile time (`sonara/models/vocalness_v1.json`, ~33 KB,
+  dead-stripped when unused), so in-process Rust consumers no longer depend
+  on the Python package data. Byte-identical to the Python
+  `vocalness_model="bundled"` artifact (enforced by tests in both layers).
+- `sonara.genre.train(model_id=...)` / `GenreModel(model_id=...)`: the Python
+  genre trainer can now write the optional JSON `id`, making
+  `provenance.genre_model_id` reachable for models trained the documented
+  way. Omitting it keeps the previous JSON shape and provenance (backward
+  compatible).
+
+## [0.2.5] - 2026-07-20
+
+### Validated on real music
+
+**MP3 decode recovery** (35,898-file commercial library): a 2000-file random
+sample contained 51 MP3s (2.6%) rejected wholesale by 0.2.4 with recoverable
+packet-local errors (`invalid main_data offset`, `huffman decode overrun` —
+damaged bit reservoirs); with packet-level recovery all 51 analyze
+successfully, the representative file recovers 175.4 of 179.1 s (146 of 6862
+packets skipped), and decode time on healthy files is unchanged (2.537 s vs
+2.538 s over 25 files). **Vocalness model** (205-track curated labeled set,
+disjoint from the 908-track training pool): the built-in contrast heuristic
+scores AUC 0.63 with 53% of clearly-vocal tracks under a 0.35 curation
+threshold (pop/folk/opera false-negative cluster); the bundled model scores
+AUC 0.944 with 5% under the threshold, and the five downstream-reported false
+negatives move from ≤ 0.12 to ≥ 0.95. Known model limitations: solo melodic
+instrument leads (sax/guitar) can score vocal-high (17% of instrumental
+controls ≥ 0.35); spoken narration scores low. Default-path speed held
+(compact 1 s / 5 s / 30 s within historical envelopes; interleaved A/B
+mixed-sign).
+
+### Added
+- Vocalness model socket: `AnalysisConfig::vocalness_model` /
+  `vocalness_model=` (Python) loads a JSON MLP (genre-model format + required
+  `id`, exactly two labels, one `"vocal"`); its calibrated P(vocal) overrides
+  `vocalness` and `instrumentalness`.
+- Bundled validated model `sonara-vocalness-v1`
+  (`vocalness_model="bundled"`; ships as package data, ~33 KB).
+- `sonara.vocal_model`: pure-numpy trainer (standardization folded into the
+  first layer), `save`/`load`, `bundled_path()`.
+- `AnalysisProvenance.genre_model_id` / `.vocalness_model_id` (additive; also
+  in the Python provenance dict): model identity for downstream cache
+  invalidation. `None` means the built-in paths produced the fields.
+- Genre-model JSON format: optional `id` field (additive in format v1).
+
+### Fixed
+- MP3 decoding no longer fails an entire file on packet-local bitstream
+  damage: recoverable `DecodeError` packets are skipped (decoder rebuilt on
+  `ResetRequired`), with guardrails — non-empty all-finite PCM required, and
+  a stream where nothing decodes still surfaces its first decode error.
+  Fake/garbage MP3s still fail at probe, unchanged.
+
 ## [0.2.4] - 2026-07-17
 
 ### Validated on real music

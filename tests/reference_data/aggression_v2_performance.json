@@ -1,0 +1,120 @@
+{
+  "format": "sonara.aggression-performance.v2",
+  "candidate_commit": "d710486",
+  "measured_at": "2026-07-25",
+  "environment": {
+    "os": "macOS 26.3 arm64",
+    "cpu": "Apple M4",
+    "rustc": "1.97.0",
+    "criterion": "0.8"
+  },
+  "protocol": {
+    "baseline_commit": "3ba5bf2",
+    "ordering": "ABBA where reported",
+    "matrix_files": 80,
+    "native_rates_hz": [22050, 32000, 44100, 48000],
+    "durations_sec": [1, 5, 30, 240, 600],
+    "formats": ["wav-pcm16", "flac", "mp3-128", "mp3-320"],
+    "ogg_status": "local ffmpeg build has no Vorbis encoder"
+  },
+  "default_path": {
+    "compact_30s_clean_baseline_abba_midpoint_ms": [3.7359, 4.1753],
+    "compact_30s_clean_candidate_abba_midpoint_ms": [3.6948, 3.7116],
+    "compiled_unrequested_default_abba_midpoint_ms": [3.6874, 3.7140],
+    "compiled_unrequested_aggression_abba_midpoint_ms": [3.7177, 3.7037],
+    "compiled_unrequested_change_percent": 0.27,
+    "status": "no measurable regression"
+  },
+  "signal_path_44100hz_30s_abba": {
+    "baseline_standalone_midpoint_ms": [16.072, 16.232],
+    "candidate_standalone_midpoint_ms": [7.5604, 7.6003],
+    "baseline_embedding_midpoint_ms": [25.684, 25.781],
+    "candidate_embedding_midpoint_ms": [25.670, 25.959],
+    "embedding_change_percent": 0.32,
+    "baseline_fused_midpoint_ms": [41.832, 41.734],
+    "candidate_fused_midpoint_ms": [33.366, 33.494],
+    "fused_change_percent": -20.0
+  },
+  "cold_file_matrix": {
+    "wall_overhead_percent": {
+      "workers_1_rayon_10": 3.41,
+      "workers_4_rayon_10": -1.90,
+      "workers_10_rayon_10": 9.86,
+      "stress_workers_1_rayon_1": 10.76
+    },
+    "isolated_48khz_abba_overhead_percent": {
+      "wav": 10.46,
+      "flac": 10.25
+    },
+    "stable_format_rate_max_percent": 14.30,
+    "bounded_21_track_abba_overhead_percent": 8.41,
+    "bounded_21_track_previous_overhead_percent": 14.49
+  },
+  "frozen_117_track_cross_rate": {
+    "track_count": 117,
+    "requested_rates_hz": [0, 22050, 32000, 44100, 48000],
+    "candidate_equals_baseline": true,
+    "result_sha256": {
+      "0": "09ad239407af6e29b85df0d95b0f9abcb52fb833549b6fbfc82698f4a0a6ae52",
+      "22050": "d4b4e2457420aee04f4ce6a326369e95a5c696c21646f2ba1be4bd0acf47af21",
+      "32000": "204803eb9d8b06b525296a81b9462e0e1994bf474da445e9b50ed35e1ac92255",
+      "44100": "09ad239407af6e29b85df0d95b0f9abcb52fb833549b6fbfc82698f4a0a6ae52",
+      "48000": "029a23cee3b41804034b4679a67aef545744672cd7d095313dfd8b767156cd0a"
+    },
+    "wall_change_percent": {
+      "0": -3.78,
+      "22050": -28.65,
+      "32000": -10.21,
+      "44100": -8.21,
+      "48000": -3.83
+    },
+    "peak_rss_change_percent_at_native": -7.25
+  },
+  "allocation_receipt_30s": {
+    "standalone_22050": {
+      "baseline_allocations": 33839,
+      "candidate_allocations": 108,
+      "change_percent": -99.68,
+      "candidate_allocated_bytes": 5051152,
+      "candidate_peak_additional_bytes": 4096064
+    },
+    "standalone_48000": {
+      "baseline_allocations": 33899,
+      "candidate_allocations": 168,
+      "candidate_allocated_bytes": 13578149,
+      "candidate_peak_additional_bytes": 8492041
+    },
+    "fused_48000": {
+      "baseline_allocations": 101674,
+      "candidate_allocations": 67943,
+      "allocation_change_percent": -33.18,
+      "baseline_allocated_bytes": 151898881,
+      "candidate_allocated_bytes": 110371059,
+      "allocated_bytes_change_percent": -27.34,
+      "candidate_peak_additional_bytes": 12494601
+    }
+  },
+  "model_only_rank_midpoint_ns": 72.579,
+  "package": {
+    "baseline_wheel_bytes": 1625843,
+    "candidate_wheel_bytes": 1643164,
+    "wheel_change_percent": 1.07
+  },
+  "architecture": {
+    "default_feature_gated": true,
+    "same_lane_file_pass_reused": true,
+    "canonical_extractor_skips_unused_public_products": true,
+    "canonical_cache_immutable": true,
+    "scratch_reused_per_worker": true,
+    "nested_canonical_contention_avoided": true
+  },
+  "acceptance": {
+    "max_default_or_compiled_unrequested_change_percent": 2.0,
+    "max_primary_cold_file_overhead_percent": 10.0,
+    "max_stable_format_rate_overhead_percent": 15.0,
+    "max_signal_unrequested_change_percent": 2.0,
+    "max_model_rank_ns": 500.0,
+    "outputs_bit_identical": true,
+    "status": "pass"
+  }
+}

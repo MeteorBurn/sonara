@@ -14,7 +14,7 @@ These instructions apply to work inside `E:\Projects\Sonara`.
   - tempo candidate selection in the beat tracker reduces the half-BPM/x2 mismatch substantially;
   - optional project BPM range (`bpm_min`, `bpm_max`) doubles or halves values outside the range.
   - autocorrelation peak selection now uses fractional/parabolic lag refinement, which substantially reduces the 1-3 BPM quantization drift on HIGH/LOW near-miss rows.
-- Current fork package version is `0.1.8`.
+- Current fork package version is `0.3.6`; patched GitHub release tag: `v0.3.6-meteorburn.1`. See `BUILD-METADATA.md` for the Symphonia/Hound overlay.
 - On the first 1000 labeled rows, current optimized logic produced 998 successful analyses, 2 decode errors, 1 remaining x2-like result without BPM range, and 0 x2-like results after applying the 79-192 BPM range.
 - Next focus is the second BPM problem after the x2 fix:
   - x2 octave errors are largely handled, but corrected BPM values can still miss Mixed In Key by roughly 1-3 BPM.

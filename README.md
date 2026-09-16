@@ -9,7 +9,7 @@ Feature extraction, batch analysis, and built-in perceptual features (energy, da
 ## Quick Start
 
 ```bash
-pip install sonara
+python -m pip install https://github.com/MeteorBurn/sonara/releases/download/v0.3.6-meteorburn.1/sonara-0.3.6-cp310-abi3-win_amd64.whl
 ```
 
 One call gets you 30+ features — tempo, key, chords, energy, mood, timbre — in ~4 ms per 10-second track:
@@ -52,81 +52,11 @@ files = [str(p) for p in Path("~/Music").expanduser().rglob("*.mp3")]
 results = sonara.analyze_batch(files, mode="playlist")
 ```
 
-Pre-built wheels for Linux, macOS (Intel & Apple Silicon), and Windows. Requires Python 3.9+.
+This fork release provides a Windows x64 wheel. Requires Python 3.10+.
 
-## Fork Notes vs v0.1.7
+The package is based on SONARA 0.3.6 with Symphonia 0.6.1, patched Hound 3.5.1, WAV fallback, and reduced metadata probing when tags are not requested. The release tag is `v0.3.6-meteorburn.1`; the package version is `0.3.6`. See [BUILD-METADATA.md](BUILD-METADATA.md) for build details.
 
-This fork contains BPM-focused changes relative to upstream `v0.1.7`:
-
-- **Tempo candidate selection tweak** — improves beat-tracker candidate choice for tracks where `v0.1.7` could report roughly half of the BPM shown by DJ library tools such as Mixed In Key.
-- **Optional project BPM range** — `bpm_min` and `bpm_max` can be passed to the analysis and beat-tracking APIs. Values outside the range are doubled or halved by octaves, matching the "lowest/highest BPM" behavior used by DJ metadata tools. This is opt-in: installing `0.1.8` does not enable range alignment unless the caller passes these parameters.
-- **Fractional BPM refinement** — autocorrelation BPM peak selection now uses parabolic lag refinement, reducing the 1-3 BPM quantization drift seen in HIGH/LOW near-miss benchmark rows.
-
-Local benchmark status on the labeled x2 dataset: in the first 1000 rows, the current optimized code produced 998 successful analyses, 2 decode errors, and 1 remaining x2-like result before range alignment. With the 79-192 BPM range applied, x2-like results dropped to 0 in those 998 successful analyses.
-
-Versioning note: this fork is now tracked as `0.1.8`. Avoid `0.1.7.1` for the Rust crates because Cargo expects SemVer-style `major.minor.patch` versions.
-
-## BPM Range Alignment
-
-`bpm_min` and `bpm_max` are for host applications that have a project-level
-tempo window, for example a DJ library configured with a lowest/highest BPM.
-When both values are provided, Sonara folds the estimated tempo by octaves until
-it lands inside the requested range:
-
-- if the estimate is below `bpm_min`, it is doubled until it reaches the range;
-- if the estimate is above `bpm_max`, it is halved until it reaches the range.
-
-This is the behavior that removed the remaining x2-like result in the local
-79-192 BPM benchmark. The example `bpm_min=79.0` and `bpm_max=192.0` values
-come from the Mixed In Key reference/settings used while improving the BPM
-algorithm against Mixed In Key-labeled data. They are not hard-coded Sonara
-defaults; use different values if your application needs a different BPM
-window. Range alignment is not a global setting and it is not enabled just by
-installing Sonara `0.1.8`; every caller that wants this behavior must pass the
-range into the analysis or beat-tracking call.
-
-Use it from Python like this:
-
-```python
-import sonara
-
-result = sonara.analyze_file(
-    "track.flac",
-    mode="playlist",
-    bpm_min=79.0,
-    bpm_max=192.0,
-)
-
-print(result["bpm"])
-```
-
-For applications that decode audio themselves and call `analyze_signal`, pass
-the same parameters there:
-
-```python
-analysis = sonara.analyze_signal(
-    audio,
-    sr=22050,
-    mode="playlist",
-    bpm_min=79.0,
-    bpm_max=192.0,
-)
-```
-
-The lower-level beat tracker accepts the same range:
-
-```python
-tempo, beats = sonara.beat_track(
-    y=audio,
-    sr=22050,
-    bpm_min=79.0,
-    bpm_max=192.0,
-)
-```
-
-Both values must be provided together. They must be finite, positive numbers
-with `bpm_min < bpm_max`, and `bpm_max` must be at least double `bpm_min` so
-octave folding has a valid target window.
+Installing `sonara` from PyPI retrieves the upstream package. Upstream also provides Linux and macOS wheels.
 
 ## Analysis Pipeline
 
@@ -166,20 +96,6 @@ r['provenance']             # How the result was produced: {"schema_version",
                             # "mode", "requested_features" (when features=[...])}
                             # Frame indices convert to seconds as
                             # frame * hop_length / sample_rate.
-```
-
-To constrain BPM output like DJ library tools, pass a BPM range. See
-[BPM Range Alignment](#bpm-range-alignment) for the full behavior and
-integration notes:
-
-```python
-r = sonara.analyze_file("track.mp3", mode="compact", bpm_min=79.0, bpm_max=192.0)
-```
-
-The same BPM range parameters are available on the lower-level beat tracker:
-
-```python
-tempo, beats = sonara.beat_track(y=y, sr=sr, bpm_min=79.0, bpm_max=192.0)
 ```
 
 ### Playlist mode
@@ -336,7 +252,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `structure`, `embedding`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
 ### Structure & energy (opt-in)
 
@@ -543,6 +459,39 @@ input path, in input order. A file that fails to decode yields a failure entry
 container/codec and underlying cause) and `error_kind` — a short stable category:
 `"io"`, `"decode"`, `"unsupported_format"`, `"invalid_audio"`, `"insufficient_data"`,
 or `"compute"`. (`analyze_file` on a single path still raises as before.)
+
+### Augmenting a cached analysis
+
+`sonara.augment_analysis` recomputes named features onto a **copy** of a cached
+result — a `TrackAnalysis`, or the same dict shape loaded back from JSON —
+without re-running the whole pipeline. Features whose inputs are already on the
+record (most scalar features, and the similarity embedding) are recomputed
+**decode-free** from the cached fields alone; anything that genuinely needs the
+waveform again is computed from `audio_path` in one targeted re-analysis at the
+record's own `provenance["sample_rate"]`. The input is never mutated, fields you
+did not ask about are never cleared, and unknown feature names raise
+`ValueError` (no silent fallback).
+
+```python
+import json, sonara
+
+cached = json.load(open("track.json"))            # a stored analyze_* result
+r = sonara.augment_analysis(cached, ["mood"])     # decode-free from cached fields
+r = sonara.augment_analysis(cached, ["aggression"], audio_path="track.mp3")
+
+sonara.can_augment(cached, "mood")            # True → decode-free on this record
+sonara.augment_blocker(cached, "aggression")  # e.g. "needs audio (...)" — or None
+```
+
+Whether a feature is decode-free is **per record** (it depends on which fields
+that record actually carries), which is what `can_augment` / `augment_blocker`
+answer. The static side is `sonara.feature_dependencies()` — the declared
+per-feature dependency map, one dict per feature with its dependency `class`
+(`"audio"`, `"frame_curves"`, `"scalars"`, `"embedding"`), the
+`required_evidence` fields a decode-free recompute reads, and mode flags — so a
+cache layer can plan what is refreshable without audio before touching any
+record.
+
 ### Duplicate detection (opt-in)
 
 sonara can compute a compact acoustic **fingerprint** that identifies the *same
@@ -554,11 +503,6 @@ tempo- or pitch-shifted versions.
 The fingerprint is **opt-in** (performance-first: no analysis mode computes it by
 default). Request it with `features=["fingerprint"]`; the result then carries a
 base64 `fingerprint` string and an integer `fingerprint_version`:
-## Similarity & embeddings
-
-sonara can produce a fixed-length **similarity vector** (a hand-crafted, 48-dimension embedding) for nearest-neighbor search over a music library — no ML dependency. It is assembled from features the pipeline already computes (MFCC timbre, chroma harmony, spectral shape, rhythm, dynamics, and tonal descriptors), each with **fixed, documented normalization** so vectors are comparable across tracks, machines, and library runs.
-
-The vector is **opt-in** — it is never produced by a bare mode. Request it explicitly with `features=["embedding"]` (this also pulls in the playlist-level features it is built from):
 
 ```python
 import sonara
@@ -580,22 +524,6 @@ sonara.fingerprint_match(a, b)   # e.g. 0.98 → same recording
 ```
 
 Find duplicates across a whole folder:
-r = sonara.analyze_file("track.mp3", features=["embedding"])
-r["embedding"]          # list of 48 floats, each in [0, 1]
-r["embedding_version"]  # layout version (int); compare only same-version vectors
-```
-
-Compare two tracks with `sonara.similarity(a, b)` — it returns a score in `0..1` (higher = more similar) and accepts either `TrackAnalysis` results or raw vectors:
-
-```python
-a = sonara.analyze_file("a.mp3", features=["embedding"])
-b = sonara.analyze_file("b.mp3", features=["embedding"])
-sonara.similarity(a, b)          # e.g. 0.65 for close neighbors; ~0.5 for unrelated tracks
-sonara.similarity(a, a)          # 1.0 (identical)
-sonara.similarity(a["embedding"], b["embedding"])  # raw vectors also work
-```
-
-### Nearest-neighbor search over a library
 
 ```python
 import sonara
@@ -623,6 +551,53 @@ for dup, original in duplicates:
 
 The pairwise scan above is `O(n²)`; for very large libraries, bucket candidates
 first (e.g. by rounded `duration_sec`) and only fingerprint-match within a bucket.
+
+## Similarity & embeddings
+
+sonara can produce a fixed-length **similarity vector** (a hand-crafted, 48-dimension embedding) for nearest-neighbor search over a music library — no ML dependency. It is assembled from features the pipeline already computes (MFCC timbre, chroma harmony, spectral shape, rhythm, dynamics, and tonal descriptors), each with **fixed, documented normalization** so vectors are comparable across tracks, machines, and library runs.
+
+The vector is **opt-in** — it is never produced by a bare mode. Request it explicitly with `features=["embedding"]` (this also pulls in the playlist-level features it is built from):
+
+```python
+import sonara
+
+r = sonara.analyze_file("track.mp3", features=["embedding"])
+r["embedding"]          # list of 48 floats, each in [0, 1]
+r["embedding_version"]  # layout version (int); compare only same-version vectors
+```
+
+Compare two tracks with `sonara.similarity(a, b)` — it returns a score in `0..1` (higher = more similar) and accepts either `TrackAnalysis` results or raw vectors:
+
+```python
+a = sonara.analyze_file("a.mp3", features=["embedding"])
+b = sonara.analyze_file("b.mp3", features=["embedding"])
+sonara.similarity(a, b)          # e.g. 0.65 for close neighbors; ~0.5 for unrelated tracks
+sonara.similarity(a, a)          # 1.0 (identical)
+sonara.similarity(a["embedding"], b["embedding"])  # raw vectors also work
+```
+
+`similarity` (and the lower-level `embedding_distance`) take a `profile=`
+keyword selecting the comparison-time weight table: `"default"` is the
+historical balanced metric, `"timbre"` makes spectral texture dominate and
+demotes tempo/energy, so neighbors share *sonic style* rather than pace.
+Profiles are applied at distance time and never change the stored vector — the
+same persisted embeddings work with every profile. Unknown profile names raise
+`ValueError`. `sonara.SIMILARITY_PROFILES` maps each profile name to its
+weight-table version (the `"default"` profile's version aliases
+`SIMILARITY_VERSION`; other profiles version independently):
+
+```python
+sonara.similarity(a, b, profile="timbre")  # sonic-texture neighbors
+sonara.SIMILARITY_PROFILES                 # e.g. {"default": 2, "timbre": 1}
+```
+
+### Nearest-neighbor search over a library
+
+```python
+import sonara
+from pathlib import Path
+
+files = [str(p) for p in Path("~/Music").expanduser().rglob("*.mp3")]
 library = sonara.analyze_batch(files, features=["embedding"])
 
 def most_similar(query, library, k=5):
@@ -640,6 +615,43 @@ for path, score in most_similar(seed, library):
 ```
 
 The metric is a **weighted, normalized Euclidean distance** (not cosine): all dimensions are non-negative and bounded to `[0, 1]`, where cosine is biased toward 1 — Euclidean stays discriminative, and per-dimension weights let timbre, harmony and tempo dominate over incidental dimensions like absolute loudness. Because loudness contributes little, the *same* track at a different gain still scores as highly similar. `sonara.similarity()` applies a calibrated stretch (measured on a large commercial library) so scores are interpretable: an unrelated pair lands near **0.5**, close neighbors **0.65+**, identical tracks **1.0**. The stretch is monotone in the raw distance, so nearest-neighbor rankings are unaffected. The hand-crafted vector sits behind `embedding_version`, so a learned (e.g. ONNX) embedding can later replace it behind the same field and API.
+
+## Aggression model
+
+sonara includes a bundled perceptual aggression ranker. It combines physical
+force, harshness, tension, and rhythm evidence in the existing analysis pass,
+then applies a compact FerricML linear rank plus a small tree ensemble. The
+rank is in `[0, 1]`; it is not a probability.
+
+```python
+# Preferred: include the score in Sonara's single fused analysis pass.
+r = sonara.analyze_file("track.mp3", features=["aggression"])
+score = r["aggression_score"]
+support = r["aggression_confidence"]
+harshness = r["aggression_harshness"]
+
+# The older embedding-only scorer remains available for stored v1 values:
+score = sonara.aggression_score(
+    stored_embedding, embedding_version=stored_embedding_version
+)
+
+# A convenience call is available when aggression is the only desired output:
+aggression = sonara.analyze_aggression_file("track.mp3")
+score = aggression["aggression_score"]  # None when evidence is insufficient
+
+# Parallel fused library scan with one input-ordered result per path:
+results = sonara.analyze_batch(["a.mp3", "b.flac"], features=["aggression"])
+results[0]["aggression_score"]
+```
+
+The model artifacts are checksum- and schema-validated once. Feature extraction
+reuses the pipeline's FFT, onset, rhythm, and perceptual work; internal
+dependencies are not exposed unless separately requested. Rust users enable the
+`aggression` Cargo feature and request `"aggression"`, or call
+`sonara::aggression::{score, score_versioned, analyze_file, analyze_signal,
+analyze_batch}`.
+Model inference is allocation-free after one-time artifact loading. FerricML
+and the rank model remain absent from Sonara's default Rust build.
 
 ## Bring your own genre model
 
@@ -822,13 +834,13 @@ sonara provides 100+ audio analysis functions:
 
 **Sequence Analysis:** `dtw`, `rqa`, `viterbi`, `viterbi_discriminative`, `viterbi_binary`, `recurrence_matrix`, `cross_similarity`, `path_enhance`
 
-**Perceptual:** `loudness_lufs`, `energy`, `danceability`, `detect_key`, `valence`, `acousticness`
+**Perceptual:** `loudness_lufs`, `energy`, `danceability`, `detect_key`, `valence`, `acousticness`, `aggression_score`
 
 **Conversions (50+):** `hz_to_mel`, `mel_to_hz`, `hz_to_midi`, `midi_to_hz`, `note_to_hz`, `note_to_midi`, `hz_to_note`, `hz_to_octs`, `hz_to_svara_h`, `hz_to_svara_c`, `hz_to_fjs`, `fft_frequencies`, `mel_frequencies`, `cqt_frequencies`, `frames_to_time`, `time_to_frames`, frequency weighting (A/B/C/D/Z), notation helpers, and more
 
 **Filters & DSP:** `mel` filterbank, `chroma` filterbank, `lfilter`, `filtfilt`, `sosfiltfilt`, window functions (Hann, Hamming, Blackman, Kaiser, Tukey, Gaussian)
 
-**Pipeline:** `analyze_file`, `analyze_signal`, `analyze_batch`
+**Pipeline:** `analyze_file`, `analyze_signal`, `analyze_batch`, `analyze_aggression_file`, `analyze_aggression_signal`, `analyze_aggression_batch`, `augment_analysis`, `can_augment`, `augment_blocker`, `feature_dependencies`
 
 ## Architecture
 
@@ -840,6 +852,7 @@ sonara is a two-crate Rust workspace:
 ```text
 sonara/src/
   analyze.rs      — Fused analysis pipeline (compact/playlist/full modes)
+  aggression.rs   — Versioned 39-feature fused aggression model
   perceptual.rs   — LUFS, energy, danceability, key detection, valence, acousticness
   loudness_ext.rs — True peak (dBTP), ReplayGain, short-term curve, momentary max, EBU R128 LRA
   tonal.rs        — HPCP, chord detection, dissonance (Sethares 1998)

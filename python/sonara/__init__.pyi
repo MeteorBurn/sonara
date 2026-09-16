@@ -1,6 +1,6 @@
 """Type stubs for sonara — high-performance audio analysis."""
 
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict, Union
 import numpy as np
 from numpy.typing import NDArray
 
@@ -194,6 +194,11 @@ AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[s
 #                                      # frame * hop_length / sample_rate
 #     "mode":               str        # "compact" | "playlist" | "full"
 #     "requested_features": List[str]  # sorted; only when features=[...] given
+#     "bpm_min":            float      # octave-folding tempo range in effect at
+#     "bpm_max":            float      # analysis time; keys absent when unset.
+#                                      # A changed range invalidates stored "bpm"
+#                                      # (out-of-range raw tempos fold into it);
+#                                      # "bpm_raw" stays comparable.
 #   }
 #
 # When chords are computed (playlist/full modes or features=["chords"]), the
@@ -202,9 +207,9 @@ AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[s
 #                             #  "end_sec": float} — merged runs of
 #                             # chord_sequence; contiguous, covering the track;
 #                             # label "N" = no chord detected in that span
-def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None) -> AnalysisResult: ...
-def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None) -> AnalysisResult: ...
-def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, progress: Optional[Callable[[int, int], None]] = None, genre_model: Optional[str] = None) -> List[AnalysisResult]: ...
+def analyze_file(path: str, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None, vocalness_model: Optional[str] = None) -> AnalysisResult: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None, vocalness_model: Optional[str] = None) -> AnalysisResult: ...
+def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, progress: Optional[Callable[[int, int], None]] = None, genre_model: Optional[str] = None, vocalness_model: Optional[str] = None) -> List[AnalysisResult]: ...
 # analyze_batch never raises on a per-file decode/IO error. Each input path yields
 # exactly one entry in input order, and every entry carries its input `path`.
 # A failed file's entry has `path`, `error`, and `error_kind` (e.g. "decode",
@@ -212,6 +217,45 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 # `progress`, if given, is called as progress(done, total) after each completed
 # file — `done` counts completions in COMPLETION order (not input order),
 # `total == len(paths)`. Callback exceptions are ignored (never abort the batch).
+
+# ============================================================
+# Augment lane — recompute features onto a cached analysis dict
+# ============================================================
+# augment_analysis recomputes the named features onto a COPY of a cached
+# analysis dict (as returned by analyze_* — or the same shape loaded back from
+# JSON; tuples-as-lists are accepted). Decode-free where the record's evidence
+# allows; otherwise pass audio_path to enable ONE re-analysis at the record's
+# own provenance["sample_rate"] computing exactly the blocked features (an
+# "aggression" request auto-routes through its dedicated 22.05 kHz lane).
+# Feature names are case-insensitive; unknown names raise ValueError. Genre has
+# no feature name — passing genre_model IS the request (features=[] is valid);
+# vocalness/instrumentalness always update together. A schema_version mismatch
+# raises ValueError (re-analyze instead). Fields not asked about are never
+# cleared; provenance["requested_features"] becomes the union.
+def augment_analysis(cached: Dict, features: Optional[List[str]] = None, *, audio_path: Optional[str] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[str] = None, vocalness_model: Optional[str] = None) -> AnalysisResult: ...
+# can_augment: True iff `feature` is decode-free recomputable from THIS record
+# (evidence is per-record; two same-version records can differ). False for
+# unknown names.
+def can_augment(cached: Dict, feature: str) -> bool: ...
+# augment_blocker: the reason can_augment is False, as a stable descriptive
+# string — one of: "unknown feature", "needs audio (<class>-class feature)",
+# "schema version mismatch (record N, current M)", "embedding version mismatch
+# (record N, current M)", "missing evidence: <field>, ..." — or None when the
+# feature can be recomputed decode-free.
+def augment_blocker(cached: Dict, feature: str) -> Optional[str]: ...
+# feature_dependencies: the declared per-feature dependency map, one dict per
+# public feature in canonical order:
+#   name:              str        — canonical feature name
+#   class:             str        — "audio" | "frame_curves" | "scalars" |
+#                                 #  "embedding"; scalars/embedding are
+#                                 #  decode-free recomputable from a record
+#                                 #  carrying every required_evidence field
+#   required_evidence: List[str]  — record fields a decode-free recompute reads
+#                                 #  (non-empty exactly for scalars/embedding)
+#   needs_extended:    bool       — fresh computation needs the extended pass
+#   opt_in_only:       bool       — never enabled by any mode's defaults
+#   full_only:         bool       — among mode defaults, Full mode only
+def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 
 # --- beat grid ---
 # Opt-in via features=["beatgrid"]. When requested, the analyze_* result dict
@@ -251,6 +295,15 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, mode: str = "compact", f
 #   "vocalness": float             # heuristic v2 in [0, 1] (rough, not a classifier); changed semantics in 0.2.4.
 #                                  # Prominence of vocal/broadband energy filling the ~0.8-5.6 kHz spectral
 #                                  # valleys; rises harsh > clean > instrumental.
+# --- aggression --- features=["aggression"]
+#   "aggression_score": Optional[float] # perceptual rank; None means abstain
+#   "aggression_confidence": float # evidence support, not score certainty
+#   "aggression_forcefulness": float
+#   "aggression_harshness": float
+#   "aggression_tension": float
+#   "aggression_rhythm": float
+#   provenance["aggression_model_id"]: str
+#                                  # dependencies stay internal unless separately requested.
 # --- mood --- features=["mood"]
 #   "mood_happy": float            # heuristic v1, not an ML classifier — in [0, 1]
 #   "mood_aggressive": float       # heuristic v1, not an ML classifier — in [0, 1]
@@ -282,10 +335,6 @@ def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
 # Similarity in [0, 1] between two fingerprints, robust to gain / re-encoding /
 # small leading-silence differences. Accepts base64 `fingerprint` strings or
 # analysis dicts containing one. A score above ~0.30 means "same recording".
-def analyze_file(path: str, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
-def analyze_signal(y: AudioArray, *, sr: int = 22050) -> Dict[str, Union[float, int, List[int]]]: ...
-def analyze_batch(paths: List[str], *, sr: int = 22050, progress: Optional[Callable[[int, int], None]] = None) -> List[Dict[str, Union[float, int, List[int]]]]: ...
-
 # ============================================================
 # Bring-your-own genre model — genre_model=<path>
 # ============================================================
@@ -329,6 +378,31 @@ def analyze_batch(paths: List[str], *, sr: int = 22050, progress: Optional[Calla
 
 SIMILARITY_VERSION: int
 EMBEDDING_DIM: int
+# Selectable distance-time weighting profiles for similarity/embedding_distance:
+# profile name -> weight-table version. Profiles are applied at comparison time
+# and never change the stored vector; the "default" profile's version aliases
+# SIMILARITY_VERSION, while other profiles (e.g. "timbre") version their weight
+# tables independently.
+SIMILARITY_PROFILES: Dict[str, int]
+AGGRESSION_MODEL_VERSION: int
+AGGRESSION_SAMPLE_RATE: int
+AGGRESSION_EMBEDDING_VERSION: int
+AGGRESSION_MODEL_ID: str
+LEGACY_AGGRESSION_MODEL_ID: str
 
-def similarity(a: Union[Dict, List[float], NDArray[np.float32]], b: Union[Dict, List[float], NDArray[np.float32]]) -> float: ...
-def embedding_distance(a: List[float], b: List[float]) -> float: ...
+class AggressionAnalysis(TypedDict):
+    aggression_score: Optional[float]
+    aggression_confidence: float
+    aggression_forcefulness: float
+    aggression_harshness: float
+    aggression_tension: float
+    aggression_rhythm: float
+    aggression_model_id: str
+
+def similarity(a: Union[Dict, List[float], NDArray[np.float32]], b: Union[Dict, List[float], NDArray[np.float32]], *, profile: str = "default") -> float: ...
+def embedding_distance(a: List[float], b: List[float], *, profile: str = "default") -> float: ...
+# Retained legacy-v1 scorer for stored 48D similarity embeddings.
+def aggression_score(embedding: List[float], *, embedding_version: int = AGGRESSION_EMBEDDING_VERSION) -> float: ...
+def analyze_aggression_file(path: str, *, sr: int = 22050) -> AggressionAnalysis: ...
+def analyze_aggression_signal(y: AudioArray, *, sr: int = 22050) -> AggressionAnalysis: ...
+def analyze_aggression_batch(paths: List[str], *, sr: int = 22050) -> List[Dict[str, Union[str, float, None]]]: ...

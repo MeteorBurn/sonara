@@ -1,0 +1,285 @@
+{
+  "version": 2,
+  "protected_globs": [
+    "python/sonara/*.py",
+    "python/sonara/*.pyi",
+    "python/sonara/models/*.json",
+    "scripts/run_fidelity_gate.py",
+    "sonara-python/src/*.rs",
+    "sonara-python/src/**/*.rs",
+    "sonara/models/*.json",
+    "sonara/src/aggression_model.bin",
+    "sonara/src/aggression_linear.ferricml",
+    "sonara/src/*.rs",
+    "sonara/src/**/*.rs",
+    "sonara/tests/*.rs",
+    "tests/fidelity_gates.json",
+    "tests/python/test_*.py",
+    "tests/reference_data/*",
+    "tests/scripts/test_run_fidelity_gate.py"
+  ],
+  "reviewed_transitions": [
+    {
+      "path": "sonara/src/mood.rs",
+      "base_sha256": null,
+      "head_sha256": "14a1fadec04735e96772f9e6044fe2748829a98b43d92a49d74c2ce5b798fc25",
+      "reason": "one-time bit-preserving extraction guarded by frozen scalar outputs"
+    },
+    {
+      "path": "sonara/src/perceptual.rs",
+      "base_sha256": "cbbd1056cd517f412bd0310f4bce4b1c6807afc87b434028030f736c319b9203",
+      "head_sha256": "c155879147650103802c47d215d356bfe75438b7427ea379a5755a6b0a626eab",
+      "reason": "one-time re-export transition guarded by frozen scalar outputs"
+    },
+    {
+      "path": "scripts/mood_aggression_probe.py",
+      "base_sha256": "f28de68e811ff7967e96b3382dd4dadfd448feba9a97ab2c7124787482ae9fe0",
+      "head_sha256": null,
+      "reason": "retire an application-specific offline research probe"
+    },
+    {
+      "path": "tests/reference_data/mood_aggression_development.json",
+      "base_sha256": "100fd414dbe6630acac95f71082e06c3cbebe49db0fe7f8a5c2cd8be4a585947",
+      "head_sha256": null,
+      "reason": "retire an obsolete offline research fixture"
+    },
+    {
+      "path": "tests/reference_data/mood_aggression_phase6_decision.json",
+      "base_sha256": "e84d8a9ccbaa8fa65858162a2223a3a08a31b9100d468e74149e4691d81bf0ad",
+      "head_sha256": null,
+      "reason": "retire an obsolete offline research fixture"
+    },
+    {
+      "path": "tests/reference_data/mood_aggression_preregistration.json",
+      "base_sha256": "1bec2519813a6c26796deeb5716a3d7deff03889392dfe5864ef320a32f5e34d",
+      "head_sha256": null,
+      "reason": "retire an obsolete offline research fixture"
+    },
+    {
+      "path": "tests/python/test_vocalness_real.py",
+      "base_sha256": "d9656eca313b316cb44d9224194f4cb335f04a027816f2dce24cdd9490b1ac0f",
+      "head_sha256": "ca50ca2779429dc1c22f5776fad763c697215eb31461bd652c6064f21f636117",
+      "reason": "neutralize a provenance comment without changing test behavior"
+    },
+    {
+      "path": "tests/python/test_similarity_real.py",
+      "base_sha256": null,
+      "head_sha256": "889f8ddb5a67e24994f96840bde9a943deace4de9276232f85f0e2f94a01e7e7",
+      "reason": "introduce the local-only neighbor-quality harness; measured 2026-08-17, GATE PASS (timbre macro P@10 0.2310 vs default 0.2124)"
+    },
+    {
+      "path": "tests/reference_data/vocal_labels.csv",
+      "base_sha256": "41c0ad5375f20a4699940fe18c7af75c2ff01d29e097e8d0bec996f87140ea8e",
+      "head_sha256": "16c71c3433ccfa183363b7657e9db5fc01bae9726fdf9e850e5aade51b996a00",
+      "reason": "neutralize a provenance comment without changing fixture data"
+    }
+  ],
+  "domains": {
+    "aggression_api": {
+      "command": ["{python}", "tests/python/test_aggression.py"]
+    },
+    "aggression_semantic": {
+      "command": ["{python}", "tests/python/test_aggression_semantic.py"],
+      "transition_policy": "forbid"
+    },
+    "vocalness": {
+      "command": ["{python}", "tests/python/test_vocalness_frozen.py"]
+    },
+    "local_vocalness": {
+      "blocked": "the broader real-music vocalness corpus is local-only and must be run explicitly"
+    },
+    "tonal": {
+      "blocked": "the local tonal batch script is report-only, not a labeled fidelity gate"
+    },
+    "bpm": {
+      "blocked": "no mandatory labeled real-music BPM gate is available"
+    },
+    "beatgrid": {
+      "blocked": "no mandatory labeled real-music beat-grid gate is available"
+    },
+    "similarity": {
+      "command": ["{python}", "tests/python/test_similarity_frozen.py"]
+    },
+    "local_similarity": {
+      "blocked": "the labeled real-music neighbor-quality set is local-only and must be run explicitly"
+    },
+    "fingerprint": {
+      "blocked": "no mandatory labeled real-music fingerprint gate is available"
+    },
+    "genre": {
+      "blocked": "no mandatory labeled real-music genre gate is available"
+    },
+    "mood_aggression": {
+      "blocked": "no frozen aggression semantics and real-music gate are available"
+    },
+    "cross_cutting": {
+      "blocked": "cross-cutting analysis changes require reviewed domain isolation or comprehensive fidelity evidence"
+    }
+  },
+  "ownership": [
+    {
+      "paths": [
+        "sonara/src/aggression.rs",
+        "sonara/src/aggression_dsp.rs",
+        "sonara-python/src/aggression.rs",
+        "tests/python/test_aggression.py",
+        "tests/python/test_augment.py",
+        "python/sonara/__init__.py",
+        "python/sonara/__init__.pyi",
+        "python/sonara/_result.py",
+        "sonara-python/src/analyze.rs",
+        "sonara-python/src/lib.rs",
+        "sonara/src/analyze.rs",
+        "sonara/src/lib.rs"
+      ],
+      "domains": ["aggression_api", "aggression_semantic"]
+    },
+    {
+      "paths": [
+        "sonara/src/aggression_model.bin",
+        "sonara/src/aggression_linear.ferricml",
+        "tests/python/test_aggression_semantic.py",
+        "tests/reference_data/aggression_v2_evidence.json",
+        "tests/reference_data/aggression_v2_performance.json"
+      ],
+      "domains": ["aggression_semantic"]
+    },
+    {
+      "paths": [
+        "sonara/src/vocal_model.rs",
+        "sonara/models/vocalness_v2.json",
+        "python/sonara/vocal_model.py",
+        "python/sonara/models/vocalness_v2.json",
+        "tests/python/test_vocalness_frozen.py",
+        "tests/python/test_vocalness_model.py",
+        "tests/reference_data/vocal_labels.csv",
+        "tests/reference_data/vocalness_similarity_v2.json",
+        "tests/reference_data/vocalness_v2_validation.json"
+      ],
+      "domains": ["vocalness"]
+    },
+    {
+      "paths": ["tests/python/test_vocalness_real.py"],
+      "domains": ["local_vocalness"]
+    },
+    {
+      "paths": [
+        "sonara/src/tonal.rs",
+        "sonara-python/src/tonal.rs",
+        "sonara/tests/accuracy.rs",
+        "tests/python/test_camelot.py",
+        "tests/python/test_tonal_batch.py"
+      ],
+      "domains": ["tonal"]
+    },
+    {
+      "paths": [
+        "sonara/src/beat.rs",
+        "sonara/src/feature/rhythm.rs",
+        "sonara-python/src/beat.rs",
+        "sonara-python/src/feature/rhythm.rs",
+        "sonara/tests/bpm_accuracy.rs"
+      ],
+      "domains": ["bpm"]
+    },
+    {
+      "paths": ["sonara/src/beatgrid.rs", "tests/python/test_beatgrid.py"],
+      "domains": ["beatgrid"]
+    },
+    {
+      "paths": [
+        "sonara/src/similarity.rs",
+        "sonara-python/src/similarity.rs",
+        "tests/python/test_similarity.py",
+        "tests/python/test_similarity_frozen.py",
+        "tests/reference_data/similarity_frozen_v1.json",
+        "tests/reference_data/similarity_labels.csv"
+      ],
+      "domains": ["similarity"]
+    },
+    {
+      "paths": ["tests/python/test_similarity_real.py"],
+      "domains": ["local_similarity"]
+    },
+    {
+      "paths": ["sonara/src/fingerprint.rs", "tests/python/test_fingerprint.py"],
+      "domains": ["fingerprint"]
+    },
+    {
+      "paths": [
+        "sonara/src/genre.rs",
+        "python/sonara/genre.py",
+        "tests/python/test_genre.py"
+      ],
+      "domains": ["genre"]
+    },
+    {
+      "paths": ["sonara/src/mood.rs"],
+      "domains": ["mood_aggression"]
+    },
+    {
+      "paths": ["sonara/src/perceptual.rs", "tests/python/test_misc_features.py"],
+      "domains": ["cross_cutting", "mood_aggression"]
+    },
+    {
+      "paths": [
+        "python/sonara/display.py",
+        "sonara-python/src/core/audio.rs",
+        "sonara-python/src/core/convert.rs",
+        "sonara-python/src/core/mod.rs",
+        "sonara-python/src/core/spectrum.rs",
+        "sonara-python/src/effects.rs",
+        "sonara-python/src/error.rs",
+        "sonara-python/src/feature/mod.rs",
+        "sonara-python/src/feature/spectral.rs",
+        "sonara-python/src/filters.rs",
+        "sonara-python/src/onset.rs",
+        "sonara-python/src/util.rs",
+        "sonara/src/core/audio.rs",
+        "sonara/src/core/constantq.rs",
+        "sonara/src/core/convert.rs",
+        "sonara/src/core/fft.rs",
+        "sonara/src/core/harmonic.rs",
+        "sonara/src/core/intervals.rs",
+        "sonara/src/core/mod.rs",
+        "sonara/src/core/notation.rs",
+        "sonara/src/core/pitch.rs",
+        "sonara/src/core/spectrum.rs",
+        "sonara/src/decompose.rs",
+        "sonara/src/dsp/extrema.rs",
+        "sonara/src/dsp/iir.rs",
+        "sonara/src/dsp/mod.rs",
+        "sonara/src/dsp/windows.rs",
+        "sonara/src/effects.rs",
+        "sonara/src/error.rs",
+        "sonara/src/feature/inverse.rs",
+        "sonara/src/feature/mod.rs",
+        "sonara/src/feature/spectral.rs",
+        "sonara/src/filters.rs",
+        "sonara/src/loudness_ext.rs",
+        "sonara/src/onset.rs",
+        "sonara/src/segment.rs",
+        "sonara/src/sequence.rs",
+        "sonara/src/structure.rs",
+        "sonara/src/types.rs",
+        "sonara/src/util/matching.rs",
+        "sonara/src/util/mod.rs",
+        "sonara/src/util/utils.rs",
+        "sonara/src/vocal.rs",
+        "tests/python/test_api.py",
+        "tests/python/test_batch_errors.py",
+        "tests/python/test_loudness.py",
+        "tests/python/test_structure.py"
+      ],
+      "domains": ["cross_cutting"]
+    },
+    {
+      "paths": [
+        "scripts/run_fidelity_gate.py",
+        "tests/fidelity_gates.json",
+        "tests/scripts/test_run_fidelity_gate.py"
+      ],
+      "exemption": "fidelity enforcement infrastructure validated by exhaustive contract tests"
+    }
+  ]
+}

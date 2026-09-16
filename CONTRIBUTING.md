@@ -4,7 +4,8 @@ Thanks for helping improve sonara. This guide covers setting up a dev environmen
 
 ## Dev setup
 
-You need a stable Rust toolchain and Python 3.9+.
+You need a stable Rust toolchain and Python 3.11+ for repository tooling; the
+published package itself supports Python 3.10+.
 
 ```bash
 # Rust core builds with plain cargo
@@ -28,11 +29,17 @@ cargo test -p sonara
 # On macOS you can add the Accelerate BLAS backend, matching CI:
 cargo test -p sonara --features accelerate
 
-# Python API tests (need the bindings built into the active venv first)
-python tests/python/test_api.py
+# Canonical Python API suite (bindings must already be built;
+# `--list` prints the current script set)
+python scripts/run_python_tests.py
 ```
 
-CI runs exactly these on Linux, macOS, and Windows — if they pass locally, they should pass in CI.
+CI runs exactly this suite on Linux, macOS, and Windows. Accuracy-sensitive
+paths are derived from Git and routed through
+`python scripts/run_fidelity_gate.py --base <merge-base-or-base-ref>`.
+The audio-free vocalness fixture is mandatory. The local vocalness corpus gate
+fails closed; `test_tonal_batch.py` remains a report-only sanity check and is
+not a substitute for labeled accuracy evidence.
 
 ## Contributing accuracy improvements
 

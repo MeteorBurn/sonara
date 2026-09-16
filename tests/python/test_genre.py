@@ -114,6 +114,32 @@ def _embedding_version_default():
 test("model defaults embedding_version to SIMILARITY_VERSION", _embedding_version_default)
 
 
+def _model_id_roundtrip_and_provenance():
+    with tempfile.TemporaryDirectory() as tmp:
+        # With an id: JSON carries it, load restores it, analysis stamps it.
+        m = genre.train(X, y, hidden=0, epochs=200, lr=0.5, seed=0,
+                        model_id="genre-test-v1")
+        assert m.to_dict()["id"] == "genre-test-v1"
+        path = os.path.join(tmp, "with_id.json")
+        m.save(path)
+        assert genre.load(path).id == "genre-test-v1"
+        sig = np.sin(0.12 * np.arange(44100)).astype(np.float32)
+        r = sonara.analyze_signal(sig, sr=22050, genre_model=path)
+        assert r["provenance"].get("genre_model_id") == "genre-test-v1"
+        # Without an id (backward compat): no "id" key, no provenance field.
+        m2 = genre.train(X, y, hidden=0, epochs=200, lr=0.5, seed=0)
+        assert m2.id is None and "id" not in m2.to_dict()
+        path2 = os.path.join(tmp, "no_id.json")
+        m2.save(path2)
+        assert genre.load(path2).id is None
+        r2 = sonara.analyze_signal(sig, sr=22050, genre_model=path2)
+        assert "genre_model_id" not in r2["provenance"]
+
+
+test("model_id round-trips and stamps provenance.genre_model_id",
+     _model_id_roundtrip_and_provenance)
+
+
 # ------------------------------------------------------------
 # Analyze-time parity: numpy predict == Rust analyze-time label.
 # ------------------------------------------------------------
@@ -154,6 +180,83 @@ def _predict_parity():
 
 
 test("numpy predict == analyze-time (Rust) label + confidence", _predict_parity)
+
+
+def _tied_logits_choose_first_label_in_python_and_rust():
+    model = genre.GenreModel(
+        labels=["first", "second"],
+        layers=[{
+            "W": np.zeros((DIM, 2), dtype=np.float64),
+            "b": np.zeros(2, dtype=np.float64),
+            "activation": "softmax",
+        }],
+        embedding_version=sonara.SIMILARITY_VERSION,
+    )
+    py_label, py_conf = model.predict(np.zeros(DIM))
+    assert py_label == "first"
+    assert abs(py_conf - 0.5) < 1e-12
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "tied.json")
+        model.save(path)
+        result = sonara.analyze_signal(_real_signal(), sr=22050, genre_model=path)
+        assert result["genre"] == "first", result
+        assert abs(result["genre_confidence"] - 0.5) < 1e-6, result
+
+
+test("tied logits choose first label in numpy and Rust",
+     _tied_logits_choose_first_label_in_python_and_rust)
+
+
+def _non_finite_model_state_rejected_everywhere():
+    zeros = ",".join(["0"] * DIM)
+    overflow_json = (
+        '{"format_version":1,'
+        f'"embedding_version":{sonara.SIMILARITY_VERSION},'
+        '"labels":["a","b"],"layers":['
+        f'{{"weights":[[{zeros}],[{zeros}]],'
+        '"bias":[1e999,1e999],"activation":"softmax"}]}'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "overflow.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(overflow_json)
+        try:
+            genre.load(path)
+            raise AssertionError("numpy loader must reject overflow")
+        except ValueError:
+            pass
+        try:
+            sonara.analyze_signal(_real_signal(), sr=22050, genre_model=path)
+            raise AssertionError("Rust loader must reject overflow")
+        except ValueError:
+            pass
+
+    model = genre.train(X, y, epochs=1, seed=0)
+    model.layers[-1]["b"][0] = np.inf
+    try:
+        model.predict(np.zeros(DIM))
+        raise AssertionError("mutated non-finite model must not predict")
+    except ValueError:
+        pass
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            model.save(os.path.join(tmp, "nonfinite.json"))
+            raise AssertionError("non-finite model must not serialize")
+        except (ValueError, OverflowError):
+            pass
+
+    bad_x = X.copy()
+    bad_x[0, 0] = np.nan
+    try:
+        genre.train(bad_x, y)
+        raise AssertionError("training data must be finite")
+    except ValueError:
+        pass
+
+
+test("non-finite model state rejected by numpy and Rust",
+     _non_finite_model_state_rejected_everywhere)
 
 
 def _genre_and_embedding_both_when_requested():

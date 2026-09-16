@@ -4,9 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "sonara"
-version = "0.2.4"
+version = "0.3.6"
 description = "High-performance audio analysis and music information retrieval in Rust"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23,<3"]
 license = {file = "LICENSE"}
 readme = "README.md"
 keywords = [
@@ -31,7 +32,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -52,3 +52,4 @@ manifest-path = "sonara-python/Cargo.toml"
 python-source = "python"
 module-name = "sonara._sonara"
 features = ["pyo3/extension-module"]
+include = [{ path = "python/sonara/models/*.json", format = ["sdist", "wheel"] }]

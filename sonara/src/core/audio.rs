@@ -11,7 +11,7 @@ use std::path::Path;
 use ndarray::s;
 use ndarray::{Array1, Array2, ArrayView1, Axis};
 
-use crate::error::{SonaraError, Result};
+use crate::error::{Result, SonaraError};
 use crate::types::{AudioBuffer, Float};
 
 // ============================================================
@@ -27,8 +27,9 @@ use crate::types::{AudioBuffer, Float};
 /// `Some` only when the file actually carries that tag.
 ///
 /// Tags are read from **symphonia-decoded** containers (FLAC/Vorbis comments,
-/// MP3/AAC ID3v2, MP4, etc.). The WAV fast path (hound) does **not** read tags,
-/// so a `.wav` input always yields `None` here.
+/// MP3/AAC ID3v2, MP4, etc.). WAV tries the hound fast path first and falls
+/// back to Symphonia 0.6 only when hound rejects the file or its samples.
+/// Neither WAV path exposes tags, so a `.wav` input always yields `None` here.
 ///
 /// Note: `genre` here is the *file's* metadata genre string (e.g. "Electronic"),
 /// which is distinct from `TrackAnalysis::genre` — the latter is a reserved
@@ -88,7 +89,8 @@ pub fn load(
 /// When `want_tags` is `false` this does exactly the same work as [`load`] and
 /// returns `None` for the tags — the default fast path pays nothing. When
 /// `true`, tags are read from symphonia-decoded containers (see [`TrackTags`]);
-/// WAV files go through the hound fast path and always yield `None`.
+/// WAV files try hound first, retry through Symphonia 0.6 on failure, and
+/// always yield `None`.
 pub fn load_with_tags(
     path: &Path,
     sr: u32,
@@ -100,8 +102,15 @@ pub fn load_with_tags(
     // Try hound first for WAV files (fastest path). WAV carries no tags here.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let (samples, native_sr, n_channels, tags) = if ext.eq_ignore_ascii_case("wav") {
-        let (s, r, c) = load_wav(path)?;
-        (s, r, c, None)
+        match load_wav(path) {
+            Ok((s, r, c)) => (s, r, c, None),
+            Err(hound_err) => match load_symphonia(path, false) {
+                Ok((s, r, c, _)) => (s, r, c, None),
+                Err(symphonia_err) => {
+                    return Err(combine_wav_errors(path, hound_err, symphonia_err));
+                }
+            },
+        }
     } else {
         load_symphonia(path, want_tags)?
     };
@@ -186,6 +195,29 @@ fn load_wav(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
     Ok((samples, sr, n_channels))
 }
 
+/// Preserve the public error category when both WAV backends fail for the same
+/// reason while retaining both diagnostics. In particular, a missing or
+/// unreadable file remains an I/O error instead of being reported as corrupt
+/// audio merely because the fallback was attempted.
+fn combine_wav_errors(
+    path: &Path,
+    hound_err: SonaraError,
+    symphonia_err: SonaraError,
+) -> SonaraError {
+    let message = format!(
+        "{}: WAV decode failed with Hound ({hound_err}); \
+         Symphonia 0.6 fallback failed ({symphonia_err})",
+        path.display(),
+    );
+    match (&hound_err, &symphonia_err) {
+        (SonaraError::AudioFile(_), SonaraError::AudioFile(_)) => SonaraError::AudioFile(message),
+        (SonaraError::UnsupportedFormat(_), SonaraError::UnsupportedFormat(_)) => {
+            SonaraError::UnsupportedFormat(message)
+        }
+        _ => SonaraError::Decode(message),
+    }
+}
+
 /// Map a symphonia error into the most appropriate `SonaraError` variant,
 /// annotating it with the file path, a stage label, and (when known) the
 /// container/codec that was in play so batch callers get an actionable message.
@@ -218,23 +250,54 @@ fn map_symphonia_err(
 }
 
 /// Human-readable short name for a symphonia codec type, if registered.
-fn codec_short_name(codec: symphonia::core::codecs::CodecType) -> Option<&'static str> {
+fn codec_short_name(codec: symphonia::core::codecs::audio::AudioCodecId) -> Option<&'static str> {
     symphonia::default::get_codecs()
-        .get_codec(codec)
-        .map(|d| d.short_name)
+        .get_audio_decoder(codec)
+        .map(|d| d.codec.info.short_name)
+}
+
+/// Probe enabled container formats without registering Symphonia metadata readers.
+///
+/// This prevents leading and trailing tag/visual probing when callers did not
+/// request tags, while retaining every format reader enabled for SONARA.
+fn probe_symphonia_without_metadata<'s>(
+    hint: &symphonia::core::formats::probe::Hint,
+    mss: symphonia::core::io::MediaSourceStream<'s>,
+) -> symphonia::core::errors::Result<Box<dyn symphonia::core::formats::FormatReader + 's>> {
+    let mut probe = symphonia::core::formats::probe::Probe::new();
+    // `register_enabled_formats` also registers the optional APE and ID3
+    // metadata readers. Register SONARA's enabled container readers directly
+    // so this branch performs no separate metadata probing.
+    probe.register_format::<symphonia::default::formats::AdtsReader<'_>>();
+    probe.register_format::<symphonia::default::formats::CafReader<'_>>();
+    probe.register_format::<symphonia::default::formats::FlacReader<'_>>();
+    probe.register_format::<symphonia::default::formats::IsoMp4Reader<'_>>();
+    probe.register_format::<symphonia::default::formats::MpaReader<'_>>();
+    probe.register_format::<symphonia::default::formats::AiffReader<'_>>();
+    probe.register_format::<symphonia::default::formats::WavReader<'_>>();
+    probe.register_format::<symphonia::default::formats::OggReader<'_>>();
+    probe.register_format::<symphonia::default::formats::MkvReader<'_>>();
+    probe.probe(
+        hint,
+        mss,
+        symphonia::core::formats::FormatOptions::default(),
+        symphonia::core::meta::MetadataOptions::default(),
+    )
 }
 
 /// Load audio file using symphonia (supports mp3, flac, ogg, etc.).
 ///
 /// When `want_tags` is `true`, container/stream metadata tags are also collected
-/// (see [`TrackTags`]); when `false`, no tag work is done at all.
-fn load_symphonia(path: &Path, want_tags: bool) -> Result<(Vec<Float>, u32, usize, Option<TrackTags>)> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
+/// (see [`TrackTags`]); when `false`, Symphonia metadata readers are not probed.
+fn load_symphonia(
+    path: &Path,
+    want_tags: bool,
+) -> Result<(Vec<Float>, u32, usize, Option<TrackTags>)> {
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
 
     let file = std::fs::File::open(path)
         .map_err(|e| SonaraError::AudioFile(format!("{}: {}", path.display(), e)))?;
@@ -245,103 +308,231 @@ fn load_symphonia(path: &Path, want_tags: bool) -> Result<(Vec<Float>, u32, usiz
         hint.with_extension(ext);
     }
 
-    let mut probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-        .map_err(|e| map_symphonia_err(path, "probe", None, e))?;
+    let probe_result = if want_tags {
+        symphonia::default::get_probe().probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+    } else {
+        probe_symphonia_without_metadata(&hint, mss)
+    };
+    let mut format: Box<dyn FormatReader> = match probe_result {
+        Ok(format) => format,
+        Err(probe_err)
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3")) =>
+        {
+            // Generic probing stops at the first recognized marker. That can
+            // make valid MP3 audio unavailable when an ID3 frame is malformed,
+            // or when junk before the first MPEG frame resembles ADTS. Retry
+            // the extension-confirmed stream with the MP3 reader, which
+            // resynchronizes to consecutive MPEG frames and bypasses metadata.
+            let file = std::fs::File::open(path)
+                .map_err(|e| SonaraError::AudioFile(format!("{}: {}", path.display(), e)))?;
+            let mss = MediaSourceStream::new(Box::new(file), Default::default());
+            match symphonia::default::formats::MpaReader::try_new(mss, FormatOptions::default()) {
+                Ok(reader) => Box::new(reader),
+                // Keep the original probe diagnostic when explicit MP3
+                // recovery also rejects the stream.
+                Err(_) => return Err(map_symphonia_err(path, "probe", None, probe_err)),
+            }
+        }
+        Err(e) => return Err(map_symphonia_err(path, "probe", None, e)),
+    };
 
-    let mut format = probed.format;
+    let (track_id, codec_params, estimated_frames) = {
+        let track = format.default_track(TrackType::Audio).ok_or_else(|| {
+            SonaraError::Decode(format!("{}: no audio track found", path.display()))
+        })?;
+        let codec_params = track
+            .codec_params
+            .as_ref()
+            .and_then(|params| params.audio())
+            .cloned()
+            .ok_or_else(|| {
+                SonaraError::Decode(format!(
+                    "{}: missing audio codec parameters",
+                    path.display()
+                ))
+            })?;
+        (track.id, codec_params, track.num_frames)
+    };
 
-    // Extract tags (opt-in). Merge two sources: the probe-level metadata (e.g.
-    // an ID3v2 tag ahead of the stream) first, then any container-internal
-    // revision (e.g. FLAC/Vorbis comments) for fields the probe did not fill.
-    // Read now, before the decode loop consumes `format`. First value per field
-    // wins.
+    let codec_name = codec_short_name(codec_params.codec);
+    let sr = codec_params.sample_rate.ok_or_else(|| {
+        SonaraError::Decode(format!(
+            "{} (codec='{}'): missing sample rate in stream header",
+            path.display(),
+            codec_name.unwrap_or("unknown"),
+        ))
+    })?;
+    let n_channels = codec_params
+        .channels
+        .as_ref()
+        .map(|c| c.count())
+        .unwrap_or(1);
+
+    // In Symphonia 0.6, metadata discovered while probing is queued directly
+    // on the format reader. Merge all currently available revisions in order,
+    // including track-specific metadata, so the first value per field wins.
     let tags = if want_tags {
         let mut t = TrackTags::default();
-        if let Some(mut probe_meta) = probed.metadata.get() {
-            if let Some(rev) = probe_meta.skip_to_latest() {
-                merge_tags(&mut t, rev.tags());
-            }
-        }
-        {
-            let mut fmt_meta = format.metadata();
-            if let Some(rev) = fmt_meta.skip_to_latest() {
-                merge_tags(&mut t, rev.tags());
-            }
-        }
+        merge_format_metadata(&mut *format, track_id, &mut t);
         Some(t)
     } else {
         None
     };
 
-    let track = format
-        .default_track()
-        .ok_or_else(|| SonaraError::Decode(format!("{}: no audio track found", path.display())))?;
-    let track_id = track.id;
-    let codec_name = codec_short_name(track.codec_params.codec);
-    let sr = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| SonaraError::Decode(format!(
-            "{} (codec='{}'): missing sample rate in stream header",
-            path.display(),
-            codec_name.unwrap_or("unknown"),
-        )))?;
-    let n_channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1);
-
+    let decoder_options = AudioDecoderOptions::default();
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make_audio_decoder(&codec_params, &decoder_options)
         .map_err(|e| map_symphonia_err(path, "codec-init", codec_name, e))?;
 
     // Pre-allocate output with estimated capacity (avoid repeated growth)
-    let estimated_samples = track
-        .codec_params
-        .n_frames
+    let estimated_samples = estimated_frames
         .map(|f| f as usize * n_channels)
         .unwrap_or(sr as usize * 300 * n_channels); // fallback: 5 min
     let mut samples = Vec::with_capacity(estimated_samples);
 
-    // Reuse SampleBuffer across packets (avoid per-packet allocation)
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    // Symphonia 0.6 converts generic decoded buffers directly into an
+    // interleaved vector. Reuse the packet vector across the decode loop.
+    let mut packet_samples = Vec::<f32>::new();
+
+    // Packet-level decode tolerance: symphonia classifies bitstream-local
+    // defects (e.g. mpa "invalid main_data offset" or huffman overruns in
+    // MP3s with a damaged bit reservoir) as recoverable `DecodeError` — the
+    // decoder remains usable and subsequent packets can decode normally.
+    // Such packets are skipped rather than failing the whole file; every
+    // other error stays fatal. Guardrails after the loop ensure a stream
+    // where nothing decoded still surfaces its decode error.
+    let mut skipped_packets: usize = 0;
+    let mut first_decode_err: Option<SonaraError> = None;
 
     loop {
         let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
+            Ok(Some(p)) => p,
+            Ok(None) => break,
             Err(e) => return Err(map_symphonia_err(path, "demux", codec_name, e)),
         };
 
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
 
-        let decoded = decoder
-            .decode(&packet)
-            .map_err(|e| map_symphonia_err(path, "decode", codec_name, e))?;
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(e @ symphonia::core::errors::Error::DecodeError(_)) => {
+                skipped_packets += 1;
+                if first_decode_err.is_none() {
+                    first_decode_err = Some(map_symphonia_err(path, "decode", codec_name, e));
+                }
+                continue;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => {
+                // The decoder must be rebuilt (e.g. stream parameters changed
+                // mid-file); the triggering packet is lost.
+                skipped_packets += 1;
+                decoder = symphonia::default::get_codecs()
+                    .make_audio_decoder(&codec_params, &decoder_options)
+                    .map_err(|e| map_symphonia_err(path, "codec-init", codec_name, e))?;
+                continue;
+            }
+            Err(e) => return Err(map_symphonia_err(path, "decode", codec_name, e)),
+        };
 
-        let spec = *decoded.spec();
-        let capacity = decoded.capacity();
+        decoded.copy_to_vec_interleaved(&mut packet_samples);
+        samples.extend_from_slice(&packet_samples);
+    }
 
-        // Reuse or create SampleBuffer (only allocates when capacity grows)
-        if sample_buf.is_none() || sample_buf.as_ref().unwrap().capacity() < capacity {
-            sample_buf = Some(SampleBuffer::<f32>::new(capacity as u64, spec));
+    // Guardrails for the tolerant path (zero cost when nothing was skipped):
+    // the recovered stream must still be genuine audio — non-empty, finite PCM.
+    if skipped_packets > 0 {
+        let ctx = |msg: String| {
+            SonaraError::Decode(format!(
+                "{} (container='{}', codec='{}', stage=decode): {}",
+                path.display(),
+                path.extension().and_then(|e| e.to_str()).unwrap_or("?"),
+                codec_name.unwrap_or("unknown"),
+                msg,
+            ))
+        };
+        if samples.is_empty() {
+            return Err(first_decode_err.unwrap_or_else(|| {
+                ctx(format!("all {skipped_packets} packets failed to decode"))
+            }));
         }
-        let buf = sample_buf.as_mut().unwrap();
-        buf.copy_interleaved_ref(decoded);
-
-        // Zero-cost: SampleBuffer<f32> produces f32, and Float = f32
-        samples.extend(buf.samples().iter().copied());
+        if samples.iter().any(|s| !s.is_finite()) {
+            return Err(ctx(format!(
+                "non-finite samples after skipping {skipped_packets} damaged packets"
+            )));
+        }
     }
 
     Ok((samples, sr, n_channels, tags))
+}
+
+/// Merge all metadata revisions currently queued on a format reader.
+fn merge_format_metadata(
+    format: &mut dyn symphonia::core::formats::FormatReader,
+    track_id: u32,
+    tags: &mut TrackTags,
+) {
+    let mut metadata = format.metadata();
+    let mut revisions = Vec::new();
+    loop {
+        let mut revision_tags = TrackTags::default();
+        {
+            let Some(revision) = metadata.current() else {
+                break;
+            };
+            merge_tags(&mut revision_tags, &revision.media.tags);
+            for per_track in &revision.per_track {
+                if per_track.track_id == u64::from(track_id) {
+                    merge_tags(&mut revision_tags, &per_track.metadata.tags);
+                }
+            }
+        }
+        revisions.push(revision_tags);
+        if metadata.pop().is_none() {
+            break;
+        }
+    }
+
+    // Symphonia queues revisions oldest-first. Prefer the newest revision
+    // (for example, leading ID3v2 over trailing ID3v1), then let older
+    // revisions fill only fields the newer metadata did not provide.
+    for revision_tags in revisions.into_iter().rev() {
+        merge_track_tags(tags, revision_tags);
+    }
+}
+
+/// Fill still-empty fields from one already-normalized metadata revision.
+fn merge_track_tags(target: &mut TrackTags, source: TrackTags) {
+    if target.title.is_none() {
+        target.title = source.title;
+    }
+    if target.artist.is_none() {
+        target.artist = source.artist;
+    }
+    if target.album.is_none() {
+        target.album = source.album;
+    }
+    if target.genre.is_none() {
+        target.genre = source.genre;
+    }
+    if target.year.is_none() {
+        target.year = source.year;
+    }
+    if target.original_year.is_none() {
+        target.original_year = source.original_year;
+    }
+    if target.track_no.is_none() {
+        target.track_no = source.track_no;
+    }
 }
 
 /// Fill any still-empty [`TrackTags`] fields from a slice of symphonia `Tag`s.
@@ -355,23 +546,35 @@ fn load_symphonia(path: &Path, want_tags: bool) -> Result<(Vec<Float>, u32, usiz
 /// deliberate: reissues carry the reissue date in `Date` and the true original
 /// date in the original-release-date tags.
 fn merge_tags(t: &mut TrackTags, tags: &[symphonia::core::meta::Tag]) {
-    use symphonia::core::meta::StandardTagKey;
+    use symphonia::core::meta::StandardTag;
 
     for tag in tags {
-        // Standard-key mapping (preferred when symphonia recognized the tag).
-        if let Some(std_key) = tag.std_key {
-            match std_key {
-                StandardTagKey::TrackTitle => set_str(&mut t.title, tag),
-                StandardTagKey::Artist => set_str(&mut t.artist, tag),
-                StandardTagKey::Album => set_str(&mut t.album, tag),
-                StandardTagKey::Genre => set_str(&mut t.genre, tag),
-                StandardTagKey::Date | StandardTagKey::ReleaseDate => set_year(&mut t.year, tag),
-                StandardTagKey::OriginalDate => set_year(&mut t.original_year, tag),
-                StandardTagKey::TrackNumber => {
+        // Typed standard-tag mapping (preferred when Symphonia recognized it).
+        if let Some(std_tag) = tag.std.as_ref() {
+            match std_tag {
+                StandardTag::TrackTitle(value) => set_str(&mut t.title, value),
+                StandardTag::Artist(value) => set_str(&mut t.artist, value),
+                StandardTag::Album(value) => set_str(&mut t.album, value),
+                StandardTag::Genre(value) => set_str(&mut t.genre, value),
+                StandardTag::RecordingDate(value) | StandardTag::ReleaseDate(value) => {
+                    set_year(&mut t.year, value)
+                }
+                StandardTag::RecordingYear(value) | StandardTag::ReleaseYear(value) => {
+                    if t.year.is_none() {
+                        t.year = Some(u32::from(*value));
+                    }
+                }
+                StandardTag::OriginalRecordingDate(value)
+                | StandardTag::OriginalReleaseDate(value) => set_year(&mut t.original_year, value),
+                StandardTag::OriginalRecordingYear(value)
+                | StandardTag::OriginalReleaseYear(value) => {
+                    if t.original_year.is_none() {
+                        t.original_year = Some(u32::from(*value));
+                    }
+                }
+                StandardTag::TrackNumber(value) => {
                     if t.track_no.is_none() {
-                        if let Some(n) = parse_leading_u32(&tag.value.to_string()) {
-                            t.track_no = Some(n);
-                        }
+                        t.track_no = u32::try_from(*value).ok();
                     }
                 }
                 _ => {}
@@ -380,8 +583,8 @@ fn merge_tags(t: &mut TrackTags, tags: &[symphonia::core::meta::Tag]) {
 
         // Raw-key fallback for original-release-date tags symphonia may not
         // standardize (e.g. `TXXX:originalyear`, `ORIGINALYEAR`, a legacy `TORY`).
-        if t.original_year.is_none() && is_original_date_key(&tag.key) {
-            set_year(&mut t.original_year, tag);
+        if t.original_year.is_none() && is_original_date_key(&tag.raw.key) {
+            set_year(&mut t.original_year, &tag.raw.value.to_string());
         }
     }
 }
@@ -398,19 +601,18 @@ fn is_original_date_key(key: &str) -> bool {
 
 /// Set `slot` to the parsed leading-4-digit year of the tag value if not
 /// already set.
-fn set_year(slot: &mut Option<u32>, tag: &symphonia::core::meta::Tag) {
+fn set_year(slot: &mut Option<u32>, value: &str) {
     if slot.is_none() {
-        if let Some(y) = parse_year(&tag.value.to_string()) {
+        if let Some(y) = parse_year(value) {
             *slot = Some(y);
         }
     }
 }
 
 /// Set `slot` to the tag's string value if not already set and non-empty.
-fn set_str(slot: &mut Option<String>, tag: &symphonia::core::meta::Tag) {
+fn set_str(slot: &mut Option<String>, value: &str) {
     if slot.is_none() {
-        let s = tag.value.to_string();
-        let s = s.trim();
+        let s = value.trim();
         if !s.is_empty() {
             *slot = Some(s.to_string());
         }
@@ -420,7 +622,11 @@ fn set_str(slot: &mut Option<String>, tag: &symphonia::core::meta::Tag) {
 /// Parse the leading 4-digit year out of a date string (e.g. "2024",
 /// "2024-05-01", "2024/05").
 fn parse_year(s: &str) -> Option<u32> {
-    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = s
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if digits.len() == 4 {
         digits.parse().ok()
     } else {
@@ -429,8 +635,13 @@ fn parse_year(s: &str) -> Option<u32> {
 }
 
 /// Parse the leading integer of a track-number string (e.g. "3" or "3/12").
+#[cfg(test)]
 fn parse_leading_u32(s: &str) -> Option<u32> {
-    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = s
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if digits.is_empty() {
         None
     } else {
@@ -448,11 +659,7 @@ pub fn to_mono(y: ndarray::ArrayView2<Float>) -> Array1<Float> {
 /// Fast path for exact 2:1 decimation (e.g., 44100→22050) using a half-band
 /// FIR filter — ~20x faster than full sinc resampling for this common case.
 /// Falls back to rubato sinc interpolation for all other ratios.
-pub fn resample(
-    y: ArrayView1<Float>,
-    orig_sr: u32,
-    target_sr: u32,
-) -> Result<Array1<Float>> {
+pub fn resample(y: ArrayView1<Float>, orig_sr: u32, target_sr: u32) -> Result<Array1<Float>> {
     if orig_sr == target_sr {
         return Ok(y.to_owned());
     }
@@ -494,14 +701,14 @@ fn decimate_half(y: ArrayView1<Float>) -> Array1<Float> {
     let raw_coeffs: [Float; N_TAPS] = {
         let pi = std::f32::consts::PI;
         [
-            0.5 * (pi * 0.5).recip() * (0.54 - 0.46 * (2.0 * pi * 14.0 / 30.0).cos()),  // k=1
+            0.5 * (pi * 0.5).recip() * (0.54 - 0.46 * (2.0 * pi * 14.0 / 30.0).cos()), // k=1
             0.5 * -(pi * 1.5).recip() * (0.54 - 0.46 * (2.0 * pi * 12.0 / 30.0).cos()), // k=3
-            0.5 * (pi * 2.5).recip() * (0.54 - 0.46 * (2.0 * pi * 10.0 / 30.0).cos()),  // k=5
-            0.5 * -(pi * 3.5).recip() * (0.54 - 0.46 * (2.0 * pi * 8.0 / 30.0).cos()),  // k=7
-            0.5 * (pi * 4.5).recip() * (0.54 - 0.46 * (2.0 * pi * 6.0 / 30.0).cos()),   // k=9
-            0.5 * -(pi * 5.5).recip() * (0.54 - 0.46 * (2.0 * pi * 4.0 / 30.0).cos()),  // k=11
-            0.5 * (pi * 6.5).recip() * (0.54 - 0.46 * (2.0 * pi * 2.0 / 30.0).cos()),   // k=13
-            0.5 * -(pi * 7.5).recip() * (0.54 - 0.46 * (2.0 * pi * 0.0 / 30.0).cos()),  // k=15
+            0.5 * (pi * 2.5).recip() * (0.54 - 0.46 * (2.0 * pi * 10.0 / 30.0).cos()), // k=5
+            0.5 * -(pi * 3.5).recip() * (0.54 - 0.46 * (2.0 * pi * 8.0 / 30.0).cos()), // k=7
+            0.5 * (pi * 4.5).recip() * (0.54 - 0.46 * (2.0 * pi * 6.0 / 30.0).cos()),  // k=9
+            0.5 * -(pi * 5.5).recip() * (0.54 - 0.46 * (2.0 * pi * 4.0 / 30.0).cos()), // k=11
+            0.5 * (pi * 6.5).recip() * (0.54 - 0.46 * (2.0 * pi * 2.0 / 30.0).cos()),  // k=13
+            0.5 * -(pi * 7.5).recip() * (0.54 - 0.46 * (2.0 * pi * 0.0 / 30.0).cos()), // k=15
         ]
     };
 
@@ -530,7 +737,11 @@ fn decimate_half(y: ArrayView1<Float>) -> Array1<Float> {
             let il = c as isize - k;
             let ir = c as isize + k;
             let left = if il >= 0 { raw[il as usize] } else { 0.0 };
-            let right = if (ir as usize) < n { raw[ir as usize] } else { 0.0 };
+            let right = if (ir as usize) < n {
+                raw[ir as usize]
+            } else {
+                0.0
+            };
             sum += coeff * (left + right);
         }
         out[i] = sum;
@@ -556,7 +767,11 @@ fn decimate_half(y: ArrayView1<Float>) -> Array1<Float> {
             let il = c as isize - k;
             let ir = c as isize + k;
             let left = if il >= 0 { raw[il as usize] } else { 0.0 };
-            let right = if (ir as usize) < n { raw[ir as usize] } else { 0.0 };
+            let right = if (ir as usize) < n {
+                raw[ir as usize]
+            } else {
+                0.0
+            };
             sum += coeff * (left + right);
         }
         out[i] = sum;
@@ -566,13 +781,9 @@ fn decimate_half(y: ArrayView1<Float>) -> Array1<Float> {
 }
 
 /// General resampling using rubato sinc interpolation.
-fn resample_rubato(
-    y: ArrayView1<Float>,
-    orig_sr: u32,
-    target_sr: u32,
-) -> Result<Array1<Float>> {
-    use rubato::{Fft, FixedSync, Resampler};
+fn resample_rubato(y: ArrayView1<Float>, orig_sr: u32, target_sr: u32) -> Result<Array1<Float>> {
     use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+    use rubato::{Fft, FixedSync, Resampler};
 
     let chunk_size = 1024;
     let mut resampler = Fft::<f32>::new(
@@ -696,7 +907,8 @@ impl StreamResampler {
             1,
             1,
             FixedSync::Input,
-        ).map_err(|e| SonaraError::Fft(format!("stream resampler init: {e}")))?;
+        )
+        .map_err(|e| SonaraError::Fft(format!("stream resampler init: {e}")))?;
 
         Ok(Self {
             resampler,
@@ -712,8 +924,8 @@ impl StreamResampler {
     /// resampler's required input size. May return an empty Vec if
     /// not enough samples have been accumulated yet.
     pub fn process_chunk(&mut self, chunk: &[Float]) -> Result<Vec<Float>> {
-        use rubato::Resampler;
         use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+        use rubato::Resampler;
 
         self.buffer.extend_from_slice(chunk);
 
@@ -734,7 +946,8 @@ impl StreamResampler {
             let mut out_buf = SequentialSliceOfVecs::new_mut(&mut output_data, 1, out_len)
                 .map_err(|e| SonaraError::Fft(format!("stream resample output: {e}")))?;
 
-            let (_n_in, n_out) = self.resampler
+            let (_n_in, n_out) = self
+                .resampler
                 .process_into_buffer(&input, &mut out_buf, None)
                 .map_err(|e| SonaraError::Fft(format!("stream resample: {e}")))?;
 
@@ -749,8 +962,8 @@ impl StreamResampler {
     ///
     /// Call this after the last chunk to drain the internal buffers.
     pub fn flush(&mut self) -> Result<Vec<Float>> {
-        use rubato::Resampler;
         use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+        use rubato::Resampler;
 
         if self.buffer.is_empty() {
             return Ok(Vec::new());
@@ -769,7 +982,8 @@ impl StreamResampler {
         let mut out_buf = SequentialSliceOfVecs::new_mut(&mut output_data, 1, out_len)
             .map_err(|e| SonaraError::Fft(format!("stream resample flush output: {e}")))?;
 
-        let (_n_in, n_out) = self.resampler
+        let (_n_in, n_out) = self
+            .resampler
             .process_into_buffer(&input, &mut out_buf, None)
             .map_err(|e| SonaraError::Fft(format!("stream resample flush: {e}")))?;
 
@@ -947,7 +1161,11 @@ pub fn zero_crossings(y: ArrayView1<Float>, threshold: Float) -> Array1<bool> {
         if i == 0 {
             false
         } else {
-            let a = if y[i - 1].abs() <= threshold { 0.0 } else { y[i - 1] };
+            let a = if y[i - 1].abs() <= threshold {
+                0.0
+            } else {
+                y[i - 1]
+            };
             let b = if y[i].abs() <= threshold { 0.0 } else { y[i] };
             (a > 0.0 && b <= 0.0) || (a <= 0.0 && b > 0.0)
         }
@@ -1028,11 +1246,8 @@ mod tests {
 
     #[test]
     fn test_to_mono_stereo() {
-        let stereo = Array2::from_shape_vec(
-            (2, 4),
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-        )
-        .unwrap();
+        let stereo =
+            Array2::from_shape_vec((2, 4), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).unwrap();
         let mono = to_mono(stereo.view());
         assert_eq!(mono.len(), 4);
         assert_abs_diff_eq!(mono[0], 3.0, epsilon = 1e-5); // (1+5)/2
@@ -1081,9 +1296,7 @@ mod tests {
     #[test]
     fn test_zero_crossings_sine() {
         let n = 1000;
-        let y = Array1::from_shape_fn(n, |i| {
-            (2.0 * PI * 10.0 * i as Float / n as Float).sin()
-        });
+        let y = Array1::from_shape_fn(n, |i| (2.0 * PI * 10.0 * i as Float / n as Float).sin());
         let zc = zero_crossings(y.view(), 0.0);
         let count: usize = zc.iter().filter(|&&v| v).count();
         // 10 cycles → ~20 zero crossings
@@ -1104,17 +1317,21 @@ mod tests {
         let n = 2048;
         let freq = 100.0;
         let sr = 22050.0;
-        let y = Array1::from_shape_fn(n, |i| {
-            (2.0 * PI * freq * i as Float / sr).sin()
-        });
+        let y = Array1::from_shape_fn(n, |i| (2.0 * PI * freq * i as Float / sr).sin());
         let acf = autocorrelate(y.view(), Some(n)).unwrap();
         // Autocorrelation of sine peaks at 0 and at period
         assert!(acf[0] > 0.0); // Peak at lag 0
         let period_samples = (sr / freq).round() as usize;
         // Should have a peak near the period
         let peak_region = &acf.as_slice().unwrap()[period_samples - 5..period_samples + 5];
-        let local_max = peak_region.iter().copied().fold(Float::NEG_INFINITY, Float::max);
-        assert!(local_max > acf[0] * 0.5, "autocorrelation should peak near period");
+        let local_max = peak_region
+            .iter()
+            .copied()
+            .fold(Float::NEG_INFINITY, Float::max);
+        assert!(
+            local_max > acf[0] * 0.5,
+            "autocorrelation should peak near period"
+        );
     }
 
     #[test]
@@ -1160,6 +1377,91 @@ mod tests {
     }
 
     #[test]
+    fn test_patched_hound_reads_data_after_odd_length_unknown_chunk() {
+        let wav = &b"RIFF\x32\x00\x00\x00WAVE\
+JUNK\x03\x00\x00\x00\x01\x02\x03\x00\
+fmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00\
+data\x02\x00\x00\x00\x34\x12"[..];
+
+        let mut reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().sample_rate, 8_000);
+        let samples: Vec<i16> = reader.samples().map(|sample| sample.unwrap()).collect();
+        assert_eq!(samples, vec![0x1234]);
+    }
+
+    #[test]
+    fn test_wav_falls_back_to_symphonia_when_hound_rejects_codec() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/fallback-adpcm-ima.wav"
+        ));
+
+        let hound_error = match hound::WavReader::open(path) {
+            Ok(_) => panic!("the fixture must exercise the fallback rather than Hound"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                hound_error,
+                hound::Error::Unsupported | hound::Error::FormatError(_)
+            ),
+            "expected a Hound format rejection, got {hound_error:?}"
+        );
+
+        let (y, sr, tags) = load_with_tags(path, 8_000, true, 0.0, 0.0, true).unwrap();
+        assert_eq!(sr, 8_000);
+        assert_eq!(tags, None, "WAV fallback must preserve WAV tag semantics");
+        assert!(!y.is_empty());
+        assert!(y.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn test_wav_fallback_reports_both_decoder_errors() {
+        let dir = std::env::temp_dir().join("sonara_wav_fallback_error_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not-a-wave.wav");
+        std::fs::write(&path, b"not a WAVE stream").unwrap();
+
+        let error = load(&path, 8_000, true, 0.0, 0.0).unwrap_err();
+        match error {
+            SonaraError::Decode(message) => {
+                assert!(
+                    message.contains("WAV decode failed with Hound"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("Symphonia 0.6 fallback failed"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected combined WAV decode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wav_fallback_preserves_io_error_for_missing_file() {
+        let path = std::env::temp_dir()
+            .join("sonara_wav_fallback_missing_test")
+            .join("definitely-missing.wav");
+
+        let error = load(&path, 8_000, true, 0.0, 0.0).unwrap_err();
+        match error {
+            SonaraError::AudioFile(message) => {
+                assert!(
+                    message.contains("WAV decode failed with Hound"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("Symphonia 0.6 fallback failed"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected combined WAV I/O error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_load_with_tags_flac() {
         let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1196,6 +1498,204 @@ mod tests {
         // year comes from TYER=2024 (the semantic split).
         assert_eq!(t.original_year, Some(1969));
         assert_eq!(t.track_no, Some(3));
+    }
+
+    #[test]
+    fn test_load_with_tags_prefers_newer_id3v2_over_trailing_id3v1() {
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.mp3"
+        ));
+        let mut bytes = std::fs::read(fixture).unwrap();
+
+        fn set_id3v1_field(tag: &mut [u8; 128], start: usize, len: usize, value: &[u8]) {
+            assert!(value.len() <= len);
+            tag[start..start + value.len()].copy_from_slice(value);
+        }
+
+        let mut id3v1 = [0_u8; 128];
+        id3v1[..3].copy_from_slice(b"TAG");
+        set_id3v1_field(&mut id3v1, 3, 30, b"Legacy Title");
+        set_id3v1_field(&mut id3v1, 33, 30, b"Legacy Artist");
+        set_id3v1_field(&mut id3v1, 63, 30, b"Legacy Album");
+        set_id3v1_field(&mut id3v1, 93, 4, b"1999");
+        bytes.extend_from_slice(&id3v1);
+
+        let dir = std::env::temp_dir().join("sonara_metadata_revision_precedence_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conflicting-id3.mp3");
+        std::fs::write(&path, bytes).unwrap();
+
+        let (_y, _sr, tags) = load_with_tags(&path, 22_050, true, 0.0, 0.0, true).unwrap();
+        let tags = tags.expect("tags requested");
+        assert_eq!(tags.title.as_deref(), Some("Test Title"));
+        assert_eq!(tags.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(tags.album.as_deref(), Some("Test Album"));
+        assert_eq!(tags.year, Some(2024));
+    }
+
+    // Fixtures for decode-recovery tests (both fully synthetic):
+    // - corrupt.mp3: 3 s 440 Hz tone (64 kbps mono CBR, no Xing header) with
+    //   600 bytes zeroed at the 40% offset — several mid-stream frames
+    //   damaged (recoverable; sync resumes after the hole).
+    // - allbad.mp3: 40 hand-built MPEG1 Layer III frames whose side info
+    //   claims part2_3_length=4095 bits with main_data_begin=0 — every
+    //   packet raises a DecodeError ("huffman decode overrun"), so nothing
+    //   decodes and the guardrail must surface the first decode error.
+
+    #[test]
+    fn test_load_recovers_from_damaged_packets() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/corrupt.mp3"
+        ));
+        let (y, sr) = load(path, 22050, true, 0.0, 0.0).unwrap();
+        assert_eq!(sr, 22050);
+        // 3 s tone minus the corrupted hole (~0.1 s) and decoder priming;
+        // recovery must yield the overwhelming majority of the audio.
+        let secs = y.len() as f64 / sr as f64;
+        assert!(
+            (2.5..=3.2).contains(&secs),
+            "expected ~3s recovered, got {secs:.2}s"
+        );
+        assert!(y.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_load_all_packets_damaged_still_errors() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/allbad.mp3"
+        ));
+        let res = load(path, 22050, true, 0.0, 0.0);
+        match res {
+            Err(SonaraError::Decode(msg)) => {
+                assert!(msg.contains("allbad.mp3"), "path missing in: {msg}");
+                assert!(msg.contains("stage=decode"), "stage missing in: {msg}");
+            }
+            other => panic!("all-packets-damaged file must fail with Decode: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_load_fake_mp3_still_errors() {
+        let dir = std::env::temp_dir().join("sonara_fake_mp3_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not_audio.mp3");
+        std::fs::write(&path, "this is not an mp3 file\n".repeat(200)).unwrap();
+        let res = load(&path, 22050, true, 0.0, 0.0);
+        assert!(
+            matches!(
+                res,
+                Err(SonaraError::UnsupportedFormat(_)) | Err(SonaraError::Decode(_))
+            ),
+            "fake mp3 must still fail: {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_load_mp3_skips_malformed_id3_text_frame() {
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.mp3"
+        ));
+        let mut bytes = std::fs::read(fixture).unwrap();
+
+        // The synthetic fixture starts with an ID3v2.3 TIT2 frame. Encoding
+        // values 0..=3 are defined. Symphonia 0.6 skips the malformed TIT2
+        // value while preserving the remaining valid ID3 fields.
+        assert_eq!(&bytes[..14], b"ID3\x03\0\0\0\0\x01,TIT2");
+        bytes[20] = 4;
+
+        let dir = std::env::temp_dir().join("sonara_malformed_id3_mp3_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("malformed-text-frame.mp3");
+        std::fs::write(&path, bytes).unwrap();
+
+        let (y, sr, tags) = load_with_tags(&path, 22050, true, 0.0, 0.0, true).unwrap();
+        assert_eq!(sr, 22050);
+        assert!(!y.is_empty());
+        assert!(y.iter().all(|s| s.is_finite()));
+        let tags = tags.expect("tags requested");
+        assert_eq!(tags.title, None);
+        assert_eq!(tags.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(tags.album.as_deref(), Some("Test Album"));
+        assert_eq!(tags.genre.as_deref(), Some("Electronic"));
+        assert_eq!(tags.year, Some(2024));
+        assert_eq!(tags.original_year, Some(1969));
+        assert_eq!(tags.track_no, Some(3));
+    }
+
+    #[test]
+    fn test_load_mp3_retries_after_false_adts_probe() {
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.mp3"
+        ));
+        let source = std::fs::read(fixture).unwrap();
+
+        // Strip the fixture's 310-byte ID3 tag and prepend the minimum ADTS
+        // header that selects reserved sample-rate index 13. Generic probing
+        // commits to ADTS and errors; the following bytes are valid synthetic
+        // MP3 frames.
+        let mut bytes = vec![0xff, 0xf1, 0x7b, 0x7e, 0x2e, 0x58, 0xe2];
+        bytes.extend_from_slice(&source[310..]);
+
+        let dir = std::env::temp_dir().join("sonara_false_adts_mp3_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("false-adts-marker.mp3");
+        std::fs::write(&path, bytes).unwrap();
+
+        let (y, sr) = load(&path, 22050, true, 0.0, 0.0).unwrap();
+        assert_eq!(sr, 22050);
+        assert!(!y.is_empty());
+        assert!(y.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_probe_without_metadata_skips_trailing_id3v1() {
+        use symphonia::core::formats::probe::Hint;
+        use symphonia::core::io::MediaSourceStream;
+
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.mp3"
+        ));
+        let mut bytes = std::fs::read(fixture).unwrap();
+        let mut id3v1 = [0_u8; 128];
+        let trailing_title = b"Trailing Title";
+        id3v1[..3].copy_from_slice(b"TAG");
+        id3v1[3..3 + trailing_title.len()].copy_from_slice(trailing_title);
+        bytes.extend_from_slice(&id3v1);
+        let path = std::env::temp_dir().join("sonara_no_metadata_trailing_id3v1.mp3");
+        std::fs::write(&path, bytes).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("mp3");
+
+        let mut format = probe_symphonia_without_metadata(&hint, mss).unwrap();
+        let mut metadata = format.metadata();
+        let mut tag_values = Vec::new();
+        while let Some(revision) = metadata.current() {
+            tag_values.extend(
+                revision
+                    .media
+                    .tags
+                    .iter()
+                    .map(|tag| tag.raw.value.to_string()),
+            );
+            if metadata.pop().is_none() {
+                break;
+            }
+        }
+        assert!(
+            !tag_values.iter().any(|value| value == "Trailing Title"),
+            "the no-metadata probe must not read a trailing ID3v1 revision"
+        );
+        drop(format);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1237,25 +1737,29 @@ mod tests {
         assert!(!is_original_date_key("TXXX:comment"));
     }
 
-    /// Build a `Tag` with a raw key + no std_key (the TXXX/unknown-key path).
+    /// Build a `Tag` with a raw key and no standard tag.
     fn raw_tag(key: &str, val: &str) -> symphonia::core::meta::Tag {
-        use symphonia::core::meta::{Tag, Value};
-        Tag::new(None, key, Value::from(val))
-    }
-
-    /// Build a `Tag` carrying a `StandardTagKey`.
-    fn std_tag(k: symphonia::core::meta::StandardTagKey, val: &str) -> symphonia::core::meta::Tag {
-        use symphonia::core::meta::{Tag, Value};
-        Tag::new(Some(k), "", Value::from(val))
+        symphonia::core::meta::Tag::new_from_parts(key, val, None)
     }
 
     #[test]
     fn test_merge_tags_year_original_year_split() {
-        use symphonia::core::meta::StandardTagKey;
-        // Date is the (reissue) file year; OriginalDate is the original year.
+        use std::sync::Arc;
+        use symphonia::core::meta::{StandardTag, Tag};
+        // ReleaseDate is the (reissue) file year; OriginalReleaseDate is the original year.
         let tags = vec![
-            std_tag(StandardTagKey::Date, "2024"),
-            std_tag(StandardTagKey::OriginalDate, "1969-08-15"),
+            Tag::new_from_parts(
+                "",
+                "2024",
+                Some(StandardTag::ReleaseDate(Arc::new("2024".to_string()))),
+            ),
+            Tag::new_from_parts(
+                "",
+                "1969-08-15",
+                Some(StandardTag::OriginalReleaseDate(Arc::new(
+                    "1969-08-15".to_string(),
+                ))),
+            ),
         ];
         let mut t = TrackTags::default();
         merge_tags(&mut t, &tags);
@@ -1275,9 +1779,14 @@ mod tests {
 
     #[test]
     fn test_merge_tags_no_original_year_is_none() {
-        use symphonia::core::meta::StandardTagKey;
+        use std::sync::Arc;
+        use symphonia::core::meta::{StandardTag, Tag};
         // A file with only a plain Date tag → original_year stays None.
-        let tags = vec![std_tag(StandardTagKey::Date, "2024")];
+        let tags = vec![Tag::new_from_parts(
+            "",
+            "2024",
+            Some(StandardTag::ReleaseDate(Arc::new("2024".to_string()))),
+        )];
         let mut t = TrackTags::default();
         merge_tags(&mut t, &tags);
         assert_eq!(t.year, Some(2024));
@@ -1286,10 +1795,17 @@ mod tests {
 
     #[test]
     fn test_merge_tags_original_year_first_wins() {
-        use symphonia::core::meta::StandardTagKey;
+        use std::sync::Arc;
+        use symphonia::core::meta::{StandardTag, Tag};
         // First parseable original-date value wins over later ones.
         let tags = vec![
-            std_tag(StandardTagKey::OriginalDate, "1969"),
+            Tag::new_from_parts(
+                "",
+                "1969",
+                Some(StandardTag::OriginalReleaseDate(Arc::new(
+                    "1969".to_string(),
+                ))),
+            ),
             raw_tag("ORIGINALYEAR", "1987"),
         ];
         let mut t = TrackTags::default();
@@ -1303,9 +1819,7 @@ mod tests {
         let sr = 44100u32;
         let freq = 440.0;
         let n = sr as usize; // 1 second
-        let y = Array1::from_shape_fn(n, |i| {
-            (2.0 * PI * freq * i as Float / sr as Float).sin()
-        });
+        let y = Array1::from_shape_fn(n, |i| (2.0 * PI * freq * i as Float / sr as Float).sin());
         let decimated = resample(y.view(), sr, sr / 2).unwrap();
         // Check RMS is preserved (energy should be similar)
         let rms_orig = (y.mapv(|v| v * v).sum() / y.len() as Float).sqrt();
