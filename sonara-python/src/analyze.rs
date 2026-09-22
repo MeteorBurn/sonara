@@ -77,6 +77,12 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     d.set_item("spectral_centroid_mean", r.spectral_centroid_mean)?;
     d.set_item("zero_crossing_rate", r.zero_crossing_rate)?;
     d.set_item("onset_density", r.onset_density)?;
+    if let Some(ref v) = r.onset_band_edges_hz {
+        d.set_item("onset_band_edges_hz", v.clone())?;
+    }
+    if let Some(ref v) = r.onset_strength_bands {
+        d.set_item("onset_strength_bands", v.clone())?;
+    }
 
     // Spectral (playlist/full modes)
     if let Some(v) = r.spectral_bandwidth_mean {
@@ -855,6 +861,18 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         spectral_centroid_mean: core_field!(cached, "spectral_centroid_mean", f32, "a float", 0.0),
         zero_crossing_rate: core_field!(cached, "zero_crossing_rate", f32, "a float", 0.0),
         onset_density: core_field!(cached, "onset_density", f32, "a float", 0.0),
+        onset_band_edges_hz: opt_field!(
+            cached,
+            "onset_band_edges_hz",
+            Vec<f32>,
+            "a list of floats"
+        ),
+        onset_strength_bands: opt_field!(
+            cached,
+            "onset_strength_bands",
+            Vec<Vec<f32>>,
+            "a list of lists of floats"
+        ),
         spectral_bandwidth_mean: opt_field!(cached, "spectral_bandwidth_mean", f32, "a float"),
         spectral_rolloff_mean: opt_field!(cached, "spectral_rolloff_mean", f32, "a float"),
         spectral_flatness_mean: opt_field!(cached, "spectral_flatness_mean", f32, "a float"),

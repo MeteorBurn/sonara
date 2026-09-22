@@ -159,6 +159,7 @@ fn _sonara(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- Onset / Beat ---
     m.add_function(wrap_pyfunction!(onset::py_onset_detect, m)?)?;
     m.add_function(wrap_pyfunction!(onset::py_onset_strength, m)?)?;
+    m.add_function(wrap_pyfunction!(onset::py_onset_strength_bands, m)?)?;
     m.add_function(wrap_pyfunction!(onset::py_onset_strength_method, m)?)?;
     m.add_function(wrap_pyfunction!(beat::py_beat_track, m)?)?;
     m.add_function(wrap_pyfunction!(beat::py_tempo_curve, m)?)?;

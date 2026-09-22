@@ -286,6 +286,7 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     ),
     feature("tempo_curve", true, false, true, S, &["beats"]),
     feature("time_signature", true, false, true, C, &[]),
+    feature("onset_bands", false, true, false, C, &[]),
     feature("beatgrid", false, true, false, C, &[]),
     feature("structure", true, true, false, C, &[]),
     feature("embedding", true, true, false, E, EMBEDDING_EVIDENCE),
@@ -897,6 +898,14 @@ pub struct TrackAnalysis {
     pub spectral_centroid_mean: Float,
     pub zero_crossing_rate: Float,
     pub onset_density: Float,
+
+    // --- onset bands ---
+    /// Frequency boundaries in Hz for `onset_strength_bands`. Opt-in via
+    /// `features=["onset_bands"]`; `None` in every default mode.
+    pub onset_band_edges_hz: Option<Vec<Float>>,
+    /// Raw mean positive log-mel flux per frequency band. Each inner vector is
+    /// frame-aligned through `provenance.hop_length` and `sample_rate`.
+    pub onset_strength_bands: Option<Vec<Vec<Float>>>,
 
     // -- Extended (extended or full) --
     pub spectral_bandwidth_mean: Option<Float>,
@@ -1993,6 +2002,29 @@ fn analyze_signal_inner(
         oenv_padded[pad_left + t] = onset_env[t];
     }
 
+    let onset_bands = if config.wants("onset_bands") {
+        Some(crate::onset::onset_strength_bands_from_log_mel(
+            s_db.view(),
+            sr,
+            hop_length,
+            n_fft,
+            None,
+        )?)
+    } else {
+        None
+    };
+    let onset_band_edges_hz = onset_bands
+        .as_ref()
+        .map(|bands| bands.band_edges_hz.clone());
+    let onset_strength_bands = onset_bands.as_ref().map(|bands| {
+        bands
+            .envelopes
+            .rows()
+            .into_iter()
+            .map(|row| row.to_vec())
+            .collect()
+    });
+
     // ================================================================
     // BEAT TRACKING + ONSET DETECTION
     // ================================================================
@@ -2660,6 +2692,8 @@ fn analyze_signal_inner(
         spectral_centroid_mean: centroid_mean,
         zero_crossing_rate: zcr,
         onset_density,
+        onset_band_edges_hz,
+        onset_strength_bands,
         spectral_bandwidth_mean,
         spectral_rolloff_mean,
         spectral_flatness_mean,
@@ -3514,6 +3548,10 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.time_signature = fresh.time_signature.clone();
             out.time_signature_confidence = fresh.time_signature_confidence;
         }
+        "onset_bands" => {
+            out.onset_band_edges_hz = fresh.onset_band_edges_hz.clone();
+            out.onset_strength_bands = fresh.onset_strength_bands.clone();
+        }
         "beatgrid" => {
             out.grid_offset_sec = fresh.grid_offset_sec;
             out.downbeats = fresh.downbeats.clone();
@@ -3945,6 +3983,7 @@ mod tests {
             "acousticness",
             "tempo_curve",
             "time_signature",
+            "onset_bands",
             "beatgrid",
             "structure",
             "embedding",
@@ -4020,6 +4059,7 @@ mod tests {
         assert_eq!(class_of("chroma"), DependencyClass::FrameCurves);
         assert_eq!(class_of("silence"), DependencyClass::FrameCurves);
         assert_eq!(class_of("structure"), DependencyClass::FrameCurves);
+        assert_eq!(class_of("onset_bands"), DependencyClass::FrameCurves);
         assert_eq!(class_of("key"), DependencyClass::Scalars);
         assert_eq!(class_of("energy"), DependencyClass::Scalars);
         assert_eq!(class_of("vocalness"), DependencyClass::Scalars);
@@ -4034,6 +4074,7 @@ mod tests {
         assert!(dep_of("key").needs_extended);
         assert!(!dep_of("bpm").needs_extended);
         assert!(dep_of("beatgrid").opt_in_only && !dep_of("beatgrid").needs_extended);
+        assert!(dep_of("onset_bands").opt_in_only && !dep_of("onset_bands").needs_extended);
         assert!(!dep_of("energy").opt_in_only);
         assert!(dep_of("tempo_curve").full_only);
         assert!(!dep_of("key").full_only);
@@ -4140,6 +4181,37 @@ mod tests {
         assert_eq!(
             result.provenance.requested_features.as_deref(),
             Some(&["energy".to_string(), "key".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn onset_bands_are_absent_by_default_and_aligned_when_requested() {
+        let y = sine(440.0, 22050, 2.0);
+        for config in [compact(), playlist(), full()] {
+            let result = analyze_signal(y.view(), 22050, &config).unwrap();
+            assert!(result.onset_band_edges_hz.is_none());
+            assert!(result.onset_strength_bands.is_none());
+        }
+
+        let config = AnalysisConfig {
+            features: Some(["onset_bands".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        let edges = result.onset_band_edges_hz.unwrap();
+        let envelopes = result.onset_strength_bands.unwrap();
+        assert_eq!(edges, vec![0.0, 200.0, 800.0, 3200.0, 8000.0, 11025.0]);
+        assert_eq!(envelopes.len(), edges.len() - 1);
+        assert!(envelopes
+            .iter()
+            .all(|band| band.len() == envelopes[0].len()));
+        assert!(envelopes
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite() && *value >= 0.0));
+        assert_eq!(
+            result.provenance.requested_features.as_deref(),
+            Some(&["onset_bands".to_string()][..])
         );
     }
 

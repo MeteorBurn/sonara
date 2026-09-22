@@ -252,7 +252,48 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+
+### Multiband onset strength (opt-in)
+
+Use `onset_bands` when a single broadband onset envelope is not enough and
+low-, mid-, and high-frequency attacks must remain separate. The fused analyzer
+reuses its existing log-mel spectrogram, so requesting this feature does not run
+a second STFT:
+
+```python
+import numpy as np
+
+signal = np.asarray(y, dtype=np.float32)
+r = sonara.analyze_signal(signal, sr=22050, features=["onset_bands"])
+
+r["onset_strength_bands"]  # float32 array: (n_bands, n_frames)
+r["onset_band_edges_hz"]   # boundaries, length n_bands + 1
+```
+
+The default boundaries start from `0, 200, 800, 3200, 8000, Nyquist` Hz.
+At low sample rates, split points at or above Nyquist and split points that
+would leave an adjacent band without one of the 128 mel-filter centers are
+omitted. The returned boundaries therefore describe the rows exactly.
+
+For standalone use, `onset_strength_bands` returns the envelopes and their
+effective boundaries:
+
+```python
+import numpy as np
+
+signal = np.asarray(y, dtype=np.float32)
+bands, edges = sonara.onset_strength_bands(
+    signal,
+    sr=22050,
+    hop_length=512,
+    band_edges_hz=[0.0, 500.0, 4000.0, 11025.0],  # optional
+)
+```
+
+Custom boundaries must contain at least two finite, strictly increasing values
+within `0..=Nyquist`, and every resulting interval must contain at least one mel
+center; invalid definitions raise `ValueError`.
 
 ### Structure & energy (opt-in)
 
@@ -822,7 +863,7 @@ sonara provides 100+ audio analysis functions:
 
 **Tonal Analysis:** `hpcp`, `chords_from_beats`, `chords_from_frames`, `chord_descriptors`, `dissonance`, `dissonance_from_peaks`
 
-**Rhythm:** `beat_track`, `onset_detect`, `onset_strength`, `onset_strength_multi`, `tempo`, `tempo_curve`, `tempo_variability`, `tempogram`, `fourier_tempogram`, `metrogram`, `detect_time_signature`, `plp`
+**Rhythm:** `beat_track`, `onset_detect`, `onset_strength`, `onset_strength_bands`, `onset_strength_multi`, `tempo`, `tempo_curve`, `tempo_variability`, `tempogram`, `fourier_tempogram`, `metrogram`, `detect_time_signature`, `plp`
 
 **Pitch:** `yin`, `pyin`, `piptrack`, `estimate_tuning`, `pitch_tuning`, `salience`, `interp_harmonics`, `f0_harmonics`
 

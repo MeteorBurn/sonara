@@ -27,7 +27,7 @@ def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None,
     """Analyze an audio file and return a `TrackAnalysis` (dict subclass with `.print()`).
 
     ``features`` selects features explicitly (overriding ``mode``) and is the
-    only way to enable the opt-in features: ``beatgrid``, ``structure``,
+    only way to enable the opt-in features: ``beatgrid``, ``onset_bands``, ``structure``,
     ``embedding``, ``aggression``, ``fingerprint``, ``loudness``, ``silence``,
     ``key_candidates``, ``vocalness``. See the README for the full list.
 

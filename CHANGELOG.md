@@ -2,6 +2,15 @@
 
 All notable changes to sonara are documented in this file.
 
+## [Unreleased]
+
+- Add opt-in multiband onset-strength envelopes through the Rust API,
+  `features=["onset_bands"]`, and Python `onset_strength_bands`. The fused
+  analyzer reuses its existing log-mel spectrogram, default modes are unchanged,
+  and low-sample-rate defaults omit splits that would create empty mel bands.
+  This is an additive API/result-field change, so `ANALYSIS_SCHEMA_VERSION`
+  remains `6` under the per-feature freshness policy.
+
 ## [0.3.6-meteorburn.1] - 2026-09-16
 
 - Merge upstream 0.3.6 while preserving the fork's history, BPM workbooks and exporter.

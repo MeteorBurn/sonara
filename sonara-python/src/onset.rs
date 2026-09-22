@@ -1,4 +1,4 @@
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -33,6 +33,20 @@ pub fn py_onset_strength<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "onset_strength_bands", signature = (y, *, sr=22050, hop_length=512, band_edges_hz=None))]
+pub fn py_onset_strength_bands<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<'py, f32>,
+    sr: u32,
+    hop_length: usize,
+    band_edges_hz: Option<Vec<f32>>,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, Vec<f32>)> {
+    let result = rs::onset_strength_bands(y.as_array(), sr, hop_length, band_edges_hz.as_deref())
+        .into_pyresult()?;
+    Ok((result.envelopes.into_pyarray(py), result.band_edges_hz))
+}
+
+#[pyfunction]
 #[pyo3(name = "onset_strength_method", signature = (y, *, sr=22050, hop_length=512, method="spectral_flux"))]
 pub fn py_onset_strength_method<'py>(
     py: Python<'py>,
@@ -54,6 +68,7 @@ pub fn py_onset_strength_method<'py>(
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_onset_detect, m)?)?;
     m.add_function(wrap_pyfunction!(py_onset_strength, m)?)?;
+    m.add_function(wrap_pyfunction!(py_onset_strength_bands, m)?)?;
     m.add_function(wrap_pyfunction!(py_onset_strength_method, m)?)?;
     Ok(())
 }

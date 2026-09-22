@@ -3,7 +3,7 @@
 //! Onset detection via spectral flux, energy, phase, and complex-domain methods.
 //! Includes onset_detect, onset_strength, onset_strength_multi, and onset_backtrack.
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use num_complex::Complex;
 
 use crate::core::spectrum;
@@ -11,6 +11,49 @@ use crate::error::{Result, SonaraError};
 use crate::feature::spectral as feat;
 use crate::types::*;
 use crate::util::utils;
+
+const DEFAULT_ONSET_BAND_SPLITS_HZ: [Float; 4] = [200.0, 800.0, 3200.0, 8000.0];
+const DEFAULT_ONSET_BAND_N_MELS: usize = 128;
+
+/// Frequency-banded onset envelopes and their Hz boundaries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnsetBands {
+    /// Strictly increasing band boundaries in Hz. Row `i` covers
+    /// `[band_edges_hz[i], band_edges_hz[i + 1])`, with the final upper edge
+    /// inclusive.
+    pub band_edges_hz: Vec<Float>,
+    /// One non-negative spectral-flux envelope per frequency band.
+    pub envelopes: Array2<Float>,
+}
+
+/// Default onset-band boundaries for a sample rate.
+///
+/// The fixed splits preserve comparable acoustic regions across sample rates;
+/// splits at or above Nyquist are omitted and Nyquist closes the final band.
+pub fn default_onset_band_edges(sr: u32) -> Vec<Float> {
+    let nyquist = sr as Float / 2.0;
+    let mel_points = crate::core::convert::mel_frequencies(
+        DEFAULT_ONSET_BAND_N_MELS + 2,
+        0.0,
+        nyquist,
+        false,
+    );
+    let mel_centers = mel_points.slice(ndarray::s![1..DEFAULT_ONSET_BAND_N_MELS + 1]);
+    let mut edges = Vec::with_capacity(DEFAULT_ONSET_BAND_SPLITS_HZ.len() + 2);
+    edges.push(0.0);
+    for edge in DEFAULT_ONSET_BAND_SPLITS_HZ {
+        let lower = *edges.last().unwrap_or(&0.0);
+        let has_lower_center = mel_centers
+            .iter()
+            .any(|&frequency| frequency >= lower && frequency < edge);
+        let has_upper_center = mel_centers.iter().any(|&frequency| frequency >= edge);
+        if edge < nyquist && has_lower_center && has_upper_center {
+            edges.push(edge);
+        }
+    }
+    edges.push(nyquist);
+    edges
+}
 
 /// Detect onset events from an audio signal.
 ///
@@ -106,7 +149,7 @@ pub fn onset_strength_multi(
         sr_f,
         n_fft,
         hop_length,
-        128,
+        DEFAULT_ONSET_BAND_N_MELS,
         0.0,
         sr_f / 2.0,
         2.0,
@@ -161,6 +204,139 @@ pub fn onset_strength_multi(
     }
 
     Ok(padded)
+}
+
+/// Compute onset-strength envelopes for contiguous frequency bands.
+///
+/// `band_edges_hz=None` uses [`default_onset_band_edges`]. Custom edges must be
+/// finite, strictly increasing, within `[0, sr / 2]`, and each band must contain
+/// at least one mel-filter center. Values are raw mean positive log-mel flux;
+/// bands are not independently normalized.
+pub fn onset_strength_bands(
+    y: ArrayView1<Float>,
+    sr: u32,
+    hop_length: usize,
+    band_edges_hz: Option<&[Float]>,
+) -> Result<OnsetBands> {
+    if sr == 0 {
+        return Err(SonaraError::InvalidParameter {
+            param: "sr",
+            reason: "must be > 0".into(),
+        });
+    }
+    if hop_length == 0 {
+        return Err(SonaraError::InvalidParameter {
+            param: "hop_length",
+            reason: "must be > 0".into(),
+        });
+    }
+
+    let n_fft = 2048;
+    let sr_f = sr as Float;
+    let mel = feat::melspectrogram(
+        Some(y),
+        None,
+        sr_f,
+        n_fft,
+        hop_length,
+        128,
+        0.0,
+        sr_f / 2.0,
+        2.0,
+    )?;
+    let s_db = spectrum::power_to_db(mel.view(), 1.0, 1e-10, Some(80.0));
+    onset_strength_bands_from_log_mel(s_db.view(), sr, hop_length, n_fft, band_edges_hz)
+}
+
+pub(crate) fn onset_strength_bands_from_log_mel(
+    s_db: ArrayView2<Float>,
+    sr: u32,
+    hop_length: usize,
+    n_fft: usize,
+    band_edges_hz: Option<&[Float]>,
+) -> Result<OnsetBands> {
+    let edges = band_edges_hz
+        .map(<[Float]>::to_vec)
+        .unwrap_or_else(|| default_onset_band_edges(sr));
+    let nyquist = sr as Float / 2.0;
+    if edges.len() < 2
+        || edges.iter().any(|edge| !edge.is_finite())
+        || edges[0] < 0.0
+        || edges[edges.len() - 1] > nyquist
+        || edges.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(SonaraError::InvalidParameter {
+            param: "band_edges_hz",
+            reason: format!(
+                "must contain at least two finite, strictly increasing values within 0..={nyquist}"
+            ),
+        });
+    }
+    if hop_length == 0 {
+        return Err(SonaraError::InvalidParameter {
+            param: "hop_length",
+            reason: "must be > 0".into(),
+        });
+    }
+
+    let n_mels = s_db.nrows();
+    let mel_points = crate::core::convert::mel_frequencies(n_mels + 2, 0.0, nyquist, false);
+    let mel_centers = mel_points.slice(ndarray::s![1..n_mels + 1]);
+    let mut mel_ranges = Vec::with_capacity(edges.len() - 1);
+    for (band, pair) in edges.windows(2).enumerate() {
+        let start = mel_centers
+            .iter()
+            .position(|&frequency| frequency >= pair[0])
+            .unwrap_or(n_mels);
+        let end = if band + 2 == edges.len() {
+            mel_centers
+                .iter()
+                .position(|&frequency| frequency > pair[1])
+                .unwrap_or(n_mels)
+        } else {
+            mel_centers
+                .iter()
+                .position(|&frequency| frequency >= pair[1])
+                .unwrap_or(n_mels)
+        };
+        if start >= end {
+            return Err(SonaraError::InvalidParameter {
+                param: "band_edges_hz",
+                reason: format!(
+                    "band {}..{} Hz contains no mel-filter centers",
+                    pair[0], pair[1]
+                ),
+            });
+        }
+        mel_ranges.push((start, end));
+    }
+
+    let lag = 1;
+    let n_frames = s_db.ncols();
+    if n_frames <= lag {
+        return Ok(OnsetBands {
+            band_edges_hz: edges,
+            envelopes: Array2::zeros((mel_ranges.len(), n_frames)),
+        });
+    }
+
+    let out_frames = n_frames - lag;
+    let pad_left = lag + n_fft / (2 * hop_length);
+    let mut envelopes = Array2::<Float>::zeros((mel_ranges.len(), out_frames + pad_left));
+    for (band, &(start, end)) in mel_ranges.iter().enumerate() {
+        let width = (end - start) as Float;
+        for t in 0..out_frames {
+            let flux = (start..end)
+                .map(|m| (s_db[(m, t + lag)] - s_db[(m, t)]).max(0.0))
+                .sum::<Float>();
+            envelopes[(band, pad_left + t)] = flux / width;
+        }
+    }
+
+    Ok(OnsetBands {
+        band_edges_hz: edges,
+        envelopes,
+    })
 }
 
 // ============================================================
@@ -405,6 +581,22 @@ mod tests {
         y
     }
 
+    fn tone_burst(
+        y: &mut Array1<Float>,
+        sr: u32,
+        start_sec: Float,
+        duration_sec: Float,
+        frequency: Float,
+    ) {
+        let start = (start_sec * sr as Float) as usize;
+        let length = (duration_sec * sr as Float) as usize;
+        for i in 0..length.min(y.len().saturating_sub(start)) {
+            let phase = 2.0 * PI * frequency * i as Float / sr as Float;
+            let window = (PI * i as Float / length as Float).sin().powi(2);
+            y[start + i] += phase.sin() * window;
+        }
+    }
+
     #[test]
     fn test_onset_strength_shape() {
         let y = sine(440.0, 22050, 1.0);
@@ -446,6 +638,94 @@ mod tests {
         let env = onset_strength_multi(y.view(), 22050, 512, 1, None).unwrap();
         assert_eq!(env.nrows(), 1);
         assert!(env.ncols() > 0);
+    }
+
+    #[test]
+    fn onset_strength_bands_separates_low_and_high_tone_bursts() {
+        let sr = 22050;
+        let mut y = Array1::<Float>::zeros(sr as usize * 2);
+        tone_burst(&mut y, sr, 0.25, 0.12, 120.0);
+        tone_burst(&mut y, sr, 1.25, 0.12, 5000.0);
+
+        let result = onset_strength_bands(y.view(), sr, 512, None).unwrap();
+
+        assert_eq!(
+            result.band_edges_hz,
+            vec![0.0, 200.0, 800.0, 3200.0, 8000.0, 11025.0]
+        );
+        assert_eq!(result.envelopes.nrows(), result.band_edges_hz.len() - 1);
+        let low_peak = result
+            .envelopes
+            .row(0)
+            .iter()
+            .copied()
+            .fold(0.0, Float::max);
+        let high_peak = result
+            .envelopes
+            .row(3)
+            .iter()
+            .copied()
+            .fold(0.0, Float::max);
+        assert!(
+            low_peak
+                > result
+                    .envelopes
+                    .row(3)
+                    .slice(ndarray::s![..35])
+                    .iter()
+                    .copied()
+                    .fold(0.0, Float::max)
+        );
+        assert!(
+            high_peak
+                > result
+                    .envelopes
+                    .row(0)
+                    .slice(ndarray::s![35..])
+                    .iter()
+                    .copied()
+                    .fold(0.0, Float::max)
+        );
+        assert!(result
+            .envelopes
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0));
+    }
+
+    #[test]
+    fn default_onset_band_edges_never_create_empty_mel_ranges() {
+        for sr in [401, 1601, 6401, 16001] {
+            let y = Array1::<Float>::zeros(sr as usize);
+            let result = onset_strength_bands(y.view(), sr, 128, None)
+                .unwrap_or_else(|error| panic!("sr={sr} should be valid: {error}"));
+
+            assert_eq!(result.envelopes.nrows(), result.band_edges_hz.len() - 1);
+            assert!(result
+                .envelopes
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0));
+        }
+    }
+
+    #[test]
+    fn onset_strength_bands_rejects_invalid_or_empty_mel_ranges() {
+        let y = sine(440.0, 22050, 1.0);
+
+        for edges in [
+            vec![0.0],
+            vec![0.0, 800.0, 200.0],
+            vec![0.0, Float::NAN, 1000.0],
+            vec![0.0, 12000.0],
+            vec![0.0, 1.0, 11025.0],
+        ] {
+            assert!(matches!(
+                onset_strength_bands(y.view(), 22050, 512, Some(&edges)),
+                Err(SonaraError::InvalidParameter {
+                    param: "band_edges_hz",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

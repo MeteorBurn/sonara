@@ -157,6 +157,7 @@ def rms(*, y: Optional[AudioArray] = None, S: Optional[SpectrogramArray] = None,
 
 def onset_detect(*, y: Optional[AudioArray] = None, onset_envelope: Optional[NDArray[np.float64]] = None, sr: int = 22050, hop_length: int = 512, backtrack: bool = False, delta: float = 0.07, wait: int = 0) -> List[int]: ...
 def onset_strength(y: AudioArray, *, sr: int = 22050, hop_length: int = 512) -> NDArray[np.float64]: ...
+def onset_strength_bands(y: NDArray[np.float32], *, sr: int = 22050, hop_length: int = 512, band_edges_hz: Optional[List[float]] = None) -> Tuple[NDArray[np.float32], List[float]]: ...
 def beat_track(*, y: Optional[AudioArray] = None, onset_envelope: Optional[NDArray[np.float64]] = None, sr: int = 22050, hop_length: int = 512, start_bpm: float = 120.0, tightness: float = 100.0, trim: bool = True, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None) -> Tuple[float, List[int]]: ...
 
 # ============================================================
@@ -169,7 +170,7 @@ def mel(*, sr: float = 22050.0, n_fft: int = 2048, n_mels: int = 128, fmin: floa
 # Fused Analysis (sonara-specific, high-performance)
 # ============================================================
 
-AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[str], List[Tuple[float, float]]]]
+AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[List[float]], List[str], List[Tuple[float, float]]]]
 
 # Result dicts include string fields such as "key" ("A minor"), "key_camelot"
 # (Camelot wheel code, e.g. "8A"), "time_signature", and "predominant_chord".
@@ -263,6 +264,12 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   grid_offset_sec: float        — time (sec) of the first beat (grid anchor)
 #   downbeats:       List[int]    — frame indices of bar-starting beats
 #   grid_stability:  float        — 0..1, how rigidly beats fit a constant grid
+
+# --- multiband onset strength ---
+# Opt-in via features=["onset_bands"]. When requested, the analyze_* result dict
+# additionally contains:
+#   onset_band_edges_hz: List[float]        — inclusive lower/upper band edges
+#   onset_strength_bands: List[List[float]] — shape (n_bands, n_frames)
 
 # --- structure ---
 # Opt-in structural segmentation & energy curve. Requested via
