@@ -111,6 +111,19 @@ which names each feature's dependency class and the record fields a decode-free
 recompute reads (`augment_analysis` / `can_augment` consume the same map, so a
 missing feature can often be filled in without re-decoding the audio).
 
+`rhythmic_regularity` is additive and therefore ships without a schema bump,
+but it carries a shape consumers must handle explicitly: it **abstains**. When
+a track has no measurable rhythmic evidence (silence, ambient, drumless), the
+result carries `rhythmic_regularity_confidence` while `rhythmic_regularity`,
+`rhythmic_regularity_label` and `rhythmic_regularity_candidates` are all
+`None` together (the Python result includes all four keys when requested).
+A stored `None` therefore means "measured, could not
+tell", not "not yet computed" — key freshness on the presence of the
+*confidence*, not of the score. The confidence is evidence quality, never a
+class probability, and the two candidate scores are complementary DSP
+measurements (`r` and `1 - r`), not model posteriors. The feature is
+`FrameCurves`-class, so `augment_analysis` always needs the audio again.
+
 Similarity weighting profiles version independently of the vector layout:
 `SIMILARITY_VERSION` (unchanged at 2) still identifies the stored vector and
 the default metric, while each named profile (e.g. `timbre`) carries its own
@@ -119,6 +132,36 @@ query time and never change stored vectors, so a profile bump forces no
 re-keying. This shape was communicated to sonagram on 2026-08-17 (sonagram
 inbox, `2026-08-17-from-sonara-augment-api-shape-genre-nogo-and-a-question.md`);
 this section records the standing policy.
+
+### Backfilling onset bands and regularity in 0.3.7
+
+These additions do not invalidate existing 0.3.6 schema-v6 results. Consumers
+can preserve the old analysis and fill only the missing feature groups, but
+must re-read the audio: both groups are `FrameCurves` dependencies. In 0.3.7,
+even a record containing onset bands cannot be augmented with regularity
+decode-free. `can_augment == false` describes that limitation, not a prohibition
+on augmentation with an audio path.
+
+- For a complete cached Sonara result, request both groups together through
+  `augment_analysis` with the original audio path. The result is a copy with
+  the requested groups merged in; unrelated fields are preserved.
+- For a custom database mapping, either reconstruct the full Sonara input
+  contract or call targeted `analyze_file` and persist only the new groups.
+  Do not pass an arbitrary database row as a cached Sonara result, or replace
+  a rich stored analysis with the narrower targeted result.
+- Use the original effective sample rate and BPM-range configuration. Persist
+  the new timeline's sample rate and hop length, checking compatibility before
+  merging it under existing shared metadata. Band frame `k` has time
+  `k * hop_length / sample_rate`; `energy_curve` uses its own hop in seconds.
+- Store `onset_strength_bands` and `onset_band_edges_hz` together. Store all four
+  regularity fields, allowing a null score, label and candidates. A non-null
+  confidence (including zero) marks a completed measurement, not a pending job.
+- Database migrations, merging, checkpoints and error handling belong to the
+  consumer. Sonara never updates the database itself. Benchmark storage and
+  throughput on representative files before scheduling a whole-library run.
+
+Python call examples are in the README's
+[0.3.7 backfill guide](../README.md#adding-the-037-rhythm-features-to-an-existing-library).
 
 ## Notification obligations
 
