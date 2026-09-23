@@ -2,6 +2,8 @@
 
 **High-performance audio analysis library for Python, written in Rust.**
 
+[Документация на русском: API, модули, алгоритмы и DSP](docs/ru/README.md)
+
 Feature extraction, batch analysis, and built-in perceptual features (energy, danceability, valence, key, chords) for playlist generation and music discovery.
 
 > *sonara* — from Latin *sonare*, "to sound, to resonate"
