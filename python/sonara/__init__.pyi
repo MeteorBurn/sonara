@@ -271,6 +271,28 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   onset_band_edges_hz: List[float]        — inclusive lower/upper band edges
 #   onset_strength_bands: List[List[float]] — shape (n_bands, n_frames)
 
+# --- rhythmic regularity ---
+# Opt-in via features=["rhythmic_regularity"]. A deterministic DSP measure of
+# how straight the percussive pattern sits inside the metric grid — not a model
+# and not a genre classifier. When requested, all four keys are present:
+#   rhythmic_regularity:            Optional[float] — 0..1; 1.0 a straight
+#                                          #  house/techno pattern on the pulse
+#                                          #  lattice, 0.0 a syncopated /
+#                                          #  polyrhythmic / breakbeat one
+#   rhythmic_regularity_label:      Optional[str]   — "regular" | "irregular"
+#   rhythmic_regularity_confidence: float  — 0..1 quality of the rhythmic
+#                                          #  evidence, NOT a class probability
+#   rhythmic_regularity_candidates: Optional[List[Tuple[str, float]]]
+#                                          # both labels with their DSP scores,
+#                                          # ranked; complementary, not model
+#                                          # probabilities
+# ABSTENTION: on silence, ambient or drumless audio the measure reports its
+# confidence and sets the score, label and candidates to None. `None` therefore
+# means "measured, could not tell" — branch on the score being None, not on the
+# key being absent.
+# Requesting it internally computes the onset bands and beat grid it reads, but
+# does not emit them unless they are separately requested.
+
 # --- structure ---
 # Opt-in structural segmentation & energy curve. Requested via
 # `features=["structure"]`; absent from every default mode (compact/playlist/

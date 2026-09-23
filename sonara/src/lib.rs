@@ -19,6 +19,7 @@ pub mod loudness_ext;
 mod mood;
 pub mod onset;
 pub mod perceptual;
+pub mod rhythmic_regularity;
 pub mod segment;
 pub mod sequence;
 pub mod similarity;

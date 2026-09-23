@@ -220,6 +220,23 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     if let Some(v) = r.grid_stability {
         d.set_item("grid_stability", v)?;
     }
+
+    // --- rhythmic regularity --- (opt-in: features=["rhythmic_regularity"])
+    // Keyed on the confidence, which is present whenever the measure ran: on
+    // abstention the other three are emitted as None rather than dropped, so a
+    // caller can tell "not regular" from "could not tell" (mirrors aggression).
+    if let Some(confidence) = r.rhythmic_regularity_confidence {
+        d.set_item("rhythmic_regularity", r.rhythmic_regularity)?;
+        d.set_item(
+            "rhythmic_regularity_label",
+            r.rhythmic_regularity_label.as_deref(),
+        )?;
+        d.set_item("rhythmic_regularity_confidence", confidence)?;
+        d.set_item(
+            "rhythmic_regularity_candidates",
+            r.rhythmic_regularity_candidates.clone(),
+        )?;
+    }
     // --- structure --- (opt-in: features=["structure"])
     if let Some(ref v) = r.energy_curve {
         d.set_item("energy_curve", v.clone())?;
@@ -919,6 +936,25 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         grid_offset_sec: opt_field!(cached, "grid_offset_sec", f32, "a float"),
         downbeats: opt_field!(cached, "downbeats", Vec<usize>, "a list of ints"),
         grid_stability: opt_field!(cached, "grid_stability", f32, "a float"),
+        rhythmic_regularity: opt_field!(cached, "rhythmic_regularity", f32, "a float"),
+        rhythmic_regularity_label: opt_field!(
+            cached,
+            "rhythmic_regularity_label",
+            String,
+            "a string"
+        ),
+        rhythmic_regularity_confidence: opt_field!(
+            cached,
+            "rhythmic_regularity_confidence",
+            f32,
+            "a float"
+        ),
+        rhythmic_regularity_candidates: opt_field!(
+            cached,
+            "rhythmic_regularity_candidates",
+            Vec<(String, f32)>,
+            "a list of (label, score) pairs"
+        ),
         energy_curve: opt_field!(cached, "energy_curve", Vec<f32>, "a list of floats"),
         energy_curve_hop_sec: opt_field!(cached, "energy_curve_hop_sec", f32, "a float"),
         segments,

@@ -27,6 +27,7 @@ STANDARD_TESTS = (
     "test_vocalness_model",
     "test_augment",
     "test_onset_bands",
+    "test_rhythmic_regularity",
 )
 FIDELITY_TESTS = {
     "test_similarity_frozen",

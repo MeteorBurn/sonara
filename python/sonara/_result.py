@@ -84,6 +84,25 @@ class TrackAnalysis(dict):
         if "grid_stability" in self:
             beatgrid.append(("Grid stability", f"{self['grid_stability']:.3f}"))
 
+        # --- rhythmic regularity ---
+        regularity: list[tuple[str, str]] = []
+        if "rhythmic_regularity" in self:
+            value = self["rhythmic_regularity"]
+            if value is None:
+                # Abstained: the confidence below says how little evidence there was.
+                regularity.append(("Regularity", "— (insufficient rhythmic evidence)"))
+            else:
+                label = self.get("rhythmic_regularity_label") or ""
+                regularity.append(("Regularity", f"{value:.3f}  {label}".rstrip()))
+        if self.get("rhythmic_regularity_confidence") is not None:
+            regularity.append(("Evidence", f"{self['rhythmic_regularity_confidence']:.3f}"))
+        if self.get("rhythmic_regularity_candidates"):
+            ranked = " · ".join(
+                f"{name} {float(score):.2f}"
+                for name, score in self["rhythmic_regularity_candidates"]
+            )
+            regularity.append(("Candidates", ranked))
+
         tonal: list[tuple[str, str]] = []
         if "key" in self:
             key_str = str(self["key"])
@@ -209,6 +228,8 @@ class TrackAnalysis(dict):
             ("Spectral", spectral),
             # --- beat grid ---
             ("Beat grid", beatgrid),
+            # --- rhythmic regularity ---
+            ("Rhythmic regularity", regularity),
             # --- structure ---
             ("Structure", structure),
             # --- tags ---

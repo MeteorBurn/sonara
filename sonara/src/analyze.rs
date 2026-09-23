@@ -288,6 +288,7 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("time_signature", true, false, true, C, &[]),
     feature("onset_bands", false, true, false, C, &[]),
     feature("beatgrid", false, true, false, C, &[]),
+    feature("rhythmic_regularity", false, true, false, C, &[]),
     feature("structure", true, true, false, C, &[]),
     feature("embedding", true, true, false, E, EMBEDDING_EVIDENCE),
     #[cfg(feature = "aggression")]
@@ -458,6 +459,7 @@ pub struct AnalysisConfig {
     ///
     /// **Opt-in only (never enabled by any mode — see `FEATURE_REGISTRY`):**
     /// `beatgrid` (grid offset, downbeats, grid stability),
+    /// `rhythmic_regularity` (how straight the pattern sits in the metric grid),
     /// `structure` (energy curve, segments, intro/outro, energy level),
     /// `embedding` (similarity vector; auto-pulls the features it is built from),
     /// `aggression` (bundled model score; available with the `aggression` Cargo feature),
@@ -566,6 +568,13 @@ impl AnalysisConfig {
         if self.needs_aggression() && AGGRESSION_DEPS.contains(&name) {
             return true;
         }
+        // Rhythmic regularity reads the banded onset envelopes and the bar
+        // phase, so it computes them even when the caller did not ask for
+        // those groups — they are then scrubbed from the result (mirrors how
+        // an embedding model computes its inputs without leaking them).
+        if self.needs_rhythmic_regularity() && RHYTHMIC_REGULARITY_DEPS.contains(&name) {
+            return true;
+        }
         if self.features.is_some() {
             self.emits(name)
         } else {
@@ -617,6 +626,12 @@ impl AnalysisConfig {
     #[cfg(feature = "aggression")]
     fn needs_aggression(&self) -> bool {
         self.feature_requested("aggression")
+    }
+
+    /// True when `rhythmic_regularity` was explicitly requested (it is
+    /// opt-in-only, so no mode can turn it on).
+    fn needs_rhythmic_regularity(&self) -> bool {
+        self.feature_requested("rhythmic_regularity")
     }
 
     /// True if the similarity embedding must be computed: either it was
@@ -687,6 +702,13 @@ const EMBEDDING_COMPONENTS: &[&str] = &[
 
 #[cfg(feature = "aggression")]
 const AGGRESSION_DEPS: &[&str] = &["energy", "danceability", "dissonance"];
+
+/// Feature groups `rhythmic_regularity` is measured from: the per-band onset
+/// envelopes supply the accents, the beat grid supplies the bar phase and the
+/// grid-quality term of its confidence. Requesting it implies computing these
+/// (see `AnalysisConfig::wants`), but not emitting them — they are scrubbed
+/// afterwards unless separately requested.
+const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 
 /// Version of the `TrackAnalysis` result schema. Bump whenever the meaning,
 /// unit, or time base of an existing field changes (e.g. a different
@@ -996,6 +1018,30 @@ pub struct TrackAnalysis {
     pub downbeats: Option<Vec<usize>>,
     /// How rigidly beats fit a constant-tempo grid, in `[0, 1]`.
     pub grid_stability: Option<Float>,
+
+    // --- rhythmic regularity ---
+    // Opt-in only (request via features=["rhythmic_regularity"]). All four
+    // fields populate together, and are `None` both in the default modes and
+    // when the track carries no metric grid to measure against (see
+    // [`crate::rhythmic_regularity::analyze`]).
+    /// How straight the percussive pattern sits inside the metric grid, in
+    /// `[0, 1]`: `1.0` a regular house/techno-style pattern on the pulse
+    /// lattice, `0.0` a syncopated, polyrhythmic or breakbeat-driven one. This
+    /// is a deterministic DSP measure, not a model output, and it is
+    /// independent of `grid_stability` (which describes drift *of* the grid,
+    /// not the distribution of events *within* it). See
+    /// [`crate::rhythmic_regularity`].
+    pub rhythmic_regularity: Option<Float>,
+    /// `"regular"` when `rhythmic_regularity >= 0.5`, else `"irregular"`.
+    pub rhythmic_regularity_label: Option<String>,
+    /// Quality of the rhythmic evidence behind the score, in `[0, 1]` — how
+    /// far the tempo, beat grid, observed bar count and accent contrast
+    /// support the measurement. **Not** a class probability.
+    pub rhythmic_regularity_confidence: Option<Float>,
+    /// Both labels with their DSP scores, ranked by score descending. The
+    /// scores are complementary measurements (`r` and `1 - r`), not model
+    /// probabilities.
+    pub rhythmic_regularity_candidates: Option<Vec<(String, Float)>>,
     // --- structure ---
     /// Time-resolved perceptual energy (0-1), one value per window.
     pub energy_curve: Option<Vec<Float>>,
@@ -2271,21 +2317,24 @@ fn analyze_signal_inner(
     // requested via features=["beatgrid"].
     // ================================================================
 
-    let (grid_offset_sec, downbeats, grid_stability) = if config.wants("beatgrid") {
-        // Prefer the detected meter (full mode) when it was also requested;
-        // otherwise assume 4/4.
-        let beats_per_bar = time_signature
+    // Prefer the detected meter (full mode) when it was also requested;
+    // otherwise assume 4/4. Lazy so the default modes pay nothing.
+    let detected_beats_per_bar = || {
+        time_signature
             .as_deref()
             .and_then(|ts| ts.split('/').next())
             .and_then(|n| n.trim().parse::<usize>().ok())
             .filter(|&n| n >= 2)
-            .unwrap_or(crate::beatgrid::DEFAULT_BEATS_PER_BAR);
+            .unwrap_or(crate::beatgrid::DEFAULT_BEATS_PER_BAR)
+    };
+
+    let (grid_offset_sec, downbeats, grid_stability) = if config.wants("beatgrid") {
         let grid = crate::beatgrid::analyze_grid(
             &beats,
             oenv_padded.view(),
             sr,
             hop_length,
-            beats_per_bar,
+            detected_beats_per_bar(),
         );
         (
             Some(grid.grid_offset_sec),
@@ -2295,6 +2344,51 @@ fn analyze_signal_inner(
     } else {
         (None, None, None)
     };
+
+    // ================================================================
+    // RHYTHMIC REGULARITY: where accents land inside the metric grid
+    // (opt-in via features). Reuses the banded onset envelopes, tracked
+    // beats and bar phase computed above; the added work is one
+    // bar-length DFT per band.
+    // ================================================================
+
+    let rhythmic_regularity_analysis = if config.wants("rhythmic_regularity") {
+        onset_bands.as_ref().map(|bands| {
+            crate::rhythmic_regularity::analyze(
+                bands.envelopes.view(),
+                &beats,
+                downbeats.as_deref().unwrap_or(&[]),
+                detected_beats_per_bar(),
+                bpm_confidence,
+                grid_stability.unwrap_or_else(|| crate::beatgrid::grid_stability(&beats)),
+                time_signature_confidence,
+            )
+        })
+    } else {
+        None
+    };
+    // The confidence is reported whenever the feature ran, including when the
+    // measure abstained — that is what lets a caller tell "not regular" from
+    // "could not tell".
+    let rhythmic_regularity = rhythmic_regularity_analysis
+        .as_ref()
+        .and_then(|measured| measured.regularity);
+    let rhythmic_regularity_label = rhythmic_regularity_analysis
+        .as_ref()
+        .and_then(|measured| measured.label)
+        .map(str::to_owned);
+    let rhythmic_regularity_confidence = rhythmic_regularity_analysis
+        .as_ref()
+        .map(|measured| measured.confidence);
+    let rhythmic_regularity_candidates = rhythmic_regularity_analysis
+        .as_ref()
+        .and_then(|measured| measured.candidates.as_ref())
+        .map(|candidates| {
+            candidates
+                .iter()
+                .map(|&(label, score)| (label.to_owned(), score))
+                .collect()
+        });
 
     // ================================================================
     // TONAL: chords from fused HPCP, dissonance from fused accumulator
@@ -2754,6 +2848,11 @@ fn analyze_signal_inner(
         grid_offset_sec,
         downbeats,
         grid_stability,
+        // --- rhythmic regularity ---
+        rhythmic_regularity,
+        rhythmic_regularity_label,
+        rhythmic_regularity_confidence,
+        rhythmic_regularity_candidates,
         // --- structure ---
         energy_curve: structure.as_ref().map(|s| s.energy_curve.clone()),
         energy_curve_hop_sec: structure.as_ref().map(|s| s.energy_curve_hop_sec),
@@ -2823,8 +2922,28 @@ fn analyze_signal_inner(
     } {
         suppress_internal_embedding_components(&mut result, config);
     }
+    if config.needs_rhythmic_regularity() {
+        suppress_internal_rhythm_components(&mut result, config);
+    }
 
     Ok(result)
+}
+
+/// Drop the rhythm groups `rhythmic_regularity` computed for its own use.
+///
+/// Requesting the measure forces `onset_bands` and `beatgrid` through
+/// `AnalysisConfig::wants`; only groups the caller actually asked for belong
+/// in the returned result.
+fn suppress_internal_rhythm_components(result: &mut TrackAnalysis, config: &AnalysisConfig) {
+    if !config.emits("onset_bands") {
+        result.onset_band_edges_hz = None;
+        result.onset_strength_bands = None;
+    }
+    if !config.emits("beatgrid") {
+        result.grid_offset_sec = None;
+        result.downbeats = None;
+        result.grid_stability = None;
+    }
 }
 
 fn suppress_internal_embedding_components(result: &mut TrackAnalysis, config: &AnalysisConfig) {
@@ -3557,6 +3676,12 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.downbeats = fresh.downbeats.clone();
             out.grid_stability = fresh.grid_stability;
         }
+        "rhythmic_regularity" => {
+            out.rhythmic_regularity = fresh.rhythmic_regularity;
+            out.rhythmic_regularity_label = fresh.rhythmic_regularity_label.clone();
+            out.rhythmic_regularity_confidence = fresh.rhythmic_regularity_confidence;
+            out.rhythmic_regularity_candidates = fresh.rhythmic_regularity_candidates.clone();
+        }
         "structure" => {
             out.energy_curve = fresh.energy_curve.clone();
             out.energy_curve_hop_sec = fresh.energy_curve_hop_sec;
@@ -3985,6 +4110,7 @@ mod tests {
             "time_signature",
             "onset_bands",
             "beatgrid",
+            "rhythmic_regularity",
             "structure",
             "embedding",
             "fingerprint",
@@ -4061,6 +4187,10 @@ mod tests {
         assert_eq!(class_of("silence"), DependencyClass::FrameCurves);
         assert_eq!(class_of("structure"), DependencyClass::FrameCurves);
         assert_eq!(class_of("onset_bands"), DependencyClass::FrameCurves);
+        assert_eq!(
+            class_of("rhythmic_regularity"),
+            DependencyClass::FrameCurves
+        );
         assert_eq!(class_of("key"), DependencyClass::Scalars);
         assert_eq!(class_of("energy"), DependencyClass::Scalars);
         assert_eq!(class_of("vocalness"), DependencyClass::Scalars);
@@ -4076,6 +4206,11 @@ mod tests {
         assert!(!dep_of("bpm").needs_extended);
         assert!(dep_of("beatgrid").opt_in_only && !dep_of("beatgrid").needs_extended);
         assert!(dep_of("onset_bands").opt_in_only && !dep_of("onset_bands").needs_extended);
+        assert!(
+            dep_of("rhythmic_regularity").opt_in_only
+                && !dep_of("rhythmic_regularity").needs_extended
+                && !dep_of("rhythmic_regularity").full_only
+        );
         assert!(!dep_of("energy").opt_in_only);
         assert!(dep_of("tempo_curve").full_only);
         assert!(!dep_of("key").full_only);
@@ -4213,6 +4348,154 @@ mod tests {
         assert_eq!(
             result.provenance.requested_features.as_deref(),
             Some(&["onset_bands".to_string()][..])
+        );
+    }
+
+    /// Four-on-the-floor kick with offbeat hats at a fixed tempo — a straight
+    /// pattern whose kick and hat land in different onset bands.
+    fn four_on_the_floor(sr: u32, bpm: Float, bars: usize) -> Array1<Float> {
+        let sr_f = sr as Float;
+        let beat_sec = 60.0 / bpm;
+        let total = ((bars * 4) as Float * beat_sec * sr_f) as usize + sr as usize / 4;
+        let mut y = Array1::<Float>::zeros(total);
+        let mut lcg = 0x2545_f491_u32;
+        for beat in 0..bars * 4 {
+            let onset = (beat as Float * beat_sec * sr_f) as usize;
+            for k in 0..(0.12 * sr_f) as usize {
+                if onset + k >= total {
+                    break;
+                }
+                let t = k as Float / sr_f;
+                y[onset + k] += (2.0 * PI * 55.0 * t).sin() * (-t / 0.045).exp();
+            }
+            let offbeat = onset + (0.5 * beat_sec * sr_f) as usize;
+            for k in 0..(0.03 * sr_f) as usize {
+                if offbeat + k >= total {
+                    break;
+                }
+                // Deterministic broadband burst: a fixed LCG, never `rand`.
+                lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let t = k as Float / sr_f;
+                let sample = (lcg >> 16) as Float / 32_768.0 - 1.0;
+                y[offbeat + k] += 0.25 * sample * (-t / 0.006).exp();
+            }
+        }
+        y
+    }
+
+    #[test]
+    fn rhythmic_regularity_is_absent_by_default_and_complete_when_requested() {
+        let y = four_on_the_floor(22050, 128.0, 16);
+        for config in [compact(), playlist(), full()] {
+            let result = analyze_signal(y.view(), 22050, &config).unwrap();
+            assert!(result.rhythmic_regularity.is_none());
+            assert!(result.rhythmic_regularity_label.is_none());
+            assert!(result.rhythmic_regularity_confidence.is_none());
+            assert!(result.rhythmic_regularity_candidates.is_none());
+        }
+
+        let config = AnalysisConfig {
+            features: Some(["rhythmic_regularity".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+
+        let score = result.rhythmic_regularity.expect("score");
+        let label = result.rhythmic_regularity_label.clone().expect("label");
+        let confidence = result.rhythmic_regularity_confidence.expect("confidence");
+        let candidates = result
+            .rhythmic_regularity_candidates
+            .clone()
+            .expect("candidates");
+        assert!((0.0..=1.0).contains(&score), "score {score} out of range");
+        assert!(
+            (0.0..=1.0).contains(&confidence),
+            "confidence {confidence} out of range"
+        );
+        assert_eq!(
+            label,
+            if score >= 0.5 { "regular" } else { "irregular" }
+        );
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].1 >= candidates[1].1, "candidates must rank");
+        assert_eq!(candidates[0].0, label);
+        assert_eq!(
+            label, "regular",
+            "a four-on-the-floor kick must read as regular, got {score}"
+        );
+
+        assert_eq!(
+            result.provenance.requested_features.as_deref(),
+            Some(&["rhythmic_regularity".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn rhythmic_regularity_abstains_on_drumless_audio_but_reports_confidence() {
+        // A pure tone has no percussive structure to distribute in a grid.
+        let y = sine(440.0, 22050, 20.0);
+        let config = AnalysisConfig {
+            features: Some(["rhythmic_regularity".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &config).unwrap();
+        assert!(
+            result.rhythmic_regularity.is_none(),
+            "a drumless tone must not be scored: {:?}",
+            result.rhythmic_regularity
+        );
+        assert!(result.rhythmic_regularity_label.is_none());
+        assert!(result.rhythmic_regularity_candidates.is_none());
+        let confidence = result
+            .rhythmic_regularity_confidence
+            .expect("confidence is reported even when the measure abstains");
+        assert!(
+            (0.0..=1.0).contains(&confidence),
+            "confidence {confidence} out of range"
+        );
+        assert!(
+            confidence < 0.5,
+            "abstention must come with low confidence, got {confidence}"
+        );
+    }
+
+    #[test]
+    fn rhythmic_regularity_does_not_leak_the_groups_it_reads() {
+        let y = four_on_the_floor(22050, 128.0, 16);
+        let alone = AnalysisConfig {
+            features: Some(["rhythmic_regularity".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        let result = analyze_signal(y.view(), 22050, &alone).unwrap();
+        assert!(result.rhythmic_regularity.is_some());
+        assert!(
+            result.onset_strength_bands.is_none() && result.onset_band_edges_hz.is_none(),
+            "onset bands are an internal input here, not a requested output"
+        );
+        assert!(
+            result.grid_stability.is_none()
+                && result.downbeats.is_none()
+                && result.grid_offset_sec.is_none(),
+            "the beat grid is an internal input here, not a requested output"
+        );
+
+        let co_requested = AnalysisConfig {
+            features: Some(
+                [
+                    "rhythmic_regularity".to_string(),
+                    "onset_bands".to_string(),
+                    "beatgrid".to_string(),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        let both = analyze_signal(y.view(), 22050, &co_requested).unwrap();
+        assert!(both.onset_strength_bands.is_some() && both.grid_stability.is_some());
+        assert_eq!(
+            both.rhythmic_regularity, result.rhythmic_regularity,
+            "emitting the inputs must not change the measurement"
         );
     }
 

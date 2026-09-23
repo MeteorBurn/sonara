@@ -103,6 +103,9 @@
     "beatgrid": {
       "blocked": "no mandatory labeled real-music beat-grid gate is available"
     },
+    "rhythmic_regularity": {
+      "blocked": "the labeled straight/broken-beat corpus is local-only and must be run explicitly"
+    },
     "similarity": {
       "command": ["{python}", "tests/python/test_similarity_frozen.py"]
     },
@@ -191,6 +194,13 @@
     {
       "paths": ["sonara/src/beatgrid.rs", "tests/python/test_beatgrid.py"],
       "domains": ["beatgrid"]
+    },
+    {
+      "paths": [
+        "sonara/src/rhythmic_regularity.rs",
+        "tests/python/test_rhythmic_regularity.py"
+      ],
+      "domains": ["rhythmic_regularity"]
     },
     {
       "paths": [
