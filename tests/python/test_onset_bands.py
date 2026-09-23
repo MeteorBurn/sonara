@@ -1,4 +1,5 @@
 import ast
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -95,3 +96,51 @@ def test_stub_declares_float32_onset_band_arrays() -> None:
     return_annotation = ast.unparse(return_annotation_node)
     assert input_annotation == "NDArray[np.float32]"
     assert return_annotation == "Tuple[NDArray[np.float32], List[float]]"
+
+
+passed = 0
+failed = 0
+errors = []
+
+
+def check(name, fn):
+    global passed, failed
+    try:
+        fn()
+        passed += 1
+        print(f"  PASS  {name}")
+    except Exception as e:  # noqa: BLE001
+        failed += 1
+        errors.append((name, str(e)))
+        print(f"  FAIL  {name}: {e}")
+
+
+TESTS = [
+    (
+        "standalone and fused analysis are frame aligned",
+        test_standalone_and_fused_analysis_are_frame_aligned,
+    ),
+    (
+        "onset bands are opt-in and round-trip through augment",
+        test_onset_bands_are_opt_in_and_round_trip_through_augment,
+    ),
+    (
+        "custom edges validate mel band coverage",
+        test_custom_edges_validate_mel_band_coverage,
+    ),
+    (
+        "stub declares float32 onset band arrays",
+        test_stub_declares_float32_onset_band_arrays,
+    ),
+]
+
+
+if __name__ == "__main__":
+    print("Multiband onset strength")
+    for name, fn in TESTS:
+        check(name, fn)
+    print(f"\n  RESULTS: {passed} PASSED, {failed} FAILED")
+    if errors:
+        for name, err in errors:
+            print(f"  - {name}: {err}")
+    sys.exit(1 if failed > 0 else 0)

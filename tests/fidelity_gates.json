@@ -72,6 +72,12 @@
       "base_sha256": "41c0ad5375f20a4699940fe18c7af75c2ff01d29e097e8d0bec996f87140ea8e",
       "head_sha256": "16c71c3433ccfa183363b7657e9db5fc01bae9726fdf9e850e5aade51b996a00",
       "reason": "neutralize a provenance comment without changing fixture data"
+    },
+    {
+      "path": "tests/python/test_onset_bands.py",
+      "base_sha256": "cd6df58aca17a1d0b56beb30a4a38cdf7aaf38d8ba9341e634ba0275d32993bb",
+      "head_sha256": "d1bb486a4718886f863883300be7f771e0793d448d4f68d031b59df211984dac",
+      "reason": "add the __main__ driver the canonical runner needs; the registered suite previously exited 0 without executing a single test, and no analysis behavior changes"
     }
   ],
   "domains": {
@@ -269,6 +275,7 @@
         "tests/python/test_api.py",
         "tests/python/test_batch_errors.py",
         "tests/python/test_loudness.py",
+        "tests/python/test_onset_bands.py",
         "tests/python/test_structure.py"
       ],
       "domains": ["cross_cutting"]
