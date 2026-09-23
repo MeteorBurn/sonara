@@ -54,7 +54,9 @@ results = sonara.analyze_batch(files, mode="playlist")
 
 This fork release provides a Windows x64 wheel. Requires Python 3.10+.
 
-The package is based on SONARA 0.3.6 with Symphonia 0.6.1, patched Hound 3.5.1, WAV fallback, and reduced metadata probing when tags are not requested. The release tag is `v0.3.6-meteorburn.1`; the package version is `0.3.6`. See [BUILD-METADATA.md](BUILD-METADATA.md) for build details.
+The package is based on SONARA 0.3.7 with Symphonia 0.6.1, patched Hound 3.5.1, WAV fallback, and reduced metadata probing when tags are not requested. 0.3.7 adds two opt-in rhythm features on top of 0.3.6: the [multiband onset timeline](#multiband-onset-strength-opt-in) (`onset_bands`) and [rhythmic regularity](#rhythmic-regularity-opt-in). Both are additive — `ANALYSIS_SCHEMA_VERSION` stays at `6` and every 0.3.6 field keeps its meaning.
+
+The source version is `0.3.7`; the most recent *published* wheel is `v0.3.6-meteorburn.1` (package version `0.3.6`), which the Quick Start above installs — [BUILD-METADATA.md](BUILD-METADATA.md) records that release and its verification. Until the 0.3.7 tag is cut, build it from source with `maturin build --release`.
 
 Installing `sonara` from PyPI retrieves the upstream package. Upstream also provides Linux and macOS wheels.
 
@@ -252,7 +254,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
 ### Multiband onset strength (opt-in)
 
@@ -267,9 +269,36 @@ import numpy as np
 signal = np.asarray(y, dtype=np.float32)
 r = sonara.analyze_signal(signal, sr=22050, features=["onset_bands"])
 
-r["onset_strength_bands"]  # float32 array: (n_bands, n_frames)
+r["onset_strength_bands"]  # list of n_bands lists, each n_frames long
 r["onset_band_edges_hz"]   # boundaries, length n_bands + 1
 ```
+
+The result is a **timeline**, not a summary: row `b` is the onset-strength
+envelope of the band between `onset_band_edges_hz[b]` and
+`onset_band_edges_hz[b + 1]`, and position `k` within a row is analysis frame
+`k`. Frames share the pipeline's time base, so they convert to seconds with the
+`provenance` fields every result carries:
+
+```python
+bands = r["onset_strength_bands"]        # plain lists, so this is JSON-round-trippable
+hop   = r["provenance"]["hop_length"]
+sr    = r["provenance"]["sample_rate"]   # effective Hz, after any resampling
+
+times = [k * hop / sr for k in range(len(bands[0]))]
+low   = bands[0]                         # kick/bass attacks over time
+```
+
+Note the type difference: in an `analyze_*` result the envelopes are plain
+Python lists (so the whole result still survives `json.dumps`), while the
+standalone `sonara.onset_strength_bands()` below returns a real
+`float32` numpy array of shape `(n_bands, n_frames)`.
+
+The band envelopes use the same frame-index time base as `onset_frames` and
+`beats`. The `energy_curve` has a separate, coarser time step given by
+`energy_curve_hop_sec`; do not align its samples with band frames by index.
+The band envelopes are also an input to further rhythm analysis; see
+[rhythmic regularity](#rhythmic-regularity-opt-in), which is measured from
+exactly these envelopes.
 
 The default boundaries start from `0, 200, 800, 3200, 8000, Nyquist` Hz.
 At low sample rates, split points at or above Nyquist and split points that
@@ -294,6 +323,151 @@ bands, edges = sonara.onset_strength_bands(
 Custom boundaries must contain at least two finite, strictly increasing values
 within `0..=Nyquist`, and every resulting interval must contain at least one mel
 center; invalid definitions raise `ValueError`.
+
+### Rhythmic regularity (opt-in)
+
+How *straight* the percussive pattern sits inside the metric grid: `1.0` is a
+regular pattern locked to the pulse lattice (house, techno), `0.0` a syncopated,
+polyrhythmic or breakbeat-driven one (garage, 2-step, breakbeat, drum & bass).
+It is **opt-in only** — no mode computes it — and it is a deterministic DSP
+measure: no model, no training data, no bundled artifact.
+
+```python
+r = sonara.analyze_file("track.mp3", features=["rhythmic_regularity"])
+
+r["rhythmic_regularity"]             # 0.0-1.0, or None when it abstained
+r["rhythmic_regularity_label"]       # "regular" | "irregular"  (>= 0.5 → regular)
+r["rhythmic_regularity_confidence"]  # 0.0-1.0 quality of the rhythmic evidence
+r["rhythmic_regularity_candidates"]  # [("regular", 0.83), ("irregular", 0.17)]
+```
+
+**It abstains rather than guess.** Silence, ambient and drumless passages carry
+no rhythmic evidence, and calling them "irregular" would be wrong. When no
+window clears the reliability gate the score, label and candidates are all
+`None` and only the confidence is reported — so `None` means *measured, could
+not tell*, never *not computed*:
+
+```python
+if r["rhythmic_regularity"] is None:
+    print(f"no rhythmic evidence (confidence {r['rhythmic_regularity_confidence']:.2f})")
+```
+
+**This is not `1 - grid_stability`.** `grid_stability` describes temporal drift
+*of* the beat grid; `rhythmic_regularity` takes the grid as given and describes
+the distribution of drum hits *within* it. A track can have a rigid grid and a
+heavily syncopated pattern on top of it.
+
+It also does **not** distinguish the irregular idioms from one another — garage,
+2-step, breakbeat and drum & bass are all simply `irregular`. It is a rhythm
+descriptor, not a genre classifier.
+
+**How it works.** Each inter-beat interval is split into 4 tatum cells by
+interpolating between the *tracked* beats (which is what makes the measure
+independent of tempo drift, and beat-relative rather than sample-rate
+dependent). Every [multiband onset](#multiband-onset-strength-opt-in) band
+samples its peak in each cell. Bars are then grouped into non-overlapping
+4-bar **windows**, each measured on its own, so a fill, a breakdown or a
+drumless intro cannot decide the track.
+
+Within a window the cells are folded modulo the bar, phase aligned to the
+detected downbeats, and averaged. Each band's profile is reduced to its
+contrast above its own floor — a constant pedestal is pure DC and describes no
+rhythm — and that contrast mass is the band's evidence weight, so a flat band
+(steady 16th hats, or no percussion) contributes nothing.
+
+A window is measured only if it passes a **reliability gate**: the profile's
+between-slot variance is decomposed into real structure and the noise of
+averaging finitely many bars, and the window counts only when structure
+explains more of it than noise does. That is what makes abstention principled
+rather than a tuned cutoff — a drumless passage has nothing above its own
+noise floor.
+
+Two bounded measures, pooled over all bands by evidence mass, are then
+combined with equal weight:
+
+- **metrical alignment** — the inner product of the profile with the
+  Longuet-Higgins & Lee (1984) metrical-weight hierarchy, read against a
+  meter-blind distribution (`0.0`) and an even beat lattice (`1.0`).
+  Phase-sensitive: it catches a kick displaced onto the weak sixteenths.
+- **sub-bar periodicity** — the share of the profile's AC energy on the DFT
+  bins of periods shorter than the bar. Phase-insensitive: it separates a
+  figure that recurs inside the bar from a chopped break that only closes over
+  the whole bar, and its complement is the energy of **pulses competing with
+  the metre** (three-against-four and friends).
+
+The track value is the evidence-weighted **median** over valid windows —
+robust, so a minority of deviant windows cannot move it.
+
+Two further measures are computed and **reported as diagnostics but excluded
+from the score** — `beat_concentration` (accent mass on the quarters versus
+between them) and `beat_coverage` (how many strong beats are struck). Both ask
+"is the kick on the quarters", and against manual labels neither answers this
+target: AUC 0.469 and 0.603 against 0.829 and 0.882 for the two measures above.
+The reasons are structural — the 93 ms window cannot resolve *which* sixteenth
+a low-band attack occupies, and broken-beat house keeps a kick near most
+quarters while displacing it *within* the beat, which is exactly the
+displacement those measures cannot see. Including them only added a
+near-constant offset that pushed the distribution off the boundary.
+
+`confidence` is the geometric mean of the evidence factors: `bpm_confidence`,
+`grid_stability`, `1 - 1/sqrt(n_valid_windows)`, the mean window reliability,
+and how consistently the same accent pattern recurred across windows — plus
+`time_signature_confidence` when that was also requested. Pattern stability
+feeds *confidence only*, never the score: a stable breakbeat is still a
+breakbeat, and no amount of grid rigidity makes a broken pattern straight. It
+is a measure of evidence quality, **not** a class probability.
+
+Requesting the feature internally computes the onset bands and beat grid it
+reads, but does not add them to the result unless you ask for them too:
+
+```python
+r = sonara.analyze_file(
+    "track.mp3", features=["rhythmic_regularity", "onset_bands", "beatgrid"]
+)
+```
+
+**What it is measured against.** The score is validated on synthetic patterns
+with a known metrical layout and on two real-music sets.
+
+*Manual labels* — 145 hand-labelled tracks (100 straight four-on-the-floor, 45
+broken-beat tech house at the same tempo, the hard case): ROC AUC **0.883**,
+balanced accuracy **0.836** at the `0.5` boundary (straight 76%, broken 91%).
+The boundary is the midpoint of the normalized scale, never fitted — its
+equal-error point on these labels is `0.480`, so the principled midpoint is
+already the right operating point.
+
+15 of those broken-beat tracks were supplied *after* the measure was final and
+share no track with the 30 used to choose its components. They scored 86.7%
+correct against 93.3% on the selection set (means 0.420 and 0.407), so the
+choice did not overfit. That holdout covers the irregular side only — the
+straight side has no fresh held-out set yet, and is where the error sits.
+
+*Genre folders* — an independent 148-track sample labelled only by library
+folder: AUC **0.715**, balanced accuracy 0.62. That set is weaker, and known to
+be contaminated: broken-beat tech house lives in the *House* folder, so folder
+genre is not a rhythm label. Where the two disagree the manual labels decide.
+
+Class separation is therefore sound, and the scale is calibrated to the point
+where the natural midpoint works. It has **not** been validated on a fresh
+held-out manual set.
+
+Three known limitations, all measured:
+
+- **It inherits beat phase from the beat tracker.** The two phase-sensitive
+  components (`concentration`, `alignment`) collapse if the tracker locks half
+  a beat off — on sparse material with a weak kick it can lock to the offbeat
+  hats. `bpm_confidence` is the signal for that; the score degrades rather than
+  flipping, because the other two components are phase-invariant.
+- **Sixteenth resolution is at the edge of what the representation supports.**
+  The 2048-sample STFT window is 93 ms against a 117 ms sixteenth at 128 BPM,
+  so accents leak into the neighbouring cell and `beat_concentration` pins at
+  zero on about 30% of real tracks. An eighth-note grid removes the leak but
+  measures less and scored worse end to end (AUC 0.737).
+- **It is a rhythm descriptor, not a genre detector.** A house track with a
+  broken-beat section, or a liquid DnB roller with a four-on-the-floor kick,
+  will read the way its *rhythm* reads. This is a feature, not a defect: on the
+  manual set it correctly called 93% of broken-beat tech house irregular even
+  though every one of those tracks is filed as house.
 
 ### Structure & energy (opt-in)
 
@@ -532,6 +706,76 @@ per-feature dependency map, one dict per feature with its dependency `class`
 `required_evidence` fields a decode-free recompute reads, and mode flags — so a
 cache layer can plan what is refreshable without audio before touching any
 record.
+
+### Adding the 0.3.7 rhythm features to an existing library
+
+**Keep your existing analysis.** Updating from 0.3.6 to 0.3.7 does not require
+recomputing existing fields just to obtain these additions. The analysis schema
+remains `6`. To get `onset_bands` and `rhythmic_regularity`, Sonara must read
+each original audio file again, but you can request only those features and
+keep the previously stored BPM, key, embeddings and other results.
+
+If you saved a complete Sonara result dict (including `provenance`), add both
+features in one call:
+
+```python
+import json
+import sonara
+
+with open("track.json", encoding="utf-8") as source:
+    cached = json.load(source)  # original analyze_* result, not a custom DB row
+
+updated = sonara.augment_analysis(
+    cached,
+    ["onset_bands", "rhythmic_regularity"],
+    audio_path="track.mp3",
+)
+# Save updated through your application's storage layer.
+# cached is unchanged; existing fields are preserved in updated.
+```
+
+If your database splits the result into renamed columns and a separate timeline,
+that database row is **not** a Sonara result dict. The simplest option is a
+targeted analysis, then saving only the new fields into your existing record:
+
+```python
+extra = sonara.analyze_file(
+    "track.mp3",
+    sr=22050,  # use the effective sample rate stored with your old timeline
+    features=["onset_bands", "rhythmic_regularity"],
+    # If the original analysis used a BPM range, pass the same bounds here:
+    # bpm_min=79.0, bpm_max=192.0,
+)
+
+timeline_additions = {
+    "onset_strength_bands": extra["onset_strength_bands"],
+    "onset_band_edges_hz": extra["onset_band_edges_hz"],
+}
+rhythm_additions = {
+    name: extra[name]
+    for name in (
+        "rhythmic_regularity",
+        "rhythmic_regularity_label",
+        "rhythmic_regularity_confidence",
+        "rhythmic_regularity_candidates",
+    )
+}
+```
+
+Merge these additions rather than replacing the old result with `extra`.
+Keep the new timeline's `extra["provenance"]["sample_rate"]` and `hop_length`;
+verify they match the existing timeline before sharing its time-base metadata.
+Sonara does not migrate or write your database automatically.
+
+In 0.3.7, `can_augment(cached, "onset_bands")` and
+`can_augment(cached, "rhythmic_regularity")` return `False`: this means
+**audio is required**, not that augmentation is unsupported. Even cached onset
+bands do not enable a decode-free regularity call through this API.
+
+For a resumable backfill, mark regularity as processed when its confidence has
+been stored, even if the score is `None` (insufficient evidence). Otherwise such
+tracks would be retried forever. Store both onset-band fields together; the
+envelopes can be large, so check storage growth on a small batch first.
 
 ### Duplicate detection (opt-in)
 
@@ -899,6 +1143,7 @@ sonara/src/
   tonal.rs        — HPCP, chord detection, dissonance (Sethares 1998)
   beat.rs         — Beat tracking (Ellis 2007 DP algorithm), tempo candidates, BPM range
   beatgrid.rs     — Beat grid: first-beat offset, downbeats, grid stability
+  rhythmic_regularity.rs — Metrical alignment + sub-bar periodicity of the accent profile
   onset.rs        — Onset detection (spectral flux + peak picking)
   decompose.rs    — HPSS, NMF
   effects.rs      — Time stretch, pitch shift, trim, split
