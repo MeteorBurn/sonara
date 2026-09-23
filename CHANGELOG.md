@@ -4,12 +4,85 @@ All notable changes to sonara are documented in this file.
 
 ## [Unreleased]
 
-- Add opt-in multiband onset-strength envelopes through the Rust API,
-  `features=["onset_bands"]`, and Python `onset_strength_bands`. The fused
-  analyzer reuses its existing log-mel spectrogram, default modes are unchanged,
-  and low-sample-rate defaults omit splits that would create empty mel bands.
-  This is an additive API/result-field change, so `ANALYSIS_SCHEMA_VERSION`
-  remains `6` under the per-feature freshness policy.
+## [0.3.7] - 2026-09-23
+
+Two opt-in rhythm features, both additive: `ANALYSIS_SCHEMA_VERSION` remains
+`6`, every 0.3.6 field keeps its meaning and range, and no default mode
+(`compact`/`playlist`/`full`) computes either one, so stored 0.3.6 results stay
+valid and existing callers are unaffected.
+
+### Added
+
+- **Multiband onset-strength timeline.** Opt-in through the Rust API,
+  `features=["onset_bands"]`, and Python `onset_strength_bands`. The result
+  carries `onset_strength_bands` (one onset-strength envelope per frequency
+  band, each frame-aligned to `provenance.hop_length` / `sample_rate`) and
+  `onset_band_edges_hz` describing the rows exactly. The fused analyzer reuses
+  its existing log-mel spectrogram, so no second STFT is run; low-sample-rate
+  defaults omit splits at or above Nyquist and splits that would leave an
+  adjacent band without a mel center. In an `analyze_*` result the envelopes are
+  plain lists (JSON-round-trippable); the standalone
+  `sonara.onset_strength_bands()` returns a `float32` numpy array of shape
+  `(n_bands, n_frames)`.
+- **Rhythmic regularity.** Opt-in `rhythmic_regularity`: a deterministic DSP
+  measure of how straight the percussive pattern sits *inside* the metric grid,
+  with `rhythmic_regularity_label`, `rhythmic_regularity_confidence` and
+  `rhythmic_regularity_candidates`. Beats are interpolated to a 16th tatum grid
+  and bars are grouped into 4-bar windows; each window's cyclic metrical profile
+  is gated on a variance-decomposition reliability test, and two normalized
+  measures — Longuet-Higgins & Lee metrical alignment and sub-bar periodicity
+  (whose complement is competing-pulse energy) — are combined with equal weight
+  and aggregated across windows by evidence-weighted median, so a fill or a
+  breakdown cannot decide a track. No model, no bundled artifact, no genre
+  classification, and distinct from `grid_stability` (which measures drift *of*
+  the grid, not the distribution of hits within it). Requesting it computes the
+  onset bands and beat grid it reads without emitting them unless they are
+  separately requested.
+- `beat_concentration` and `beat_coverage` are computed and reported as
+  diagnostics but **excluded from the score**: against manual labels the two
+  "is the kick on the quarters" measures separate the classes at or near chance
+  (AUC 0.469 and 0.603, against 0.829 and 0.882 for the two that are used),
+  because the 93 ms analysis window cannot resolve which sixteenth a low-band
+  attack occupies and because broken-beat house displaces the kick *within* the
+  beat.
+
+### Behavior
+
+- `rhythmic_regularity` **abstains** on silence, ambient and drumless audio: the
+  confidence is reported while the score, label and candidates are `None`
+  together. Consumers must read `None` as "measured, could not tell" rather than
+  "not computed", and key cache freshness on the presence of the *confidence* —
+  see `docs/consumer-contract.md`. The confidence is evidence quality, never a
+  class probability, and the two candidate scores are complementary DSP
+  measurements (`r` and `1 - r`), not model posteriors.
+
+### Validated on real music
+
+- Measured on 145 manually labelled tracks (100 straight four-on-the-floor, 45
+  broken-beat tech house at the same tempo — the hard case): ROC AUC 0.883,
+  balanced accuracy 0.836 at the unchanged `0.5` boundary (straight 76%, broken
+  91%). The equal-error threshold on those labels is 0.480, so the principled
+  midpoint is already the right operating point and was never fitted.
+- 15 of the broken-beat tracks were held out — supplied after the measure was
+  final, with no overlap against the 30 used to choose components — and scored
+  86.7% against 93.3% on the selection set, confirming the component choice did
+  not overfit. The straight side has no fresh held-out set yet, and is where the
+  remaining error sits.
+- On an independent 148-track sample labelled only by library folder: AUC 0.715.
+  Folder genre is not a rhythm label — broken-beat tech house is filed as house
+  — so the manual labels decide where the two disagree. Limitations are recorded
+  in the README.
+
+### Fixed
+
+- Feature-registry tripwire ordering under `--features aggression`: it placed
+  `aggression` at a hard-coded index before `embedding`, so
+  `test_feature_registry_validates_routes_and_canonicalizes` failed in every
+  aggression-enabled build while the default `cargo test -p sonara` never ran
+  it. The index is now derived from `embedding`'s position.
+- `tests/python/test_onset_bands.py` was registered in the canonical runner but
+  had no `__main__` driver, so it exited 0 without executing a single test. It
+  now runs, and is routed through the fidelity map.
 
 ## [0.3.6-meteorburn.1] - 2026-09-16
 
