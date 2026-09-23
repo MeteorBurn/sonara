@@ -1,84 +1,142 @@
-# Sonara Project Instructions
+# PROJECT KNOWLEDGE BASE
 
-These instructions apply to work inside `E:\Projects\Sonara`.
+**Generated:** 2026-09-23
+**Commit:** 0c2a4b3
+**Branch:** main
 
-## Current BPM Benchmarking Goal
+## OVERVIEW
 
-- We are improving Sonara BPM detection for cases where Sonara reports roughly half of the target BPM shown by Mixed In Key.
-- The benchmark source file is `benchmarks\bpm\label_x2\mik_bpm_and_sonara_bpm_x2.xlsx`.
-- In that workbook:
-  - `bpm_mik` and `bpm_mik_raw` are target BPM values.
-  - `bpm_sonara` is the previously recorded Sonara BPM from the `E:\Projects\dj-track-similarity` project database.
-  - `path` points to the audio file to re-analyze with Sonara.
-- Current fork changes compared with original `v0.1.7`:
-  - tempo candidate selection in the beat tracker reduces the half-BPM/x2 mismatch substantially;
-  - optional project BPM range (`bpm_min`, `bpm_max`) doubles or halves values outside the range.
-  - autocorrelation peak selection now uses fractional/parabolic lag refinement, which substantially reduces the 1-3 BPM quantization drift on HIGH/LOW near-miss rows.
-- Current fork package version is `0.3.6`; patched GitHub release tag: `v0.3.6-meteorburn.1`. See `BUILD-METADATA.md` for the Symphonia/Hound overlay.
-- On the first 1000 labeled rows, current optimized logic produced 998 successful analyses, 2 decode errors, 1 remaining x2-like result without BPM range, and 0 x2-like results after applying the 79-192 BPM range.
-- Next focus is the second BPM problem after the x2 fix:
-  - x2 octave errors are largely handled, but corrected BPM values can still miss Mixed In Key by roughly 1-3 BPM.
-  - A separate HIGH/LOW dataset was created at `benchmarks\bpm\label_low_high\mik_bpm_and_sonara_bpm_low_high.xlsx`.
-  - That dataset uses the same 9-column structure as the x2 workbook and contains only `HIGH` and `LOW` labels after excluding `X2`, `x0.5`, `OK`, and rows with empty BPM values.
-  - Current counts in that workbook: `HIGH` = 1501, `LOW` = 1307, total = 2808.
-  - Parabolic lag refinement addressed most small HIGH/LOW near-miss drift, but `LOW_inverse_ratio` remains unresolved.
-  - Offline policy simulation showed that static lower-window / guarded ratio rules are not production-safe: correct candidates often exist in ACF, but similar subharmonic peaks also appear in normal House/Techno control rows and cause regressions.
-  - The next likely investigation is beat-grid or DP regularity scoring across top tempo candidates, not another static ACF score-ratio rule.
-  - Before changing code for this second problem, benchmark and inspect candidate behavior on the HIGH/LOW workbook and ask the user for confirmation before edits.
+Sonara is a Rust music-information-retrieval library (librosa-style DSP plus a
+fused single-pass track analyzer) with PyO3/Maturin bindings (`import sonara`).
+This repo is the MeteorBurn fork (0.3.7) of `kkollsga/sonara`: BPM fixes, opt-in
+rhythm features, Symphonia pinned to `=0.6.1`, and a patched vendored Hound.
 
-## Current Mixed In Key State
+## STRUCTURE
 
-- The active project library source for full-track BPM coverage is `C:\db\abstracted.sqlite`, created by `E:\Projects\dj-track-similarity`, with 44,451 tracks.
-- Mixed In Key work was last normalized by exact path intersection with `C:\db\abstracted.sqlite`.
-- Current MIK collections intentionally kept:
-  - `Anal`: 15,298 current-library tracks that already have MIK BPM (`IsAnalyzed = 1` and `Tempo > 0`).
-  - `No BPM`: 29,153 current-library tracks that are present in MIK but do not yet have MIK BPM.
-- Other ordinary MIK playlists were removed. System root collections and folders were preserved.
-- Do not infer MIK BPM from file tags. Use `Song.Tempo` from `MIKStore.db` after MIK analysis.
-- After the user analyzes `No BPM` in Mixed In Key, export `Song.File`, `Song.FilePathHash`, and raw/UI BPM from `Song.Tempo`, then join back to `C:\db\abstracted.sqlite` by exact normalized path.
+```
+sonara/                    # core crate; all analysis logic; PyO3-free by contract
+  src/analyze.rs           # 6.2k lines: FEATURE_REGISTRY, modes, fused pass, augment
+  src/core/                # numeric substrate: decode/resample, stft, fft, cqt, pitch
+  tests/                   # only accuracy.rs + bpm_accuracy.rs; unit tests are inline
+  examples/                # eval runners: accuracy_eval, rhythmic_regularity_eval, export_bpm_tsv
+sonara-python/             # cdylib -> sonara._sonara; conversion and signatures only
+python/sonara/             # Python facade, hand-written __init__.pyi, models/*.json
+tests/                     # Python suite, reference_data, fixtures, fidelity_gates.json
+scripts/                   # CI contract/release gates; run_python_tests.py is the entry point
+workflow/skills/           # agent procedures (phased-plan, release, notify, ...)
+docs/consumer-contract.md  # downstream API/storage contract - authoritative
+dev-docs/bench/scripts/    # tracked research harnesses; rest of dev-docs/ is git-ignored
+benchmarks/bpm/            # two tracked MIK-labeled BPM workbooks; dir otherwise ignored
+vendor/hound-3.5.1/        # Hound + odd-length RIFF chunk padding fix via [patch.crates-io]
+```
 
-## Workflow Rules
+## WHERE TO LOOK
 
-- Do not edit code, tests, docs, or benchmark files without explicit user confirmation in the current conversation.
-- Before changing code, first benchmark and prove the behavior on real files from the workbook.
-- Work in small steps and report the intended next action before doing it.
-- Prefer read-only analysis unless the user explicitly asks for a file or code change.
-- Do not delete or rewrite existing uncommitted work unless explicitly asked.
-- Do not create one persistent artifact per 100-file batch. Consolidate benchmark results into one working file.
+| Task | Location | Notes |
+|------|----------|-------|
+| Add or rename an output feature | `sonara/src/analyze.rs` `FEATURE_REGISTRY` (:220) | then binding, `.pyi`, README, tests |
+| Tempo / BPM | `sonara/src/beat.rs` `estimate_tempo` (:186) | parabolic ACF refinement, `bpm_min`/`bpm_max` |
+| Rhythm timelines (0.3.7) | `onset.rs` (`onset_bands`), `rhythmic_regularity.rs` | opt-in, `FrameCurves` class |
+| Decode / resample | `sonara/src/core/audio.rs` | Hound first for WAV, Symphonia fallback |
+| Embedding / similarity | `sonara/src/similarity.rs` | 48-d, stored unweighted; profiles apply at query time |
+| Aggression | `aggression.rs`, `aggression_dsp.rs` | cargo feature `aggression`; model files embedded from `src/` |
+| Vocalness / genre models | `vocal_model.rs`, `genre.rs`, `python/sonara/models/` | JSON MLP; model id lands in provenance |
+| Python signature or dict shape | `sonara-python/src/analyze.rs` + `python/sonara/__init__.pyi` | synced by hand |
+| Stored-result rules | `docs/consumer-contract.md` | abstention, backfill, versioning |
+| Accuracy gate routing | `tests/fidelity_gates.json`, `scripts/run_fidelity_gate.py` | most domains `blocked` |
 
-## BPM Benchmark Procedure
+## CODE MAP
 
-- Future benchmark runs for this label should use the current optimized code only unless the user explicitly asks to compare against original `v0.1.7` again.
-- Continue with batches of 200 files from `benchmarks\bpm\label_x2\mik_bpm_and_sonara_bpm_x2.xlsx` now that release-mode analysis has proven fast enough.
-- For each batch:
-  - Run Sonara with the current optimized logic.
-  - Compare output against `bpm_mik_raw` and `bpm_mik`.
-  - Also evaluate the deterministic BPM range post-process for the project range under discussion, currently 79-192 BPM.
-- If the current x2 behavior remains clean, continue with the next batch.
-- If remaining errors are around 2-3 BPM after x2 correction, treat that as a potentially separate optimization problem.
-- During iterative work, keep at most one consolidated working report, preferably TSV or CSV.
-- Produce a user-facing `.xlsx` report only at the end, unless the user asks for an intermediate workbook.
-- Do not expand or modify the source workbook. Add analysis-only columns to the working/final report instead.
-- For BPM values in reports:
-  - `bpm_mik` is the UI-formatted target and should display with two decimals.
-  - `bpm_mik_raw` is the raw audit value from the MIK/database source.
-  - Keep analyzed Sonara values as both raw and UI forms, e.g. `bpm_sonara_run_raw` and `bpm_sonara_run`.
-  - If carrying original database Sonara values into a report, keep both raw and UI forms, e.g. `bpm_sonara_db_raw` and `bpm_sonara_db`.
-  - Primary error metrics should compare the UI-formatted Sonara run value against `bpm_mik`; raw metrics may be retained for audit.
+rust-analyzer references (declaration excluded, tests included) at `0c2a4b3`.
 
-## Data Handling
+| Symbol | Type | Location | Refs | Role |
+|--------|------|----------|-----:|------|
+| `analyze_signal` | fn | `sonara/src/analyze.rs:1227` | 137 | fused analysis of samples; file and batch paths end here |
+| `AnalysisConfig` | struct | `analyze.rs:438` | 130 | mode, opt-in features, BPM range, models |
+| `SIMILARITY_VERSION` | const `2` | `similarity.rs:74` | 48 | vector layout id; genre/vocal/aggression models must match |
+| `AnalysisMode` | enum | `analyze.rs:90` | 46 | compact (default) / playlist / full |
+| `TrackAnalysis` | struct | `analyze.rs:870` | 28 | result record; a dict in Python |
+| `stft` | fn | `core/spectrum.rs:42` | 28 | widest DSP fan-out |
+| `augment_analysis` | fn | `analyze.rs:3790` | 17 | merge missing features into a cached record |
+| `resample` | fn | `core/audio.rs:662` | 16 | |
+| `analyze_file` | fn | `analyze.rs:1164` | 14 | decode + `analyze_signal` |
+| `load` | fn | `core/audio.rs:76` | 10 | decode entry |
+| `ANALYSIS_SCHEMA_VERSION` | const `6` | `analyze.rs:745` | 8 | whole-record schema |
+| `analyze_batch` | fn | `analyze.rs:1342` | 4 | rayon across files |
 
-- Treat audio paths and workbook rows as real user data.
-- Do not commit large generated benchmark outputs or copied datasets unless the user explicitly asks.
-- `benchmarks\` is gitignored for new local benchmark artifacts. Existing tracked benchmark workbooks may still appear in git history; do not remove them unless the user explicitly asks.
-- Keep label-x2 benchmark scripts and outputs under `benchmarks\bpm\label_x2\` unless the user requests another location.
-- Remove temporary batch artifacts after their data is merged into the consolidated working report.
-- For `.xlsx` analysis, prefer bundled Codex runtime tools or local read-only parsers. Do not create a project `.venv` unless the user approves it.
+Import hubs (ast-grep): `types` (`Float = f32`) and `error` (`SonaraError`) are
+imported by 26 modules each, including the binding; `core` by 8; `perceptual`
+by 5 (`analyze`, `loudness_ext`, `mood`, `structure`, `aggression_dsp`).
 
-## Verification
+## CONVENTIONS
 
-- Use the cheapest verification that proves the current step.
-- For Rust logic changes, use focused `cargo test -p sonara ...` first.
-- For Python bindings changes, use `cargo check -p sonara-python` and only build/install the Python package when needed.
-- For the Python API suite, run `python scripts/run_python_tests.py`. It runs the contract checks CI gates on before the tests, so calling pytest directly skips them.
-- Report exactly which commands were run and whether they passed.
+- `Float = f32` throughout. Sample rate is always an explicit argument; no global SR.
+- Opt-in families (`onset_bands`, `beatgrid`, `rhythmic_regularity`, ...) are
+  never computed by a mode, only via `features=[...]`.
+- Additive fields ship without an `ANALYSIS_SCHEMA_VERSION` bump; bump only when
+  existing meaning or units change. Consumers key freshness per feature.
+- Abstention is `None` with confidence kept: a stored `None` regularity score
+  means "measured, undecidable", not "pending".
+- Rust unit tests sit inline at the bottom of each module. Python suite files
+  run as plain scripts (`python <file>`): pytest-style `def test_*` with no
+  driver runs nothing and still exits 0.
+- Versions move together in `sonara/Cargo.toml`, `sonara-python/Cargo.toml`,
+  `pyproject.toml`, only via the release procedure.
+- Wheel floor is abi3 `cp310`; repo tooling needs Python >= 3.11 (`tomllib`).
+
+## ANTI-PATTERNS (THIS PROJECT)
+
+- A feature that runs its own STFT: reuse the fused pass in `analyze_signal_inner`.
+- PyO3/NumPy, or an ML runtime in default features, inside `sonara/`: contract
+  boundary; downstream must be notified first.
+- Reinterpreting a similarity/fingerprint layout without a version bump. Bumping
+  `SIMILARITY_VERSION` also invalidates every genre/vocalness/aggression model.
+- Running pytest directly: `scripts/run_python_tests.py` runs the contract
+  checks CI gates on.
+- Trusting green `cargo test -p sonara` for aggression code: the binding always
+  enables `aggression`; run the feature build too.
+- Static ACF score-ratio rules for tempo: they fix some rows and regress
+  House/Techno controls.
+- Committing audio, generated benchmark output, or sealed labels.
+- Rewriting `BUILD-METADATA.md` for 0.3.7: it records the published
+  `v0.3.6-meteorburn.1` release and its wheel hash.
+
+## UNIQUE STYLES
+
+- BPM/key/chord changes need before/after numbers on labeled data (octave-error
+  rate, median BPM error) - see `CONTRIBUTING.md`.
+- `tests/fidelity_gates.json` routes touched paths to accuracy domains; a
+  `blocked` domain stops the change until evidence is supplied, by design.
+- Text files are UTF-8 with em-dashes and arrows that some consoles print as
+  `-` or `?`; check codepoints before "fixing" them.
+
+## COMMANDS
+
+```powershell
+cargo test -p sonara                                  # unit + accuracy + bpm_accuracy
+cargo test -p sonara --features aggression            # CI runs this on Linux only
+cargo test -p sonara --test bpm_accuracy -- --ignored # documented known-failing cases
+cargo check -p sonara-python
+maturin develop --release -m sonara-python/Cargo.toml # in a venv; suites import the in-tree build
+python scripts/run_python_tests.py                    # canonical suite; --list, --check-contract
+python scripts/run_fidelity_gate.py --base origin/main --dry-run
+cargo bench -p sonara --features bench-internals      # otherwise 5 of 10 benches skip silently
+```
+
+## NOTES
+
+- Fork remotes: `origin` MeteorBurn/sonara, `upstream` kkollsga/sonara. Absorb
+  upstream with a merge commit, never a fast-forward. CI `publish` is gated to
+  `kkollsga/sonara`, so pushes here never reach PyPI.
+- Commits, branches, pushes and PRs only on request; the branch/PR/push steps
+  in `workflow/skills/` need explicit authorization in this fork.
+- Fork BPM state: tempo-candidate selection fixed most half/double-tempo errors;
+  `bpm_min`/`bpm_max` folds out-of-range values (typically 79-192); parabolic
+  lag refinement cut 1-3 BPM drift. Still open: `LOW_inverse_ratio` near-misses;
+  next idea is beat-grid/DP regularity scoring across top candidates. Benchmark
+  on `benchmarks/bpm/*.xlsx` (target `bpm_mik`, audit `bpm_mik_raw`; never edit
+  the workbooks) and confirm with the maintainer before changing tempo selection.
+  Earlier campaign procedure: `git show 0c2a4b3:AGENTS.md`.
+- `sonara-python/src/analyze.rs` shares only a name with `sonara/src/analyze.rs`.
+- `.gitignore` ignores `AGENTS.md`; only this root file is tracked. Deeper
+  per-directory notes may exist locally as git-ignored `*/AGENTS.md`.
