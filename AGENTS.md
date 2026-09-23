@@ -80,4 +80,5 @@ These instructions apply to work inside `E:\Projects\Sonara`.
 - Use the cheapest verification that proves the current step.
 - For Rust logic changes, use focused `cargo test -p sonara ...` first.
 - For Python bindings changes, use `cargo check -p sonara-python` and only build/install the Python package when needed.
+- For the Python API suite, run `python scripts/run_python_tests.py`. It runs the contract checks CI gates on before the tests, so calling pytest directly skips them.
 - Report exactly which commands were run and whether they passed.
