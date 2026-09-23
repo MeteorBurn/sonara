@@ -98,8 +98,8 @@ by 5 (`analyze`, `loudness_ext`, `mood`, `structure`, `aggression_dsp`).
 - Static ACF score-ratio rules for tempo: they fix some rows and regress
   House/Techno controls.
 - Committing audio, generated benchmark output, or sealed labels.
-- Rewriting `BUILD-METADATA.md` for 0.3.7: it records the published
-  `v0.3.6-meteorburn.1` release and its wheel hash.
+- Rewriting `BUILD-METADATA.md` for an unpublished build: it records the latest
+  published fork release (`v0.3.7-meteorburn.1`) and its wheel hash.
 
 ## UNIQUE STYLES
 
