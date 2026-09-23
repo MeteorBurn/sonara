@@ -11,7 +11,7 @@ Feature extraction, batch analysis, and built-in perceptual features (energy, da
 ## Quick Start
 
 ```bash
-python -m pip install https://github.com/MeteorBurn/sonara/releases/download/v0.3.6-meteorburn.1/sonara-0.3.6-cp310-abi3-win_amd64.whl
+python -m pip install https://github.com/MeteorBurn/sonara/releases/download/v0.3.7-meteorburn.1/sonara-0.3.7-cp310-abi3-win_amd64.whl
 ```
 
 One call gets you 30+ features — tempo, key, chords, energy, mood, timbre — in ~4 ms per 10-second track:
@@ -58,7 +58,7 @@ This fork release provides a Windows x64 wheel. Requires Python 3.10+.
 
 The package is based on SONARA 0.3.7 with Symphonia 0.6.1, patched Hound 3.5.1, WAV fallback, and reduced metadata probing when tags are not requested. 0.3.7 adds two opt-in rhythm features on top of 0.3.6: the [multiband onset timeline](#multiband-onset-strength-opt-in) (`onset_bands`) and [rhythmic regularity](#rhythmic-regularity-opt-in). Both are additive — `ANALYSIS_SCHEMA_VERSION` stays at `6` and every 0.3.6 field keeps its meaning.
 
-The source version is `0.3.7`; the most recent *published* wheel is `v0.3.6-meteorburn.1` (package version `0.3.6`), which the Quick Start above installs — [BUILD-METADATA.md](BUILD-METADATA.md) records that release and its verification. Until the 0.3.7 tag is cut, build it from source with `maturin build --release`.
+The Quick Start above installs the `v0.3.7-meteorburn.1` release wheel (package version `0.3.7`) — [BUILD-METADATA.md](BUILD-METADATA.md) records that release, its exact source commit and its verification. On other platforms, build from a source checkout with `maturin build --release`.
 
 Installing `sonara` from PyPI retrieves the upstream package. Upstream also provides Linux and macOS wheels.
 
