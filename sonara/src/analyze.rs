@@ -3997,7 +3997,8 @@ mod tests {
             "tags",
         ];
         if cfg!(feature = "aggression") {
-            expected.insert(26, "aggression");
+            let embedding = expected.iter().position(|&name| name == "embedding").unwrap();
+            expected.insert(embedding + 1, "aggression");
         }
         assert_eq!(analysis_feature_names().collect::<Vec<_>>(), expected);
         let unique: HashSet<_> = analysis_feature_names().collect();
