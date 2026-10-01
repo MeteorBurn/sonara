@@ -52,4 +52,8 @@ manifest-path = "sonara-python/Cargo.toml"
 python-source = "python"
 module-name = "sonara._sonara"
 features = ["pyo3/extension-module"]
-include = [{ path = "python/sonara/models/*.json", format = ["sdist", "wheel"] }]
+include = [
+    { path = "python/sonara/models/*.json", format = ["sdist", "wheel"] },
+    # Fork: the root Cargo.toml patches hound to this path, so the sdist must carry it.
+    { path = "vendor/hound-3.5.1/**/*", format = "sdist" },
+]
