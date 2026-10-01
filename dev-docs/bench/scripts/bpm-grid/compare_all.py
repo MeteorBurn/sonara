@@ -15,7 +15,9 @@ in-phase |pos| < 0.125, half-beat |pos| > 0.375, other in between.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +28,6 @@ from openpyxl.utils import get_column_letter
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from compare_bpm import f_measure, load_json_dir, sonara_rows  # noqa: E402
 from beat_this_bpm import fold_to_range  # noqa: E402
 import bpm_grid_paths as P  # noqa: E402
 
@@ -41,6 +42,71 @@ MULTIPLES = [(2.0, "x2"), (0.5, "x0.5"), (1.5, "x1.5"), (2 / 3, "x2/3"), (4 / 3,
              (0.75, "x3/4"), (1.25, "x5/4"), (0.8, "x4/5")]
 OK_CATS = ("exact", "fine", "minor")
 ORDER = ["exact", "fine", "minor"] + [m[1] for m in MULTIPLES] + ["major", "n/a"]
+TOL = 0.07   # beat match window, s
+SKIP = 5.0   # beats in the first SKIP seconds are ignored
+
+
+def f_measure(est, ref):
+    """Greedy one-to-one beat matching: (F-measure, median offset est-ref in ms)."""
+    est = est[est >= SKIP]
+    ref = ref[ref >= SKIP]
+    if len(est) == 0 or len(ref) == 0:
+        return None, None
+    used = np.zeros(len(est), dtype=bool)
+    offsets = []
+    for r in ref:
+        i = int(np.searchsorted(est, r))
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(est) and not used[j] and abs(est[j] - r) <= TOL:
+                if best is None or abs(est[j] - r) < abs(est[best] - r):
+                    best = j
+        if best is not None:
+            used[best] = True
+            offsets.append(est[best] - r)
+    hits = len(offsets)
+    p, rc = hits / len(est), hits / len(ref)
+    f = 0.0 if hits == 0 else 2 * p * rc / (p + rc)
+    return f, (float(np.median(offsets)) * 1000.0 if offsets else None)
+
+
+def load_json_dir(folder: Path) -> dict[int, dict]:
+    out = {}
+    for f in folder.glob("[0-9][0-9][0-9][0-9] - *.json"):
+        d = json.loads(f.read_text(encoding="utf-8"))
+        out[int(d["idx"])] = d
+    return out
+
+
+def sonara_rows(db: Path) -> dict[int, dict]:
+    # immutable: a read-only open of a WAL database would leave -wal/-shm files
+    con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+    out = {}
+    for path, pidx, status, error, sj in con.execute(
+            "SELECT path, playlist_idx, status, error, scalars_json FROM tracks"):
+        row = {"path": path, "status": status, "error": error}
+        if sj:
+            s = json.loads(sj)
+            prov = s.get("provenance", {})
+            hop, sr = prov.get("hop_length", 512), prov.get("sample_rate", 22050)
+            row.update(bpm=s.get("bpm"), bpm_raw=s.get("bpm_raw"),
+                       bpm_conf=s.get("bpm_confidence"),
+                       reg=s.get("rhythmic_regularity"),
+                       reg_conf=s.get("rhythmic_regularity_confidence"),
+                       grid_stability=s.get("grid_stability"),
+                       duration=s.get("duration_sec"))
+            arrays = {n: np.frombuffer(zlib.decompress(d), dtype=dt).reshape(json.loads(sh))
+                      for n, dt, sh, d in con.execute(
+                          "SELECT name, dtype, shape, data FROM arrays WHERE path = ? "
+                          "AND name IN ('beats', 'downbeats')", (path,))}
+            for n in ("beats", "downbeats"):
+                frames = arrays.get(n)
+                if frames is None and isinstance(s.get(n), list):
+                    frames = np.asarray(s[n])
+                row[n] = None if frames is None else frames.astype(float) * hop / sr
+        out[pidx + 1] = row
+    con.close()
+    return out
 
 
 def category(value, ref):

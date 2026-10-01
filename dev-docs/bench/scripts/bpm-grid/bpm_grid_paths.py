@@ -5,15 +5,13 @@ Everything it reads or produces lives in the dataset directory, never next to
 the scripts:
 
     <repo>/dev-docs/bench/datasets/bpm-grid/     (override: SONARA_BPM_GRID_DATA)
-        data/            Sonara, Beat This!, MIK and synthetic reference data
-        playlists/       frozen playlist copies + SSD copy maps
-        estimate/        outputs of estimate/ (cache, results, synthetic, downstream)
-        mik-backups/     MIKStore.db backups taken by mik_add_playlist.py
+        data/            Sonara, Beat This! and MIK data, comparison table
+        playlists/       playlist copies + SSD copy maps
+        mik-backups/     MIKStore.db backups taken by mik_add_playlist.py (on demand)
         paths.json       machine-specific tool and drive locations (see below)
 
 paths.json keys (all optional; %VAR% is expanded):
-    ssd_root, ffmpeg, mik_db, beat_this_python, sonara_python, sonara_wheel,
-    regularity_eval
+    ssd_root, ffmpeg, mik_db, beat_this_python, sonara_python, sonara_wheel
 """
 
 from __future__ import annotations
@@ -30,8 +28,6 @@ DATASET = Path(
 
 DATA = DATASET / "data"
 PLAYLISTS = DATASET / "playlists"
-ESTIMATE = DATASET / "estimate"
-DOWNSTREAM = ESTIMATE / "downstream"
 MIK_BACKUPS = DATASET / "mik-backups"
 
 PLAYLIST_BROKEN = PLAYLISTS / "djts-playlist-broken.txt"
@@ -51,4 +47,3 @@ SSD_ROOT = machine("ssd_root")
 FFMPEG = machine("ffmpeg", "ffmpeg")
 MIK_DB = machine("mik_db", r"%LOCALAPPDATA%\Mixed In Key\Mixed In Key\11.0\MIKStore.db")
 SONARA_WHEEL = machine("sonara_wheel")
-REGULARITY_EVAL = machine("regularity_eval")
