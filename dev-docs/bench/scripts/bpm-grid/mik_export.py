@@ -1,7 +1,8 @@
-"""Export Mixed In Key analysis of a playlist, read-only, to <dataset>/data/mik/.
+"""Export Mixed In Key analysis of a playlist, read-only, to
+<dataset>/data/2_mixed_in_key/json_broken/ (default; --out for the straight set).
 
 Writes one JSON per track (`0001 - <file stem>.json`, numbered by playlist
-position; same naming as data/beat_this/) and `_bpm.json` with only the BPM of
+position; same naming as the Beat This! JSON) and `_bpm.json` with only the BPM of
 every track, two decimals. Tracks are matched by FilePathHash, the key MIK
 itself uses: upper(md5(lower("<volume serial>:<path without drive letter>"))),
 with backslashes; the forward-slash form is tried second for rows inserted by
@@ -25,7 +26,7 @@ import bpm_grid_paths as P  # noqa: E402
 
 MIK_DB = P.MIK_DB
 DEFAULT_PLAYLIST = str(P.PLAYLIST_BROKEN)
-DEFAULT_OUT = P.DATA / "mik"
+DEFAULT_OUT = P.MIK_DIR / "json_broken"
 _BAD = str.maketrans({c: "_" for c in '<>:"/\\|?*'})
 
 

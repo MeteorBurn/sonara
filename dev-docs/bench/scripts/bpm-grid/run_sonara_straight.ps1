@@ -1,10 +1,12 @@
 #Requires -Version 7
-# Sonara 0.3.7 analysis of the straight set, read from the SSD copy.
+# Sonara analysis of the straight set, read from the SSD copy.
 # Same script and preset as the broken set (MIK range 79-192, all features,
-# separate time_signature pass) -> <dataset>\data\straight_1000.sqlite and
-# <dataset>\data\straight_1000_json\ (one JSON per track, numbered by playlist position).
+# separate time_signature pass) -> <dataset>\data\1_sonara\run-<Name>.sqlite and
+# <dataset>\data\1_sonara\json_<Name>\ (one JSON per track, numbered by playlist position).
+# -Name: straight plus a revision suffix (the 0.3.7 baseline already holds json_straight).
 # Resumable: rerun to continue; already analysed tracks are skipped.
 param(
+    [Parameter(Mandatory)][string]$Name,
     [int]$Workers = 4,
     [int]$Threads = 4,
     [int]$Limit = 0
@@ -15,7 +17,7 @@ $python = Get-BpmGridPath 'sonara_python'
 $pyArgs = @(
     (Join-Path $PSScriptRoot 'extract_reference.py'),
     '--playlist', (Join-Path (Get-BpmGridPath 'ssd_root') 'djts-playlist-straight.txt'),
-    '--name', 'straight_1000',
+    '--name', $Name,
     '--workers', $Workers,
     '--threads', $Threads
 )

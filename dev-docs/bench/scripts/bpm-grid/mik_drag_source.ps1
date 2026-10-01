@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $Playlist) {
     . (Join-Path $PSScriptRoot 'bpm_grid_paths.ps1')
-    $Playlist = Join-Path $BpmGridDataset 'playlists\djts-playlist-broken.txt'
+    $Playlist = Join-Path $BpmGridDataset 'sources\djts-playlist-broken.txt'
 }
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 

@@ -6,9 +6,15 @@ including the raw inputs the measure is computed from (multiband onset
 envelopes, beats, downbeats), so the algorithm can later be re-run offline
 without decoding audio again.
 
+Writes into data/1_sonara/: run-<name>.sqlite (the full run: every scalar and
+array; it is what makes the run resumable) and json_<name>/ (one JSON per
+track). <name> is the set, plus a revision suffix for a new Sonara build
+(broken_<sha>). The 0.3.7 baseline lives in json_broken/ and json_straight/
+without its run database, so those names are refused.
+
 Run (resumable: already analysed tracks are skipped):
 
-    & <paths.json sonara_python> `
+    & <README machine paths: sonara_python> `
         "<repo>\\dev-docs\\bench\\scripts\\bpm-grid\\extract_reference.py"
 
 Options: --playlist, --name, --workers, --threads, --limit, --retry-failed,
@@ -34,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bpm_grid_paths as P  # noqa: E402
 
-WHEEL = P.SONARA_WHEEL  # paths.json sonara_wheel
+WHEEL = P.SONARA_WHEEL  # README machine paths: sonara_wheel
 
 # ---------------------------------------------------------------------------
 # PRESET: every analysis parameter lives here and is recorded in the database.
@@ -295,9 +301,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--playlist", default=str(P.PLAYLIST_BROKEN))
-    ap.add_argument("--name", default="broken_1000",
-                    help="output base name: <name>.sqlite and folder <name>_json")
-    ap.add_argument("--out-dir", default=str(P.DATA))
+    ap.add_argument("--name", required=True,
+                    help="run name: the set plus a revision suffix, e.g. broken_<sha>; "
+                         "writes run-<name>.sqlite and json_<name>/")
+    ap.add_argument("--out-dir", default=str(P.SONARA_DIR))
     ap.add_argument("--workers", type=int, default=4,
                     help="parallel processes (default 4 = ssd-balanced profile)")
     ap.add_argument("--threads", type=int, default=4,
@@ -311,8 +318,16 @@ def main() -> int:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    db_path = out_dir / f"{args.name}.sqlite"
-    json_dir = out_dir / f"{args.name}_json"
+    db_path = out_dir / f"run-{args.name}.sqlite"
+    json_dir = out_dir / f"json_{args.name}"
+    if not db_path.exists():
+        if args.export_json:
+            print(f"ERROR: no run database {db_path}; nothing to export.")
+            return 2
+        if any(json_dir.glob("[0-9][0-9][0-9][0-9] - *.json")):
+            print(f"ERROR: {json_dir} holds results of a run without a database "
+                  "(e.g. the 0.3.7 baseline); use another --name.")
+            return 2
     con = open_db(db_path)
 
     if args.export_json:
