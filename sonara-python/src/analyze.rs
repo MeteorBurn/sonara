@@ -636,6 +636,18 @@ fn pair_f32(v: &Bound<'_, PyAny>) -> Option<(f32, f32)> {
     (items.len() == 2).then(|| (items[0], items[1]))
 }
 
+/// A `(label, score)` pair from a Python tuple or list.
+fn label_score(v: &Bound<'_, PyAny>) -> Option<(String, f32)> {
+    if let Ok(pair) = v.extract::<(String, f32)>() {
+        return Some(pair);
+    }
+    let items = v.extract::<Vec<Bound<'_, PyAny>>>().ok()?;
+    if items.len() != 2 {
+        return None;
+    }
+    Some((items[0].extract().ok()?, items[1].extract().ok()?))
+}
+
 /// A `(key, camelot, score)` triple from a Python tuple or list.
 fn key_candidate(v: &Bound<'_, PyAny>) -> Option<(String, String, f32)> {
     if let Ok(triple) = v.extract::<(String, String, f32)>() {
@@ -831,6 +843,25 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
             )
         }
     };
+    let rhythmic_regularity_candidates = match cached.get_item("rhythmic_regularity_candidates")? {
+        None => None,
+        Some(v) if v.is_none() => None,
+        Some(v) => {
+            let expected = "a list of (label, score) pairs";
+            let items = v
+                .extract::<Vec<Bound<'_, PyAny>>>()
+                .map_err(|_| bad_field("rhythmic_regularity_candidates", expected))?;
+            Some(
+                items
+                    .iter()
+                    .map(|item| {
+                        label_score(item)
+                            .ok_or_else(|| bad_field("rhythmic_regularity_candidates", expected))
+                    })
+                    .collect::<PyResult<Vec<_>>>()?,
+            )
+        }
+    };
     // The dict stores the fingerprint as base64 + a format version; the struct
     // stores decoded sub-fingerprints in this build's format.
     let fingerprint = match opt_field!(cached, "fingerprint", String, "a base64 string") {
@@ -949,12 +980,7 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
             f32,
             "a float"
         ),
-        rhythmic_regularity_candidates: opt_field!(
-            cached,
-            "rhythmic_regularity_candidates",
-            Vec<(String, f32)>,
-            "a list of (label, score) pairs"
-        ),
+        rhythmic_regularity_candidates,
         energy_curve: opt_field!(cached, "energy_curve", Vec<f32>, "a list of floats"),
         energy_curve_hop_sec: opt_field!(cached, "energy_curve_hop_sec", f32, "a float"),
         segments,

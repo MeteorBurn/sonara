@@ -258,6 +258,17 @@ def test_declared_as_opt_in_and_needing_audio() -> None:
     assert sonara.augment_analysis(result, []) == result
 
 
+def test_a_json_revived_record_is_accepted() -> None:
+    # JSON turns the (label, score) tuples into lists; ingestion must accept them.
+    import json
+
+    result = _measure(_render(FOUR_ON_THE_FLOOR))
+    assert result["rhythmic_regularity_candidates"] is not None
+    revived = json.loads(json.dumps(dict(result)))
+    assert sonara.can_augment(revived, "rhythmic_regularity") is False
+    assert sonara.augment_analysis(revived, []) == result
+
+
 def test_print_renders_both_a_score_and_an_abstention() -> None:
     _measure(_render(FOUR_ON_THE_FLOOR)).print()
     _measure(np.zeros(int(20.0 * SR), dtype=np.float32)).print()
@@ -273,6 +284,7 @@ TESTS = [
     ("internal inputs are not leaked", test_the_groups_it_reads_are_not_leaked),
     ("measurement is deterministic", test_measurement_is_deterministic),
     ("declared opt-in and audio-bound", test_declared_as_opt_in_and_needing_audio),
+    ("a JSON-revived record is accepted", test_a_json_revived_record_is_accepted),
     ("print handles score and abstention", test_print_renders_both_a_score_and_an_abstention),
 ]
 
