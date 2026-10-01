@@ -31,7 +31,7 @@ work unverified rather than inventing its instructions.
 | Detection or numeric behavior; `tests/fidelity_gates.json`; reference data | [Accuracy](dev-docs/agent-guides/accuracy.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Stored-result meaning, schema versions, similarity layout | [docs/consumer-contract.md](docs/consumer-contract.md) |
 | Build a wheel or library; cut a fork release; Symphonia or Hound setup | [Build and release](dev-docs/agent-guides/build-release.md) |
-| Commit, push or PR (on request); upstream sync; downstream adoption; builds, data refreshes, benchmarks or classifier training | [Git and upstream](dev-docs/agent-guides/git-upstream.md) |
+| Commit, push or PR (on request); upstream sync; downstream adoption; builds, data refreshes or benchmarks | [Git and upstream](dev-docs/agent-guides/git-upstream.md) |
 | Benchmarks and research harnesses in `dev-docs/bench/` (upstream's and ours) | [Research harnesses](dev-docs/agent-guides/research-harnesses.md) |
 | Agent instructions, guides, skills or hooks; workflow skills in `workflow/`; Spec Kit; `dev-docs/` layout | [Agent layer](dev-docs/agent-guides/agent-layer.md) |
 | Inspect or query SQLite data | [SQLite](dev-docs/agent-guides/sqlite-toolkit.md) |
