@@ -91,7 +91,8 @@ def check_contract() -> None:
 
     # Local agent rules may not exist in a clean clone. Workflow skills are
     # validated from their committed canonical sources above; installed mirrors
-    # are checked as a release precondition.
+    # are checked as a release precondition. A CLAUDE.md that imports AGENTS.md
+    # (`@AGENTS.md`) inherits its runner rule instead of repeating it.
     for relative in (
         "AGENTS.md",
         "CLAUDE.md",
@@ -99,7 +100,12 @@ def check_contract() -> None:
         "workflow/skills/phased-plan/SKILL.md",
     ):
         path = ROOT / relative
-        if path.exists() and RUNNER_PATH not in path.read_text(encoding="utf-8"):
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if relative == "CLAUDE.md" and "@AGENTS.md" in text.split():
+            continue
+        if RUNNER_PATH not in text:
             raise AssertionError(f"{relative} does not use {RUNNER_PATH!r}")
 
 
