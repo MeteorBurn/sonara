@@ -171,7 +171,7 @@ class FidelityMapContractTests(unittest.TestCase):
             if base_hash is None:
                 continue
             revisions = subprocess.run(
-                ["git", "rev-list", "--all", "--", path],
+                ["git", "rev-list", "--all", "--full-history", "--", path],
                 cwd=ROOT,
                 check=True,
                 stdout=subprocess.PIPE,
