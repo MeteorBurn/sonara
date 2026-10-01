@@ -110,6 +110,30 @@ by 5 (`analyze`, `loudness_ext`, `mood`, `structure`, `aggression_dsp`).
 - Text files are UTF-8 with em-dashes and arrows that some consoles print as
   `-` or `?`; check codepoints before "fixing" them.
 
+## CODE GRAPH (GRAPHIFY)
+
+Optional, machine-local navigation aid; nothing below is tracked. Apply it only
+when `.tools/graphify/bin/graphify.exe` and `graphify-out/graph.json` exist;
+otherwise inspect source directly and do not install anything.
+
+- Before exploring or changing code, read the project skill
+  `.agents/skills/graphify/SKILL.md` (same files as `.claude/skills/graphify/`)
+  and its `references/project.md`; their rules override generic Graphify docs.
+- Start source discovery with
+  `& .\.tools\graphify\bin\graphify.exe query "<3-6 English code tokens>" --budget 8000`,
+  then `explain "<path::Symbol>"` or `affected "<node_id>" --relation calls`.
+  Graph edges are leads: open the cited `source_file`/`source_location` before
+  concluding. `No path` from `path` is not evidence of absence.
+- The graph is code-only (crate, binding, Python package, `scripts/`,
+  `examples/`). Tests, `vendor/`, `dev-docs/`, `benchmarks/`, `workflow/`, docs
+  and model files are excluded by `.graphifyignore`; find them with `rg`.
+- If `built_at_commit` in `graph.json` differs from `git rev-parse HEAD` or code
+  is uncommitted, run `update .` once (with `$env:PYTHONHASHSEED = '0'`) before
+  querying. Maintenance writes only `graphify-out/`.
+- Never install Graphify globally, add it to PATH, start its MCP server, or run
+  `graphify install`: it overwrites agent instructions and hooks.
+- Pass these rules to sub-agents that explore code.
+
 ## COMMANDS
 
 ```powershell
