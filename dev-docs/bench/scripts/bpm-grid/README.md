@@ -15,7 +15,7 @@ Nothing is written next to these scripts. `bpm_grid_paths.py` (and
 
 | Name | Default |
 | --- | --- |
-| dataset | `<repo>/locals/datasets/bpm-grid` (override `SONARA_BPM_GRID_DATA`) |
+| dataset | `<repo>/dev-docs/bench/datasets/bpm-grid` (override `SONARA_BPM_GRID_DATA`) |
 | `data/` | Sonara SQLite/JSON, `beat_this*/`, `mik*/`, `synthetic/`, comparison tables |
 | `playlists/` | `djts-playlist-{broken,straight}.txt`, SSD copy maps |
 | `estimate/` | outputs of `estimate/` (`cache/`, `results/`, `synthetic/`, `downstream/`) |

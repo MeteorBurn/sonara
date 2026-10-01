@@ -12,7 +12,7 @@ runs in background threads while the GPU processes the previous track.
 
 Run (resumable: tracks that already have a JSON are skipped):
 
-    & "<repo>\\locals\\envs\\beat-this-venv\\Scripts\\python.exe" `
+    & "<repo>\\dev-docs\\envs\\beat-this-venv\\Scripts\\python.exe" `
         "<repo>\\dev-docs\\bench\\scripts\\bpm-grid\\beat_this_bpm.py"
 
 BPM definition (basic, no fitting)

@@ -1,6 +1,6 @@
 """Run the published Sonara 0.3.7 wheel on estimate/synthetic/*.wav (generated audio only).
 
-Run with: locals/builds/0.3.7-meteorburn.1-9327b16-20260923/smoke-venv/Scripts/python.exe
+Run with: dev-docs/builds/0.3.7-meteorburn.1-9327b16-20260923/smoke-venv/Scripts/python.exe
 Writes estimate/synthetic/sonara_out.json.
 """
 

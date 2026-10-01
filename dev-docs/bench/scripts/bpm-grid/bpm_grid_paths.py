@@ -4,7 +4,7 @@ The harness source lives here (tracked, `dev-docs/bench/scripts/bpm-grid/`).
 Everything it reads or produces lives in the dataset directory, never next to
 the scripts:
 
-    <repo>/locals/datasets/bpm-grid/     (override: SONARA_BPM_GRID_DATA)
+    <repo>/dev-docs/bench/datasets/bpm-grid/     (override: SONARA_BPM_GRID_DATA)
         data/            Sonara, Beat This!, MIK and synthetic reference data
         playlists/       frozen playlist copies + SSD copy maps
         estimate/        outputs of estimate/ (cache, results, synthetic, downstream)
@@ -24,7 +24,9 @@ from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent
 REPO = HARNESS.parents[3]
-DATASET = Path(os.environ.get("SONARA_BPM_GRID_DATA") or REPO / "locals" / "datasets" / "bpm-grid")
+DATASET = Path(
+    os.environ.get("SONARA_BPM_GRID_DATA") or REPO / "dev-docs" / "bench" / "datasets" / "bpm-grid"
+)
 
 DATA = DATASET / "data"
 PLAYLISTS = DATASET / "playlists"

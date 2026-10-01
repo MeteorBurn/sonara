@@ -2,7 +2,7 @@
 # Mirrors bpm_grid_paths.py: sets $BpmGridRepo, $BpmGridDataset, $BpmGridConfig.
 $BpmGridRepo = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..'))
 $BpmGridDataset = if ($env:SONARA_BPM_GRID_DATA) { $env:SONARA_BPM_GRID_DATA } else {
-    Join-Path $BpmGridRepo 'locals\datasets\bpm-grid'
+    Join-Path $BpmGridRepo 'dev-docs\bench\datasets\bpm-grid'
 }
 $bpmGridConfigFile = Join-Path $BpmGridDataset 'paths.json'
 $BpmGridConfig = if (Test-Path -LiteralPath $bpmGridConfigFile) {
