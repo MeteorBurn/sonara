@@ -83,8 +83,8 @@ work unverified rather than inventing its instructions.
   `SIMILARITY_VERSION` also invalidates every genre/vocalness/aggression model.
 - Running pytest directly: `scripts/run_python_tests.py` runs the contract checks CI gates
   on.
-- Trusting green `cargo test -p sonara` for aggression code: the binding always enables
-  `aggression`; run the feature build too.
+- Trusting green `cargo test -p sonara` for aggression code or `FEATURE_REGISTRY`: the
+  binding always enables `aggression`; run the feature build too.
 - Static ACF score-ratio rules for tempo: they fix some rows and regress House/Techno
   controls.
 - Committing audio, generated benchmark output, or sealed labels.
@@ -96,8 +96,8 @@ work unverified rather than inventing its instructions.
 
 - Start at the smallest relevant check and widen only for shared APIs, cross-language
   bindings, packaging, release risk or an observed failure. Canonical gates:
-  `cargo test -p sonara`, `cargo test -p sonara --features aggression` for aggression code,
-  and `python scripts/run_python_tests.py` with the bindings built.
+  `cargo test -p sonara`, `cargo test -p sonara --features aggression` for aggression code
+  or `FEATURE_REGISTRY`, and `python scripts/run_python_tests.py` with the bindings built.
 - BPM, key and chord changes need before/after numbers on labeled data; a `blocked`
   fidelity domain stops a change until evidence is supplied.
 - Report which checks ran, which did not and why; never present expected behavior as a
