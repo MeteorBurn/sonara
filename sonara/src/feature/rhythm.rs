@@ -356,7 +356,9 @@ pub fn detect_time_signature(
     let mut best_idx = 0;
     let mut best_score = scores[0];
     let mut second_score = 0.0_f32;
-    for (i, &s) in scores.iter().enumerate() {
+    // Start at 1: index 0 already seeds `best`, and revisiting it would make
+    // a winning first meter its own runner-up (confidence 0).
+    for (i, &s) in scores.iter().enumerate().skip(1) {
         if s > best_score {
             second_score = best_score;
             best_score = s;
@@ -459,6 +461,28 @@ mod tests {
         assert!(
             confidence >= 0.0 && confidence <= 1.0,
             "confidence {confidence} out of range"
+        );
+    }
+
+    #[test]
+    fn test_detect_time_signature_first_meter_wins_with_margin() {
+        // Rows follow METER_NUMERATORS (2, 3, 4, ...): the first meter wins by a
+        // clear margin, so the confidence is (1.0 - 0.5) / 1.0, not 0.
+        let mg = ndarray::array![[1.0, 1.0], [0.5, 0.5], [0.2, 0.2]];
+        let (label, confidence) = detect_time_signature(mg.view(), None);
+        assert_eq!(label, "2/4");
+        assert!(
+            (confidence - 0.5).abs() < 1e-6,
+            "confidence {confidence}, expected 0.5"
+        );
+
+        // A later winner keeps the same margin rule.
+        let mg = ndarray::array![[0.5, 0.5], [0.2, 0.2], [1.0, 1.0]];
+        let (label, confidence) = detect_time_signature(mg.view(), None);
+        assert_eq!(label, "4/4");
+        assert!(
+            (confidence - 0.5).abs() < 1e-6,
+            "confidence {confidence}, expected 0.5"
         );
     }
 }
