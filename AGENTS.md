@@ -32,7 +32,7 @@ work unverified rather than inventing its instructions.
 | Stored-result meaning, schema versions, similarity layout | [docs/consumer-contract.md](docs/consumer-contract.md) |
 | Build a wheel or library; cut a fork release; Symphonia or Hound setup | [Build and release](dev-docs/agent-guides/build-release.md) |
 | Commit, push or PR (on request); upstream sync; downstream adoption; builds, data refreshes, benchmarks or classifier training | [Git and upstream](dev-docs/agent-guides/git-upstream.md) |
-| Research harnesses under `dev-docs/bench/` | [Research harnesses](dev-docs/agent-guides/research-harnesses.md) |
+| Benchmarks and research harnesses in `dev-docs/bench/` (upstream's and ours) | [Research harnesses](dev-docs/agent-guides/research-harnesses.md) |
 | Agent instructions, guides, skills or hooks; workflow skills in `workflow/`; Spec Kit; `dev-docs/` layout | [Agent layer](dev-docs/agent-guides/agent-layer.md) |
 | Inspect or query SQLite data | [SQLite](dev-docs/agent-guides/sqlite-toolkit.md) |
 | Open threads and plans | [dev-docs/todos.md](dev-docs/todos.md) |
@@ -49,10 +49,12 @@ work unverified rather than inventing its instructions.
 - This file overrides `workflow/skills/`: their branch, PR and push steps need explicit
   authorization. The `CLAUDE.md`/`AGENTS.md` resync in `dev-docs-cleanup` does not apply:
   this file is the authority and `CLAUDE.md` only imports it.
-- Where content belongs: `README.md` is the library description as upstream wrote it plus
-  this fork's features, without plans. `docs/` is user documentation only (English and
-  `docs/ru/`). `dev-docs/` holds development material: agent guides, plans, designs,
-  `todos.md`. `CHANGELOG.md` records shipped work only.
+- Where content belongs: upstream's code, Python wrapper, tests and docs stay where
+  `kkollsga/sonara` keeps them. `README.md` is the library description as upstream wrote it
+  plus this fork's features, without plans. `docs/` is user documentation only (English and
+  `docs/ru/`). `dev-docs/` is the single home of everything else of ours: agent guides,
+  plans, designs, notes, benchmarks with their datasets, patch kits, builds and tool
+  environments; no `locals/` or root `benchmarks/`. `CHANGELOG.md` records shipped work only.
 - Text files are UTF-8 with em-dashes and arrows that some consoles print as `-` or `?`, and
   PowerShell may show Cyrillic as mojibake; check codepoints before "fixing" text.
 
