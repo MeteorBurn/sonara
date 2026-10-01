@@ -7,6 +7,8 @@ FilePathHash) are only added to the collection.
 
 FilePathHash = upper(md5(lower("<volume serial>:<path without drive letter>")))
 (verified on all 44,497 rows of the previous MIK database, both slash styles).
+The hash covers the slashes as written, and MIK's own drag-and-drop uses
+backslashes, so playlist paths are stored and hashed in backslash form.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ def read_playlist(path: Path) -> list[str]:
         line = line.strip()
         if line and not line.startswith("#") and line not in seen:
             seen.add(line)
-            out.append(line)          # keep MIK's own form: "M:/Volumes/..."
+            # MIK's drag-and-drop form "M:\Volumes\...": a "/" path hashes
+            # differently, so MIK would not recognise the song and add it twice.
+            out.append(line.replace("/", "\\"))
     return out
 
 

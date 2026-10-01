@@ -3,7 +3,9 @@
 Writes one JSON per track (`0001 - <file stem>.json`, numbered by playlist
 position; same naming as data/beat_this/) and `_bpm.json` with only the BPM of
 every track, two decimals. Tracks are matched by FilePathHash, the key MIK
-itself uses: upper(md5(lower("<volume serial>:<path without drive letter>"))).
+itself uses: upper(md5(lower("<volume serial>:<path without drive letter>"))),
+with backslashes; the forward-slash form is tried second for rows inserted by
+mik_add_playlist.py.
 """
 
 from __future__ import annotations
@@ -61,8 +63,14 @@ def main() -> int:
         drive = path[:2].upper()
         if drive not in serials:
             serials[drive] = volume_serial(drive)
-        fph = hashlib.md5(f"{serials[drive]}:{path[2:]}".lower().encode()).hexdigest().upper()
-        row = con.execute("SELECT * FROM Song WHERE FilePathHash = ?", (fph,)).fetchone()
+        # MIK hashes the backslash form; rows inserted by mik_add_playlist.py
+        # were hashed from the playlist's forward-slash form.
+        row = None
+        for rel in dict.fromkeys((path[2:].replace("/", "\\"), path[2:])):
+            fph = hashlib.md5(f"{serials[drive]}:{rel}".lower().encode()).hexdigest().upper()
+            row = con.execute("SELECT * FROM Song WHERE FilePathHash = ?", (fph,)).fetchone()
+            if row is not None:
+                break
         entry = {"idx": idx + 1, "path": path}
         if row is None:
             entry.update(status="not_in_mik", bpm=None)
