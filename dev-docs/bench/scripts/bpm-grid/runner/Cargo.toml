@@ -1,0 +1,22 @@
+[package]
+name = "bpm-grid-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Stand-alone workspace: never part of the Sonara workspace.
+[workspace]
+
+[dependencies]
+sonara = { path = "../../../../../sonara" }
+
+# Same Hound as the Sonara workspace (its [patch] does not apply to path deps).
+[patch.crates-io]
+hound = { path = "../../../../../vendor/hound-3.5.1" }
+
+# Fast rebuilds for the iteration loop; no fast-math in Rust, so results match LTO builds.
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true

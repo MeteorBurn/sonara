@@ -6,6 +6,7 @@
 # -Name: straight plus a revision suffix (the 0.3.7 baseline already holds json_straight).
 # -Python: interpreter of the analysing environment (default: machine path sonara_python).
 # -Revision, -Wheel: provenance passed to extract_reference.py as --revision / --wheel.
+# -Features (comma list), -NoMeterPass: passed as --features / --no-meter-pass.
 # Resumable: rerun to continue; already analysed tracks are skipped.
 param(
     [Parameter(Mandatory)][string]$Name,
@@ -14,7 +15,9 @@ param(
     [int]$Limit = 0,
     [string]$Python = '',
     [string]$Revision = '',
-    [string]$Wheel = ''
+    [string]$Wheel = '',
+    [string]$Features = '',
+    [switch]$NoMeterPass
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'bpm_grid_paths.ps1')
@@ -29,5 +32,7 @@ $pyArgs = @(
 if ($Limit -gt 0) { $pyArgs += @('--limit', $Limit) }
 if ($Revision) { $pyArgs += @('--revision', $Revision) }
 if ($Wheel) { $pyArgs += @('--wheel', $Wheel) }
+if ($Features) { $pyArgs += @('--features', $Features) }
+if ($NoMeterPass) { $pyArgs += '--no-meter-pass' }
 & $python @pyArgs
 exit $LASTEXITCODE

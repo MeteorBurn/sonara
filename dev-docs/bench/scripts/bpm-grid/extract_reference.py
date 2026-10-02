@@ -22,6 +22,9 @@ Options: --playlist, --name, --workers, --threads, --limit, --retry-failed,
 revision of the build, recorded as sonara_repo_head), --wheel (wheel whose
 SHA-256 is recorded; default: README machine paths sonara_wheel). The path and
 SHA-256 of the loaded native module are always recorded, whatever the flags say.
+--features (comma list) replaces the main pass's PRESET features and
+--no-meter-pass skips the separate time_signature pass; the run database
+records the preset actually used.
 """
 
 from __future__ import annotations
@@ -119,7 +122,8 @@ def analyze_one(path: str, preset: dict):
         result = dict(sonara.analyze_file(
             path, features=preset["features"],
             vocalness_model=preset["vocalness_model"], **common))
-        meter = sonara.analyze_file(path, features=preset["meter_pass"], **common)
+        meter = (sonara.analyze_file(path, features=preset["meter_pass"], **common)
+                 if preset["meter_pass"] else {})
         for key, value in meter.items():
             if key in ("time_signature", "time_signature_confidence"):
                 result[key] = value
@@ -323,7 +327,18 @@ def main() -> int:
     ap.add_argument("--wheel", default=str(WHEEL) if WHEEL else None,
                     help="wheel the analysing environment was installed from; its SHA-256 "
                          "is recorded (default: README machine paths sonara_wheel)")
+    ap.add_argument("--features",
+                    help="comma-separated features of the main pass, instead of the PRESET list")
+    ap.add_argument("--no-meter-pass", action="store_true",
+                    help="skip the separate time_signature (meter_) pass")
     args = ap.parse_args()
+
+    # The preset actually used: PRESET unless --features / --no-meter-pass change it.
+    preset = dict(PRESET)
+    if args.features:
+        preset["features"] = [f.strip() for f in args.features.split(",") if f.strip()]
+    if args.no_meter_pass:
+        preset["meter_pass"] = []
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -364,13 +379,13 @@ def main() -> int:
 
     stored_preset = con.execute(
         "SELECT value FROM run_meta WHERE key = 'preset'").fetchone()
-    if stored_preset and json.loads(stored_preset[0]) != PRESET:
+    if stored_preset and json.loads(stored_preset[0]) != preset:
         print("ERROR: this database was filled with a different PRESET.\n"
               f"       Use another --name or delete {db_path}.")
         return 2
 
     meta = {
-        "preset": PRESET,
+        "preset": preset,
         "sonara_version": sonara.__version__,
         "sonara_module": sonara.__file__,
         "sonara_native_module": str(native_path),
@@ -400,8 +415,11 @@ def main() -> int:
     index = {p: i for i, p in enumerate(paths)}
     todo = [p for p in paths if p not in done]
 
-    print(f"SONARA {sonara.__version__}  preset '{PRESET['name']}'  "
-          f"sr={PRESET['sr']}  bpm={PRESET['bpm_min']}..{PRESET['bpm_max']}")
+    print(f"SONARA {sonara.__version__}  preset '{preset['name']}'  "
+          f"sr={preset['sr']}  bpm={preset['bpm_min']}..{preset['bpm_max']}")
+    if preset != PRESET:
+        print(f"features : {','.join(preset['features'])}  meter pass: "
+              f"{','.join(preset['meter_pass']) or 'skipped'}")
     print(f"revision : {revision}")
     print(f"module   : {native_path}  (sha256 {meta['sonara_module_sha256']})")
     print(f"wheel    : {meta['wheel']}  (sha256 {meta['wheel_sha256']})")
@@ -415,7 +433,7 @@ def main() -> int:
     started = time.perf_counter()
     try:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(analyze_one, p, PRESET): p for p in todo}
+            futures = {pool.submit(analyze_one, p, preset): p for p in todo}
             for n, fut in enumerate(as_completed(futures), 1):
                 res = fut.result()
                 store(con, index[res["path"]], res)
