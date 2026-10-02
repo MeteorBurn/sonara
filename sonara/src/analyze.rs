@@ -742,7 +742,12 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// v6 (2026-07-24): bundled aggression values are evaluated at the model's
 /// canonical 22.05 kHz sample rate. Main-pass fields and frame provenance stay
 /// in the caller-requested sample-rate domain.
-pub const ANALYSIS_SCHEMA_VERSION: u32 = 6;
+///
+/// v7 (2026-10-02): `bpm` and `bpm_raw` are the period of the tracked beats
+/// (a hierarchical consensus of beat pairs) instead of the fractional ACF
+/// peak, which remains the fallback. Same meaning and units, more precise;
+/// stored values differ slightly. `beats` and `bpm_candidates` are unchanged.
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 7;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
 /// fields on [`TrackAnalysis`] (`beats`, `onset_frames`, `downbeats`) convert
@@ -4892,7 +4897,7 @@ mod tests {
     #[test]
     fn test_analysis_schema_version_pinned() {
         // Bump deliberately (with a changelog note), never accidentally.
-        assert_eq!(ANALYSIS_SCHEMA_VERSION, 6);
+        assert_eq!(ANALYSIS_SCHEMA_VERSION, 7);
     }
 
     #[test]

@@ -12,19 +12,40 @@ use crate::types::Float;
 /// Number of strongest tempo candidates surfaced in a [`TempoEstimate`].
 const MAX_TEMPO_CANDIDATES: usize = 5;
 
+/// Fewest tracked beats whose period can replace the ACF tempo estimate.
+const MIN_BEAT_PERIOD_BEATS: usize = 17;
+
+/// Pair separations, in beats, of the hierarchical beat-period consensus.
+const BEAT_PAIR_SEPARATIONS: [usize; 3] = [32, 64, 128];
+
+/// Pairs whose span lies within this many frames of the current span agree.
+const BEAT_PAIR_TOLERANCE_FRAMES: Float = 1.0;
+
+/// Mean-refinement passes per consensus stage.
+const BEAT_PAIR_PASSES: usize = 3;
+
+/// Largest relative deviation of the beat period from the ACF tempo; beyond it
+/// the ACF estimate is kept.
+const MAX_BEAT_TEMPO_DEVIATION: Float = 0.05;
+
 /// Result of tempo estimation, including diagnostic tempo candidates.
 ///
-/// - `tempo`: final BPM used for beat tracking (after metrical selection,
-///   fractional ACF refinement, optional `bpm_min`/`bpm_max` range alignment,
-///   and clamping to `[30, 320]`).
-/// - `tempo_raw`: the same estimate *before* optional BPM-range alignment.
+/// - `tempo`: final BPM, after optional `bpm_min`/`bpm_max` range alignment
+///   and clamping to `[30, 320]`. It is the period of the tracked beats,
+///   measured by a hierarchical consensus of beat pairs. The ACF estimate
+///   (metrical selection plus fractional ACF-peak refinement) sets the beat
+///   tracker's period and is the fallback: it is reported when fewer than 17
+///   beats are tracked or the beat period deviates from it by more than 5%.
+/// - `tempo_raw`: the same tempo *before* optional BPM-range alignment, at the
+///   octave of the selected ACF lag.
 /// - `candidates`: the strongest ACF tempo candidates as `(bpm, score)` pairs,
 ///   sorted by score descending.
 #[derive(Debug, Clone)]
 pub struct TempoEstimate {
-    /// Final tempo in BPM (post range-alignment and clamping).
+    /// Final tempo in BPM: the tracked-beat period, or the ACF estimate as the
+    /// fallback (post range-alignment and clamping).
     pub tempo: Float,
-    /// Selected tempo in BPM before optional BPM-range alignment.
+    /// The same tempo in BPM before optional BPM-range alignment.
     pub tempo_raw: Float,
     /// Strongest `(bpm, score)` candidates, sorted by score descending.
     pub candidates: Vec<(Float, Float)>,
@@ -102,6 +123,14 @@ pub fn beat_track_with_bpm_range(
 ///
 /// Like [`beat_track_with_bpm_range`], but also surfaces the pre-range-alignment
 /// tempo and the strongest ACF tempo candidates for reporting.
+///
+/// The autocorrelation (ACF) estimate sets the integer beat period of the
+/// dynamic-programming tracker. The reported tempo is then the period of the
+/// tracked beats: a hierarchical consensus of beat pairs 32, 64 and 128 beats
+/// apart (±1 frame), at the octave of the selected ACF lag. The ACF estimate
+/// stays as the fallback when fewer than 17 beats are tracked or the beat
+/// period deviates from it by more than 5%. The beats and the candidates do
+/// not depend on this step.
 #[allow(clippy::too_many_arguments)]
 pub fn beat_track_detailed(
     y: Option<ArrayView1<Float>>,
@@ -148,7 +177,7 @@ pub fn beat_track_detailed(
     }
 
     // Estimate tempo
-    let estimate = estimate_tempo(&oenv, sr, hop_length, start_bpm, bpm_min, bpm_max)?;
+    let mut estimate = estimate_tempo(&oenv, sr, hop_length, start_bpm, bpm_min, bpm_max)?;
     let tempo = estimate.tempo;
     let frames_per_beat = (60.0 * frame_rate / tempo).round() as usize;
 
@@ -179,7 +208,86 @@ pub fn beat_track_detailed(
         beats
     };
 
+    // Report the period of the tracked beats. The ACF estimate stays when the
+    // beats are too few or their period strays too far from it.
+    if let Some((period, _agreement)) = beat_period_consensus(&beats) {
+        let beat_tempo = 60.0 * frame_rate / period;
+        if (beat_tempo / estimate.tempo - 1.0).abs() <= MAX_BEAT_TEMPO_DEVIATION {
+            // Keep the octave relation of the selected ACF lag: `tempo_raw` is
+            // the pre-alignment value and `tempo` its range-aligned fold.
+            let octave = estimate.tempo_raw / estimate.tempo;
+            estimate.tempo_raw = beat_tempo * octave;
+            estimate.tempo =
+                align_tempo_to_bpm_range(estimate.tempo_raw, bpm_min, bpm_max)?.clamp(30.0, 320.0);
+        }
+    }
+
     Ok((estimate, beats))
+}
+
+/// Period of the tracked beats from a hierarchical consensus of beat pairs.
+///
+/// A pair `sep` beats apart spans `sep` beat periods. The first stage seeds the
+/// span of pairs `min(32, n/2)` apart with their median (the upper one for an
+/// even count), then refines it with mean passes over the pairs within ±1
+/// frame of the current span. Stages with pairs 64 and 128 beats apart (capped
+/// at `n/2`) start from the previous period times their separation instead of
+/// a fresh median, so a tracker slip by half a beat cannot capture them.
+///
+/// `beats` are strictly increasing frame indices, as the DP backtrack yields.
+/// Returns `(period_frames, agreement)`, where `agreement` is the share of the
+/// first-stage pairs within the tolerance, or `None` below
+/// [`MIN_BEAT_PERIOD_BEATS`] beats.
+fn beat_period_consensus(beats: &[usize]) -> Option<(Float, Float)> {
+    let n = beats.len();
+    if n < MIN_BEAT_PERIOD_BEATS {
+        return None;
+    }
+    let pair_spans = |sep: usize| -> Vec<Float> {
+        (0..n - sep)
+            .map(|i| (beats[i + sep] - beats[i]) as Float)
+            .collect()
+    };
+
+    let sep = BEAT_PAIR_SEPARATIONS[0].min(n / 2);
+    let spans = pair_spans(sep);
+    let mut sorted = spans.clone();
+    sorted.sort_by(Float::total_cmp);
+    let (span, agreeing) = refine_pair_span(&spans, sorted[sorted.len() / 2])?;
+    let mut period = span / sep as Float;
+    let agreement = agreeing as Float / spans.len() as Float;
+
+    for &stage_sep in &BEAT_PAIR_SEPARATIONS[1..] {
+        let sep = stage_sep.min(n / 2);
+        if let Some((span, _)) = refine_pair_span(&pair_spans(sep), period * sep as Float) {
+            period = span / sep as Float;
+        }
+    }
+    Some((period, agreement))
+}
+
+/// Refine a pair span by repeated means over the spans within
+/// [`BEAT_PAIR_TOLERANCE_FRAMES`] of the current value.
+///
+/// Returns the refined span and the agreeing-pair count of the last pass, or
+/// `None` when no span lies within the tolerance of `span` on the first pass.
+fn refine_pair_span(spans: &[Float], mut span: Float) -> Option<(Float, usize)> {
+    let mut agreeing = None;
+    for _ in 0..BEAT_PAIR_PASSES {
+        let (mut sum, mut count) = (0.0f64, 0usize);
+        for &x in spans {
+            if (x - span).abs() <= BEAT_PAIR_TOLERANCE_FRAMES {
+                sum += x as f64;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            break;
+        }
+        span = (sum / count as f64) as Float;
+        agreeing = Some(count);
+    }
+    agreeing.map(|count| (span, count))
 }
 
 /// Estimate tempo from onset envelope using autocorrelation.
@@ -664,6 +772,25 @@ mod tests {
         y
     }
 
+    /// Click train at exactly `bpm`: click `k` starts at the sample nearest
+    /// `k * 60 / bpm` seconds, computed in f64 so a fractional period does not
+    /// drift (unlike `click_train`, which truncates the interval).
+    fn exact_click_train(sr: u32, dur: Float, bpm: Float) -> Array1<Float> {
+        let n = (sr as Float * dur) as usize;
+        let interval = 60.0 / bpm as f64 * sr as f64;
+        let mut y = Array1::<Float>::zeros(n);
+        let mut clicks = 0usize;
+        let mut pos = 0;
+        while pos < n {
+            for i in 0..100.min(n - pos) {
+                y[pos + i] = (2.0 * PI * 1000.0 * i as Float / sr as Float).sin();
+            }
+            clicks += 1;
+            pos = (clicks as f64 * interval).round() as usize;
+        }
+        y
+    }
+
     #[test]
     fn test_beat_track_clicks() {
         let y = click_train(22050, 4.0, 120.0);
@@ -798,6 +925,59 @@ mod tests {
             "flat onset envelope should not produce beats, got {}",
             beats.len()
         );
+
+        // Too few tracked beats for the beat-period consensus: the ACF
+        // estimate is reported unchanged.
+        let y = click_train(22050, 4.0, 120.0);
+        let oenv = onset::onset_strength(y.view(), 22050, 512).unwrap();
+        let (estimate, beats) = beat_track_detailed(
+            None,
+            Some(oenv.view()),
+            22050,
+            512,
+            120.0,
+            100.0,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !beats.is_empty() && beats.len() < MIN_BEAT_PERIOD_BEATS,
+            "expected a few beats, got {}",
+            beats.len()
+        );
+        let acf = estimate_tempo(&oenv, 22050, 512, 120.0, None, None).unwrap();
+        assert_eq!(estimate.tempo.to_bits(), acf.tempo.to_bits());
+        assert_eq!(estimate.tempo_raw.to_bits(), acf.tempo_raw.to_bits());
+    }
+
+    #[test]
+    fn test_beat_track_reports_tracked_beat_period() {
+        let y = exact_click_train(22050, 60.0, 128.0);
+        let (estimate, beats) = beat_track_detailed(
+            Some(y.view()),
+            None,
+            22050,
+            512,
+            120.0,
+            100.0,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            beats.len() >= MIN_BEAT_PERIOD_BEATS,
+            "expected the consensus to apply, got {} beats",
+            beats.len()
+        );
+        assert!(
+            (estimate.tempo - 128.0).abs() <= 0.005,
+            "128 BPM clicks should report the beat period, got {}",
+            estimate.tempo
+        );
+        assert_eq!(estimate.tempo.to_bits(), estimate.tempo_raw.to_bits());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Consumer contract — sonara's core Rust API
 
 **Owner:** sonara. This is the single durable copy.
-**Status:** current, verified against sonara 0.3.5 / `ANALYSIS_SCHEMA_VERSION = 6`
-on 2026-07-29.
+**Status:** current, `ANALYSIS_SCHEMA_VERSION = 7` since 2026-10-02; last verified
+against sonara 0.3.5 / schema 6 on 2026-07-29.
 **Consumer of record:** sonagram (since 2026-07-18). Originally raised by
 kglite on 2026-07-15.
 
@@ -56,7 +56,7 @@ The original asks and what shipped. Kept for lineage; do not re-raise them.
 |---|---|
 | **Self-describing time.** `beats` / `onset_frames` / downbeats were frame indices; effective sample rate and `hop_length` were internal to `analyze.rs`. | `TrackAnalysis.provenance: AnalysisProvenance` (always present) carries effective post-resample `sample_rate` and `hop_length`, plus `frame_to_sec` / `beats_sec` / `onsets_sec` / `downbeats_sec` helpers. |
 | **Typed event records with spans.** `chord_sequence: Option<Vec<String>>` had no temporal alignment; segments were tuples. | `chord_events: Option<Vec<ChordEvent>>` (`{ label, start_sec, end_sec }`, merged runs, contiguous, covering the track); `segments` is a named `SegmentEvent { start_sec, end_sec, energy }`. |
-| **Persistable provenance** to detect stale analysis. | `AnalysisProvenance { schema_version, sample_rate, hop_length, mode, requested_features (sorted), vocalness_model_id, … }`, pinned to `ANALYSIS_SCHEMA_VERSION` (now 6), bumped whenever field meaning or units change. |
+| **Persistable provenance** to detect stale analysis. | `AnalysisProvenance { schema_version, sample_rate, hop_length, mode, requested_features (sorted), vocalness_model_id, … }`, pinned to `ANALYSIS_SCHEMA_VERSION` (now 7), bumped whenever field meaning or units change. |
 
 ## Standing boundaries — what sonara undertakes to hold
 
@@ -98,6 +98,16 @@ Downstreams pin a compatible pre-1.0 sonara release and key stored records on
 `provenance.schema_version` (plus the per-subsystem `embedding_version` /
 fingerprint version where those are consumed). sonagram's current floor is
 `sonara >= 0.2.2`. Heuristic-semantics changes bump `ANALYSIS_SCHEMA_VERSION`.
+
+### Schema 7: BPM from the beat grid (2026-10-02)
+
+`bpm` and `bpm_raw` keep their meaning and units: the tempo in BPM, folded into
+`bpm_min..bpm_max` for `bpm` and before folding for `bpm_raw`. They are now the
+period of the tracked beats instead of the autocorrelation peak, so they are
+more precise and stored schema-6 values differ slightly. The autocorrelation
+estimate remains the fallback when fewer than 17 beats are tracked or the beat
+period deviates from it by more than 5%. `beats` and `bpm_candidates` are
+unchanged; the `bpm_confidence` formula is unchanged, its value follows `bpm`.
 
 ### Per-feature freshness
 

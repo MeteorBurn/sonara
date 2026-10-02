@@ -783,13 +783,15 @@ mod tests {
         // Canonical-rate outputs are intentionally unchanged by the routing
         // fix: only the model identity/schema changes. The physical component
         // transforms may differ by a few ULPs across platform math libraries.
-        assert_eq!(reference.score.unwrap().to_bits(), 0x3ee8_e262);
+        // Score and rhythm were re-frozen for schema 7 because the lane's BPM
+        // is now the beat-period consensus.
+        assert_eq!(reference.score.unwrap().to_bits(), 0x3ee8_e41a);
         assert_eq!(reference.confidence.to_bits(), 0x3f7a_f022);
         for (name, actual, expected) in [
             ("forcefulness", reference.forcefulness, 0x3f04_a1e1),
             ("harshness", reference.harshness, 0x3d0e_c9bd),
             ("tension", reference.tension, 0x3d4a_50db),
-            ("rhythm", reference.rhythm, 0x3f35_aa3b),
+            ("rhythm", reference.rhythm, 0x3f35_e10b),
         ] {
             assert!(
                 actual.to_bits().abs_diff(expected) <= 8,

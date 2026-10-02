@@ -63,6 +63,14 @@ const MAX_MEDIAN_ABS_ERR: Float = 1.5;
 /// tolerate them in the guarded subset.
 const MAX_OCTAVE_ERRORS: usize = 0;
 
+/// Duration (seconds) of the beat-period precision signals: long enough for
+/// the beat-pair consensus at every tested tempo (70 beats at 70 BPM).
+const PRECISION_DUR_SEC: Float = 60.0;
+
+/// Beat-period precision guard: the reported BPM, folded into the octave of
+/// the true tempo, must be within this many BPM of it.
+const MAX_PRECISION_ABS_ERR: Float = 0.03;
+
 /// Cases that current `main` gets wrong (octave error or large drift). Listed
 /// as `(bpm, pattern)` so they are excluded from the aggregate hard-asserts but
 /// still measured and printed in the report. Each also has a `#[ignore]`d
@@ -171,6 +179,23 @@ fn add_hat(y: &mut Array1<Float>, start: usize, seed: u64) {
     }
 }
 
+/// Click train of `dur_sec` seconds at exactly `bpm`: click `k` starts at the
+/// sample nearest `k * 60 / bpm` seconds, computed in f64 so a fractional
+/// period does not drift (unlike `beat_positions`, which accumulates in f32).
+fn exact_click_train(bpm: Float, dur_sec: Float) -> Array1<Float> {
+    let n = (SR as Float * dur_sec) as usize;
+    let interval = 60.0 / bpm as f64 * SR as f64;
+    let mut y = Array1::<Float>::zeros(n);
+    let mut clicks = 0usize;
+    let mut start = 0;
+    while start < n {
+        add_click(&mut y, start);
+        clicks += 1;
+        start = (clicks as f64 * interval).round() as usize;
+    }
+    y
+}
+
 /// Synthesize a deterministic signal at exactly `bpm` for the given pattern.
 fn synth(bpm: Float, pattern: Pattern) -> Array1<Float> {
     let n = (SR as Float * DUR_SEC) as usize;
@@ -214,6 +239,19 @@ const TEST_BPMS: &[Float] = &[
 ];
 
 const PATTERNS: &[Pattern] = &[Pattern::Click, Pattern::Kick, Pattern::KickOffbeatHats];
+
+/// Tempos of the beat-period precision suite.
+const PRECISION_BPMS: &[Float] = &[70.0, 90.0, 128.0, 140.0, 166.0, 174.0, 190.0];
+
+/// BPM ranges under which the octave-free tempo must stay the same.
+const PRECISION_RANGES: &[(Float, Float)] =
+    &[(79.0, 192.0), (70.0, 180.0), (60.0, 120.0), (90.0, 180.0)];
+
+/// `detected` moved into the octave of `reference` by a power of two.
+fn fold_to_octave(detected: Float, reference: Float) -> Float {
+    let octaves = (detected / reference).log2().round();
+    detected * (-octaves).exp2()
+}
 
 fn detect_bpm(bpm: Float, pattern: Pattern) -> Float {
     let y = synth(bpm, pattern);
@@ -476,4 +514,99 @@ fn bpm_range_rescues_192_bpm() {
             r.bpm
         );
     }
+}
+
+// ============================================================
+// Beat-period precision
+//
+// The reported BPM is the period of the tracked beats. Tempo-class and octave
+// selection are not part of this guard: fast clicks may still be tracked at
+// half tempo (a known 0.3.x behaviour), so the error is measured octave-free,
+// with the result folded into the octave of the true tempo.
+//
+// The beat tracker runs at the range-aligned ACF tempo, so ranges that yield
+// the same beats report bit-identical octave-free BPM. A range that moves the
+// tracked level (e.g. 60-120 tracks every other click of 128 BPM) measures the
+// period on other beats; there the octave-free values must agree within the
+// precision guard.
+// ============================================================
+
+#[test]
+fn bpm_precision_from_beat_period() {
+    println!("\n=== Beat-period precision — octave-free ===");
+    println!(
+        "{:>7}  {:>9} {:>6} {:>11} {:>11} {:>11} {:>9}",
+        "ref", "range", "beats", "bpm", "bpm_raw", "folded", "abs_err"
+    );
+    let mut failures = Vec::new();
+    let mut errors = Vec::new();
+    for &truth in PRECISION_BPMS {
+        let y = exact_click_train(truth, PRECISION_DUR_SEC);
+        // (tracked beats, octave-free BPM) per range
+        let mut by_range: Vec<(Vec<usize>, Float)> = Vec::new();
+        for &(bpm_min, bpm_max) in PRECISION_RANGES {
+            let config = sonara::analyze::AnalysisConfig {
+                bpm_min: Some(bpm_min),
+                bpm_max: Some(bpm_max),
+                ..sonara::analyze::compact()
+            };
+            let r = sonara::analyze::analyze_signal(y.view(), SR, &config).unwrap();
+            let folded = fold_to_octave(r.bpm, truth);
+            let abs_err = (folded - truth).abs();
+            println!(
+                "{:>7.1}  {:>4}-{:<4} {:>6} {:>11.5} {:>11.5} {:>11.5} {:>9.5}",
+                truth,
+                bpm_min,
+                bpm_max,
+                r.beats.len(),
+                r.bpm,
+                r.bpm_raw,
+                folded,
+                abs_err
+            );
+            if abs_err > MAX_PRECISION_ABS_ERR {
+                failures.push(format!(
+                    "{truth:.1} BPM, range {bpm_min}-{bpm_max}: bpm {:.5} folds to {folded:.5} \
+                     (abs_err {abs_err:.5} > {MAX_PRECISION_ABS_ERR})",
+                    r.bpm
+                ));
+            }
+            if fold_to_octave(r.bpm_raw, truth).to_bits() != folded.to_bits() {
+                failures.push(format!(
+                    "{truth:.1} BPM, range {bpm_min}-{bpm_max}: bpm {} is not an octave of \
+                     bpm_raw {}",
+                    r.bpm, r.bpm_raw
+                ));
+            }
+            errors.push(abs_err);
+            by_range.push((r.beats, folded));
+        }
+        let folded: Vec<Float> = by_range.iter().map(|(_, folded)| *folded).collect();
+        for (i, (beats, value)) in by_range.iter().enumerate() {
+            if by_range[i + 1..].iter().any(|(other_beats, other)| {
+                other_beats == beats && other.to_bits() != value.to_bits()
+            }) {
+                failures.push(format!(
+                    "{truth:.1} BPM: identical beats, different octave-free BPM across \
+                     ranges {PRECISION_RANGES:?}: {folded:?}"
+                ));
+            }
+        }
+        let spread = folded.iter().copied().fold(Float::NEG_INFINITY, Float::max)
+            - folded.iter().copied().fold(Float::INFINITY, Float::min);
+        println!("{truth:>7.1}  octave-free spread across ranges {spread:.5}");
+        if spread > MAX_PRECISION_ABS_ERR {
+            failures.push(format!(
+                "{truth:.1} BPM: octave-free BPM spreads {spread:.5} across ranges \
+                 {PRECISION_RANGES:?}: {folded:?}"
+            ));
+        }
+    }
+    println!(
+        "  abs error median {:.5} BPM, max {:.5} BPM (n={})",
+        median(errors.clone()),
+        errors.iter().copied().fold(0.0, Float::max),
+        errors.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
