@@ -457,7 +457,7 @@ pub(super) fn analyze_signal(y: ArrayView1<'_, Float>) -> Result<AggressionAnaly
         onset_envelope[frame_index] = sum / N_MELS as Float;
         beat_envelope[frame_index] = beat_sum / beat_mels as Float;
     }
-    let left_padding = 1 + N_FFT / (2 * HOP_LENGTH);
+    let left_padding = crate::onset::onset_envelope_pad_frames(1, N_FFT, HOP_LENGTH);
     let mut padded_onset = Array1::<Float>::zeros(onset_frame_count + left_padding);
     let mut padded_beat_onset = Array1::<Float>::zeros(onset_frame_count + left_padding);
     for frame_index in 0..onset_frame_count {

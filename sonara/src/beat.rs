@@ -362,7 +362,13 @@ pub fn beat_track_detailed_with_dp_envelope(
             continue;
         }
         let (beats, local_score) = track(frames_per_beat);
-        let agreement = beat_period_consensus(&beats).map_or(0.0, |(_, agreement)| agreement);
+        let consensus = beat_period_consensus(&beats);
+        let agreement = consensus.map_or(0.0, |(_, agreement)| agreement);
+        // The evidence belongs to this level only when its beats keep its period:
+        // a tracker pulled onto another level's pulse measures that level instead.
+        let measured = consensus.is_some_and(|(period, _)| {
+            (60.0 * frame_rate / period / folded - 1.0).abs() <= MAX_BEAT_TEMPO_DEVIATION
+        });
         let mean_local =
             beats.iter().map(|&b| local_score[b] as f64).sum::<f64>() / beats.len() as f64;
         let mean_local = if mean_local.is_finite() {
@@ -374,15 +380,19 @@ pub fn beat_track_detailed_with_dp_envelope(
             refined,
             folded,
             frames_per_beat,
+            measured,
             evidence: agreement + LEVEL_LOCAL_SCORE_WEIGHT * mean_local,
             beats,
         });
     }
 
     // Keep the selected level unless another one has clearly better evidence.
+    // Only a level whose own beats are measured and keep its period can win:
+    // with too few beats the evidence is just the local score, and a tracker
+    // pulled onto another pulse scores that pulse, not its level.
     let mut chosen = 0;
     for (index, level) in levels.iter().enumerate().skip(1) {
-        if level.evidence > levels[chosen].evidence {
+        if level.measured && level.evidence > levels[chosen].evidence {
             chosen = index;
         }
     }
@@ -436,6 +446,9 @@ struct TempoLevel {
     folded: Float,
     /// Integer beat period of `folded`, in frames.
     frames_per_beat: usize,
+    /// Whether the beats are enough for the beat-pair consensus and keep this
+    /// level's period (within [`MAX_BEAT_TEMPO_DEVIATION`]).
+    measured: bool,
     /// Pair agreement of the beats plus the weighted mean local score at them.
     evidence: Float,
     beats: Vec<usize>,

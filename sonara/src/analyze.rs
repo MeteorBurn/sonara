@@ -2063,7 +2063,7 @@ fn analyze_signal_inner(
         beat_env[t] = beat_sum / n_beat_mels as Float;
     }
 
-    let pad_left = lag + n_fft / (2 * hop_length);
+    let pad_left = crate::onset::onset_envelope_pad_frames(lag, n_fft, hop_length);
     let total_oenv_frames = out_frames + pad_left;
     let mut oenv_padded = Array1::<Float>::zeros(total_oenv_frames);
     let mut beat_env_padded = Array1::<Float>::zeros(total_oenv_frames);

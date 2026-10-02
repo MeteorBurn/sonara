@@ -20,6 +20,18 @@ const DEFAULT_ONSET_BAND_N_MELS: usize = 128;
 /// bands: kick, bass and snare body), not the off-beat hats above it.
 pub(crate) const BEAT_ENVELOPE_MAX_HZ: Float = 3200.0;
 
+/// Leading zero frames that align a spectral-flux onset envelope with the
+/// analysis frames: `lag + n_fft / (2 * hop_length) - 1`.
+///
+/// This is one frame less than librosa's `lag + n_fft / (2 * hop_length)`,
+/// which places the onsets, the onset bands and the beats tracked on them one
+/// hop after the audible onset. Every flux envelope of the analysis path
+/// (fused pass, aggression lane, `onset_strength`, onset bands) pads through
+/// this function so they stay on one frame grid.
+pub(crate) fn onset_envelope_pad_frames(lag: usize, n_fft: usize, hop_length: usize) -> usize {
+    (lag + n_fft / (2 * hop_length)).saturating_sub(1)
+}
+
 /// Number of mel bins whose filter centre lies below `max_hz`, for a slaney
 /// mel filterbank spanning `0..sr / 2`. Centres ascend, so these are the
 /// leading bins; the count follows the onset-band rule (a band ends at the
@@ -215,7 +227,7 @@ pub fn onset_strength_multi(
     }
 
     // Pad to align with STFT centering
-    let pad_left = lag + n_fft / (2 * hop_length);
+    let pad_left = onset_envelope_pad_frames(lag, n_fft, hop_length);
     let total_frames = out_frames + pad_left;
     let mut padded = Array2::<Float>::zeros((1, total_frames));
     for t in 0..out_frames {
@@ -340,7 +352,7 @@ pub(crate) fn onset_strength_bands_from_log_mel(
     }
 
     let out_frames = n_frames - lag;
-    let pad_left = lag + n_fft / (2 * hop_length);
+    let pad_left = onset_envelope_pad_frames(lag, n_fft, hop_length);
     let mut envelopes = Array2::<Float>::zeros((mel_ranges.len(), out_frames + pad_left));
     for (band, &(start, end)) in mel_ranges.iter().enumerate() {
         let width = (end - start) as Float;

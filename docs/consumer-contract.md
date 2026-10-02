@@ -116,6 +116,11 @@ consensus plus the tracker's local score). The level is chosen within 79–192 B
 whatever `bpm_min`/`bpm_max` are, which only fold the reported value, so the
 tempo ignoring octave no longer depends on the range. On a switched track,
 `bpm`, `bpm_raw` and `beats` follow the new level; `bpm_candidates` do not change.
+The onset envelope is padded one frame less than librosa's
+`lag + n_fft / (2 * hop_length)`, so `onset_frames`, `onset_strength_bands`,
+`beats` and `downbeats` sit one frame (about 23 ms) earlier than in schema 6,
+on the audible onset; every analysis path shares that padding. The public
+`onset_strength_method` keeps librosa's padding.
 `beats` keep their meaning, but they
 are now tracked on the onset envelope of the mel bins below 3.2 kHz, so they
 follow the kick and snare rather than off-beat hi-hats; stored schema-6 beats,
