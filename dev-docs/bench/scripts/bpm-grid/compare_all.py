@@ -3,6 +3,14 @@
 Read-only. Reads the four program databases (data/<n>_<program>/<program>-<set>.sqlite,
 built by build_tables.py) and writes data/bpm_comparison_2000.xlsx and .json.
 
+    python compare_all.py [--sonara-broken DB] [--sonara-straight DB] [--tag TAG] [--before JSON]
+
+A revision run replaces the baseline Sonara databases with --sonara-broken /
+--sonara-straight (each defaults to its set's data/1_sonara/sonara-<set>.sqlite)
+and then needs --tag: the output becomes data/bpm_comparison_2000_<TAG>.{json,xlsx},
+so revision results never overwrite the baseline outputs. The JSON key "sources"
+(and the Summary notes) records each set's Sonara database and its run provenance.
+
 MIK BPM is an authoritative value, not ground truth. Reference BPM combines
 Beat This! and MIK, MIK weighted higher: on tracks where Beat This! basic BPM
 (60 / median beat interval, folded to 79-192) is within ±3% of MIK (both chose
@@ -22,11 +30,48 @@ compared octave-free: folded by powers of 2 to the octave of the other value.
 Phase vs Rekordbox: circular mean position of Sonara beats on the Rekordbox grid
 (first TEMPO marker + 60/Bpm), on constant-tempo tracks where Sonara shares the
 Rekordbox tempo level.
+
+Target metrics (rule B, unanimity), added beside the reference (which they do not
+change). M = MIK bpm_raw and R = Rekordbox bpm_raw (status ok), S = Sonara bpm,
+U = Sonara bpm_unfolded; fold(v, t) = to_octave_of(v, t). Any validator disagreement
+sends a track to listening: a track on a listening sheet (Refs disagree, MIK vs RB
+disagree, RB dynamic tempo; row key "listening") has neither a value nor a class
+target, so it is out of the precision and class metrics.
+  consensus     not listed, M and R present and |fold(R, M)/M - 1| <= 0.001
+                (inclusive); the value target is then M (MIK's value in MIK's octave)
+  class target  not listed and M and R present -> M (mik+rb; not listed means
+                Rekordbox is exact or fine against MIK, so it shares MIK's level);
+                listed -> none (listed); M or R missing -> none (n/a)
+  Sonara class  x = fold(S, C)/C against the class target C: correct |x - 1| <= 0.03,
+                else x3/4, x4/3, x5/4 or x4/5 within ±3% of the ratio (the bands do
+                not overlap), else major. Octave-free: x3/2 shows as x3/4, x2/3 as x4/3
+  precision     consensus tracks with S: |fold(S, M)/M - 1| <= 0.001 (inclusive)
+  presets       U folded like Sonara's align_tempo_to_bpm_range (sonara/src/beat.rs:
+                double while below the low edge, then halve while above the high
+                edge) into 79-192 and 80-160, and like Rekordbox's 70-180 range shows
+                tempos, (90, 180]: double while <= 90, then halve while > 180.
+                Self-check: the 79-192 window of U equals S (the bench ran 79-192)
+  octave match  consensus tracks with Sonara class correct: same octave iff
+                round(log2(window / P)) == 0, P = M for both MIK windows, R for rb
+Tracks without a value target are listed in the sheet "Target disputed".
+
+Before/after (--before JSON, a previous output of this script): tracks are matched
+by (set, idx); per dimension the status is fixed, broken, unchanged or n/a:
+category vs reference (rank exact < fine < minor < any multiple or major),
+precision 0.1%, class (plus changed: wrong -> another wrong), phase vs Beat This!
+(phase_class) and phase vs Rekordbox (rb_phase_class): into in-phase = fixed, out
+of in-phase = broken. A dimension is n/a when the before rows lack its key, the
+track has no target for it, or the phase is n/a in either run; a missing Sonara BPM
+against an existing target counts as wrong. class_switches: Sonara BPM present in
+both runs and |fold(S_after, S_before)/S_before - 1| > 0.03, whatever the target.
+Output: JSON key "before_after" and the sheet "Before-after" (tracks with a change).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import sqlite3
 import sys
 import zlib
@@ -58,6 +103,32 @@ TOL = 0.07   # beat match window, s
 SKIP = 5.0   # beats in the first SKIP seconds are ignored
 WIDTH_CAP = 120                      # widest auto-fitted column, characters
 WIDTH_CAPS = {"file": 75, "path": 140}   # File sits in the frozen pane
+OUT_STEM = "bpm_comparison_2000"
+TAG = re.compile(r"[A-Za-z0-9._-]+")
+# Target metrics (module docstring)
+EPS = 1e-12               # makes the 0.1% boundaries inclusive under float rounding
+CONSENSUS_REL = 0.001     # MIK and Rekordbox agree on the value, octave-free
+PREC_REL = 0.001          # Sonara within 0.1% of the target, octave-free
+CLASS_MULTIPLES = [(0.75, "x3/4"), (4 / 3, "x4/3"), (1.25, "x5/4"), (0.8, "x4/5")]
+CLASS_ORDER = ["correct"] + [m[1] for m in CLASS_MULTIPLES] + ["major", "n/a"]
+CLASS_SOURCES = ("mik+rb", "listed", "n/a")
+# Listening sheets and their filters: the sheets use them, and rule B takes listed tracks out of the targets
+LISTENING = {
+    "Refs disagree": lambda r: r["refs"] == "disagree",
+    "MIK vs RB disagree": lambda r: r["rb_vs_mik"] not in ("exact", "fine", "n/a"),
+    "RB dynamic tempo": lambda r: r["rb_dynamic"] is True,
+}
+WINDOWS = {"79_192": (79.0, 192.0), "80_160": (80.0, 160.0)}   # MIK presets, Sonara's folding
+RB_SHOWN = (90.0, 180.0)  # Rekordbox 70-180 shows tempos in (90, 180]
+SOURCE_KEYS = ("sonara_version", "sonara_repo_head", "wheel_sha256", "run_name", "built_at")
+# Before/after: dimension -> (row key compared, row key that holds its target; None = no target)
+BA_DIMS = {"category": ("sonara_cat", "ref_bpm"), "precision": ("sonara_prec_ok", "consensus"),
+           "class": ("sonara_class", "class_ref_bpm"), "phase_bt": ("phase_class", None),
+           "phase_rb": ("rb_phase_class", None)}
+BA_LABELS = {"category": "Category", "precision": "Within 0.1%", "class": "Class",
+             "phase_bt": "Phase vs BT", "phase_rb": "Phase vs RB"}
+CAT_RANK = {"exact": 0, "fine": 1, "minor": 2}   # every multiple, major or missing Sonara BPM: 3
+BA_CHANGES = ("fixed", "broken", "changed")
 
 
 def f_measure(est, ref):
@@ -135,6 +206,14 @@ def sonara_rows(db: Path) -> dict[int, dict]:
         out[idx] = row
     con.close()
     return out
+
+
+def sonara_source(db: Path) -> dict:
+    """Provenance of a Sonara database: its path and the run-table keys that identify the build."""
+    con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+    run = dict(con.execute("SELECT key, value FROM run"))
+    con.close()
+    return {"sonara_db": str(db), **{k: run.get(k) for k in SOURCE_KEYS}}
 
 
 def category(value, ref):
@@ -223,9 +302,100 @@ def rb_grid_phase(son_beats, rb):
     return phase, phase * period * 1000.0
 
 
-def build_rows():
+def rel_to(value, target):
+    """fold(value, target) / target - 1: octave-free relative difference (None if either is missing)."""
+    if value is None or target is None or value <= 0 or target <= 0:
+        return None
+    return to_octave_of(value, target) / target - 1.0
+
+
+def listening(row) -> list[str]:
+    """Names of the listening sheets the track is on."""
+    return [name for name, on_list in LISTENING.items() if on_list(row)]
+
+
+def class_target(m_bpm, r_bpm, lists):
+    """(class reference BPM, source) under rule B: MIK unless the track is listed or lacks MIK or Rekordbox."""
+    if lists:
+        return None, "listed"
+    if m_bpm is None or r_bpm is None:
+        return None, "n/a"
+    return m_bpm, "mik+rb"
+
+
+def tempo_class(value, ref):
+    """Octave-free tempo class of `value` against `ref`: correct, x3/4, x4/3, x5/4, x4/5 (each ±3%) or major."""
+    if value is None or ref is None:
+        return "n/a"
+    x = to_octave_of(value, ref) / ref
+    if abs(x - 1.0) <= AGREE_REL:
+        return "correct"
+    for m, label in CLASS_MULTIPLES:
+        if abs(x / m - 1.0) <= AGREE_REL:
+            return label
+    return "major"
+
+
+def bpm_window(tempo, lo, hi):
+    """A copy of Sonara's align_tempo_to_bpm_range: double while below lo, then halve while above hi."""
+    if tempo is None or not np.isfinite(tempo) or tempo <= 0:
+        return tempo
+    while tempo < lo:
+        tempo *= 2.0
+    while tempo > hi:
+        tempo /= 2.0
+    return tempo
+
+
+def rb_window(tempo):
+    """Rekordbox's 70-180 range as it shows tempos, (90, 180]: double while <= 90, then halve while > 180."""
+    if tempo is None or not np.isfinite(tempo) or tempo <= 0:
+        return tempo
+    while tempo <= RB_SHOWN[0]:
+        tempo *= 2.0
+    while tempo > RB_SHOWN[1]:
+        tempo /= 2.0
+    return tempo
+
+
+def same_octave(value, ref):
+    if value is None or ref is None:
+        return None
+    return round(float(np.log2(value / ref))) == 0
+
+
+def target_fields(s_bpm, u_bpm, m_bpm, r_bpm, lists) -> dict:
+    """Per-track target metrics (module docstring), appended to every row; `lists` = listening(row)."""
+    rb_rel = rel_to(r_bpm, m_bpm)
+    consensus = not lists and rb_rel is not None and abs(rb_rel) <= CONSENSUS_REL + EPS
+    c_ref, c_src = class_target(m_bpm, r_bpm, lists)
+    s_class = tempo_class(s_bpm, c_ref)
+    s_rel = rel_to(s_bpm, m_bpm)
+    prec_ok = (abs(s_rel) <= PREC_REL + EPS) if consensus and s_rel is not None else None
+    win = {k: bpm_window(u_bpm, lo, hi) for k, (lo, hi) in WINDOWS.items()}
+    win["rb"] = rb_window(u_bpm)
+    octave = consensus and s_class == "correct"
+    if consensus:
+        reason = None
+    elif lists:
+        reason = "listening: " + "; ".join(lists)
+    else:
+        reason = "MIK/RB missing" if c_src == "n/a" else "MIK vs RB > 0.1%, class agreed"
+    return {
+        "sonara_bpm_unfolded": u_bpm, "rb_vs_mik_rel": rb_rel, "listening": lists,
+        "consensus": consensus, "target_bpm": m_bpm if consensus else None, "target_reason": reason,
+        "class_ref_bpm": c_ref, "class_ref_source": c_src, "sonara_class": s_class,
+        "sonara_rel_err": s_rel, "sonara_prec_ok": prec_ok,
+        **{f"win_{k}": v for k, v in win.items()},
+        "octave_ok_79_192": same_octave(win["79_192"], m_bpm) if octave else None,
+        "octave_ok_80_160": same_octave(win["80_160"], m_bpm) if octave else None,
+        "octave_ok_rb": same_octave(win["rb"], r_bpm) if octave else None,
+    }
+
+
+def build_rows(sets=SETS):
     rows = []
-    for set_name, src in SETS.items():
+    for set_name, src in sets.items():
         son = sonara_rows(src["sonara"])
         bt = db_rows(src["bt"], ("path", "status", "bpm_raw"), ("beats_sec", "downbeats_sec"))
         mik = db_rows(src["mik"], ("path", "status", "bpm_raw"))
@@ -264,7 +434,7 @@ def build_rows():
             rb_phase = rb_ms = None
             if r_dynamic is False and same_level(s_bpm, r_bpm):
                 rb_phase, rb_ms = rb_grid_phase(sb, rb)
-            rows.append({
+            row = {
                 "set": set_name, "idx": idx,
                 "file": Path(path).name if path else None, "path": path,
                 "sonara_status": s.get("status"), "sonara_error": s.get("error"),
@@ -289,7 +459,10 @@ def build_rows():
                 "rb_vs_mik": category(to_octave_of(r_bpm, m_bpm), m_bpm),
                 "sonara_vs_rb": category(to_octave_of(s_bpm, r_bpm), r_bpm),
                 "rb_phase": rb_phase, "rb_phase_ms": rb_ms, "rb_phase_class": phase_class(rb_phase),
-            })
+            }
+            # bpm_raw of sonara_rows = Sonara's own bpm_raw, i.e. bpm_unfolded
+            row.update(target_fields(s_bpm, s.get("bpm_raw"), m_bpm, r_bpm, listening(row)))
+            rows.append(row)
     return rows
 
 
@@ -369,15 +542,130 @@ def set_stats(rows):
     inrb = [r["rb_phase_ms"] for r in lvr if r["rb_phase_class"] == "in-phase"]
     if inrb:
         st["phase_vs_rekordbox_grid_rates_%"]["latency_ms_median"] = round(float(np.median(inrb)), 1)
+    # Target metrics (rule B): MIK + Rekordbox consensus, class target, preset windows (module docstring)
+    cons = [r for r in rows if r["consensus"]]
+    st["consensus_tracks"] = len(cons)
+    st["class_target_tracks"] = sum(r["class_ref_bpm"] is not None for r in rows)
+    st["listening_excluded_tracks"] = sum(bool(r["listening"]) for r in rows)
+    st["listening_lists"] = {name: sum(name in r["listening"] for r in rows) for name in LISTENING}
+    st["class_ref_source"] = {k: sum(r["class_ref_source"] == k for r in rows) for k in CLASS_SOURCES}
+    prec = [r["sonara_prec_ok"] for r in cons if r["sonara_prec_ok"] is not None]
+    st["prec_0.1pct_consensus"] = sum(prec)
+    st["prec_0.1pct_consensus_pct"] = pct(sum(prec), len(prec))
+    prec_cc = [r["sonara_prec_ok"] for r in cons if r["sonara_class"] == "correct"]
+    st["prec_0.1pct_correct_class"] = sum(prec_cc)
+    st["prec_0.1pct_correct_class_pct"] = pct(sum(prec_cc), len(prec_cc))
+    cls = [r["sonara_class"] for r in rows if r["sonara_class"] != "n/a"]
+    st["sonara_class_vs_target"] = {k: cls.count(k) for k in CLASS_ORDER if k != "n/a"}
+    st["class_critical_pct"] = pct(sum(c != "correct" for c in cls), len(cls))
+    octv = [r for r in cons if r["sonara_class"] == "correct"]
+    st["octave_checked_tracks"] = len(octv)
+    for name, key in (("octave_mik_79_192", "octave_ok_79_192"), ("octave_mik_80_160", "octave_ok_80_160"),
+                      ("octave_rb_window", "octave_ok_rb")):
+        same = [r[key] for r in octv if r[key] is not None]
+        st[name] = sum(same)
+        st[f"{name}_pct"] = pct(sum(same), len(same))
+    son_ok = [r for r in rows if r["sonara_status"] == "ok"]
+    st["preset_selfcheck_79_192"] = {
+        "sonara_ok_tracks": len(son_ok),
+        "window_equals_bpm": sum(r["win_79_192"] is not None and r["win_79_192"] == r["sonara_bpm"] for r in son_ok),
+    }
     return st
 
 
+def ba_status(dim, before, after):
+    """fixed / broken / changed (class only) / unchanged of one dimension whose values exist in both runs."""
+    if dim == "category":
+        b, a = CAT_RANK.get(before, 3), CAT_RANK.get(after, 3)
+    elif dim == "class":
+        if before == after:
+            return "unchanged"
+        return "fixed" if after == "correct" else "broken" if before == "correct" else "changed"
+    elif dim == "precision":
+        b, a = before is not True, after is not True             # 1 = not within 0.1%
+    else:                                                        # phase vs Beat This! or Rekordbox
+        b, a = before != "in-phase", after != "in-phase"
+    return "fixed" if a < b else "broken" if a > b else "unchanged"
+
+
+def before_after(rows, previous: list[dict]) -> list[dict]:
+    """Per-track change of category, precision, class and phase against the rows of a previous output."""
+    before = {(r["set"], r["idx"]): r for r in previous}
+    out = []
+    for r in rows:
+        b = before.get((r["set"], r["idx"]), {})
+        s_b, s_a = b.get("sonara_bpm"), r["sonara_bpm"]
+        e = {"set": r["set"], "idx": r["idx"], "file": r["file"], "matched": bool(b),
+             "sonara_bpm_before": s_b, "sonara_bpm_after": s_a,
+             "class_switch": None if s_b is None or s_a is None
+             else abs(to_octave_of(s_a, s_b) / s_b - 1.0) > AGREE_REL}
+        for dim, (key, target_key) in BA_DIMS.items():
+            e[f"{dim}_before"], e[f"{dim}_after"] = b.get(key), r[key]
+            if key not in b or (target_key is not None and (r[target_key] is None or r[target_key] is False)):
+                status = "n/a"          # no before value, or no target for this dimension
+            elif target_key is None and (b[key] in (None, "n/a") or r[key] in (None, "n/a")):
+                status = "n/a"          # phase not measured in one of the runs
+            else:
+                status = ba_status(dim, b[key], r[key])
+            e[f"{dim}_status"] = status
+        out.append(e)
+    return out
+
+
+def before_after_stats(ba_rows):
+    st = {"tracks": len(ba_rows), "matched_in_before": sum(e["matched"] for e in ba_rows)}
+    for dim in BA_DIMS:
+        st[dim] = {k: sum(e[f"{dim}_status"] == k for e in ba_rows)
+                   for k in ("fixed", "broken", "changed", "unchanged", "n/a") if k != "changed" or dim == "class"}
+    st["was_correct_became_wrong"] = sum(e["class_status"] == "broken" for e in ba_rows)
+    st["class_switches"] = sum(e["class_switch"] is True for e in ba_rows)
+    return st
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    for s, src in SETS.items():
+        ap.add_argument(f"--sonara-{s}", metavar="DB",
+                        help=f"Sonara database of the {s} set (default: the baseline {src['sonara'].name}); "
+                             "needs --tag")
+    ap.add_argument("--tag", help=f"write data/{OUT_STEM}_<TAG>.{{json,xlsx}} instead of data/{OUT_STEM}.{{json,xlsx}}")
+    ap.add_argument("--before", metavar="JSON",
+                    help="a previous output of this script: adds the per-track before/after comparison")
+    args = ap.parse_args()
+    if args.tag is not None and not TAG.fullmatch(args.tag):
+        ap.error(f"--tag {args.tag!r}: use only letters, digits, '.', '_' and '-'")
+    given = {f"--sonara-{s}": getattr(args, f"sonara_{s}") for s in SETS}
+    if any(v is not None for v in given.values()) and args.tag is None:
+        ap.error("--sonara-broken / --sonara-straight need --tag, so revision results never overwrite the baseline "
+                 "outputs")
+    for opt, value in [*given.items(), ("--before", args.before)]:
+        if value is not None and not Path(value).is_file():
+            ap.error(f"{opt} {value}: no such file")
+    return args
+
+
 def main() -> int:
-    rows = build_rows()
+    args = parse_args()
+    sets = {s: dict(src) for s, src in SETS.items()}
+    for s in SETS:
+        if getattr(args, f"sonara_{s}") is not None:
+            sets[s]["sonara"] = Path(getattr(args, f"sonara_{s}")).resolve()
+    before_json = Path(args.before).resolve() if args.before else None
+    previous = json.loads(before_json.read_text(encoding="utf-8"))["rows"] if before_json else None
+    stem = f"{OUT_STEM}_{args.tag}" if args.tag else OUT_STEM
+
+    rows = build_rows(sets)
     stats = {s: set_stats([r for r in rows if r["set"] == s]) for s in SETS}
     stats["all"] = set_stats(rows)
-    (DATA / "bpm_comparison_2000.json").write_text(
-        json.dumps({"stats": stats, "rows": rows}, ensure_ascii=False, indent=1, default=float),
+    sources = {s: sonara_source(src["sonara"]) for s, src in sets.items()}
+    result = {"stats": stats, "rows": rows, "sources": sources}
+    if previous is not None:
+        ba_rows = before_after(rows, previous)
+        ba_stats = {s: before_after_stats([e for e in ba_rows if e["set"] == s]) for s in SETS}
+        ba_stats["all"] = before_after_stats(ba_rows)
+        result["before_after"] = {"before": str(before_json), "stats": ba_stats, "rows": ba_rows}
+    (DATA / f"{stem}.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=1, default=float),
         encoding="utf-8")
 
     wb = Workbook()
@@ -388,6 +676,21 @@ def main() -> int:
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(bold=True, color="FFFFFF")
     band_fill = PatternFill("solid", fgColor="EEF3F8")
+    extra_notes = [
+        "Target metrics (rule B, unanimity; beside the reference): any validator disagreement sends a track to listening (sheets Refs disagree, MIK vs RB disagree, RB dynamic tempo), out of the precision and class metrics. Consensus = not listed and MIK and Rekordbox agree within 0.1% octave-free (|fold(RB, MIK)/MIK - 1| <= 0.001, inclusive); value target = MIK. Tracks without one: sheet Target disputed",
+        "Class target: MIK on every track that is not listed and has MIK and Rekordbox (not listed = Rekordbox exact or fine against MIK, so at MIK's level); listed tracks have no class target",
+        "Sonara class vs class target, octave-free: correct ±3% | x3/4 x4/3 x5/4 x4/5 ±3% | major; folding shows x3/2 as x3/4 and x2/3 as x4/3; class_critical = class not correct",
+        "Precision: Sonara within 0.1% of the target, octave-free, on consensus tracks (prec_0.1pct_correct_class: those with class correct)",
+        "Presets: Sonara bpm_unfolded folded like align_tempo_to_bpm_range into 79-192 and 80-160 (MIK) and into Rekordbox 70-180 as shown, (90, 180]; octave match on consensus tracks with class correct (MIK windows vs MIK, Rekordbox window vs Rekordbox); self-check: 79-192 window = reported BPM",
+    ]
+    for s, src in sources.items():
+        extra_notes.append(f"Sonara {s}: {src['sonara_db']} | version {src['sonara_version']} | repo "
+                           f"{src['sonara_repo_head']} | wheel sha256 {src['wheel_sha256']} | built {src['built_at']}"
+                           + (f" | run {src['run_name']}" if src["run_name"] else ""))
+    if previous is not None:
+        extra_notes.append(f"Before-after vs {before_json}: per track fixed / broken / unchanged / n/a for category, "
+                           "precision, class (+ changed = wrong -> another wrong), phase vs Beat This! and vs Rekordbox; "
+                           "class switch = Sonara BPM moved > 3% octave-free (sheet Before-after, block below)")
     notes = (
         "Sonara 0.3.7 vs Beat This! vs Mixed In Key vs Rekordbox — 1000 broken + 1000 straight tracks",
         "MIK BPM is authoritative, not ground truth. Reference BPM (only where Beat This! basic BPM is within ±3% of MIK): 0.75·MIK + 0.25·BT grid BPM; if BT grid fit < 0.8, Reference = MIK",
@@ -395,6 +698,7 @@ def main() -> int:
         "Categories: exact <=0.05 | fine <=0.5 | minor <=2 | x2 x0.5 x1.5 x2/3 x4/3 x3/4 x5/4 x4/5 | major; critical = multiple or major",
         "Beat phase on tracks where Sonara and Beat This! share the tempo level: in-phase |pos|<0.125, half-beat |pos|>0.375 (beats on the offbeat)",
         "Rekordbox (7.2.19, range 70-180, Auto) is a third validator beside the reference, not part of it: BPM compared octave-free (its octave is a range preset); phase = Sonara beats on the Rekordbox grid, constant-tempo tracks at the same level",
+        *extra_notes,
         "",
     )
     for line in notes:
@@ -414,7 +718,9 @@ def main() -> int:
         "sonara_vs_ref_rates_% / critical", "abs_err_correct_level_bpm / p50",
         "abs_err_correct_level_bpm / p90", "phase_class_rates_% / half-beat",
         "in_phase_tracks / latency_ms_median", "in_phase_tracks / beat_f70_median",
-        "in_phase_tracks / bar_phase_correct_%",
+        "in_phase_tracks / bar_phase_correct_%", "consensus_tracks", "prec_0.1pct_consensus_pct",
+        "phase_vs_rekordbox_grid_rates_% / half-beat", "phase_vs_rekordbox_grid_rates_% / latency_ms_median",
+        "octave_rb_window_pct",
     }
 
     def flat(prefix, d):
@@ -440,7 +746,28 @@ def main() -> int:
                 c.fill = band_fill
             if name in headline:
                 c.font = bold
-    ws.column_dimensions["A"].width = fit_width("Metric", metric_names)
+    ba_names = []
+    if previous is not None:                      # before/after totals under the metrics
+        ba_flat = {k: dict(flat("", result["before_after"]["stats"][k])) for k in keys}
+        ba_names = list(ba_flat["all"])
+        ws.append([])
+        ws.append([f"Before-after vs {before_json}"])
+        ws.cell(ws.max_row, 1).font = Font(bold=True, size=12, color="1F4E78")
+        ws.append(["Metric"] + keys)
+        for c in ws[ws.max_row]:
+            c.font = header_font
+            c.fill = header_fill
+        banded, group = False, None
+        for name in ba_names:
+            ws.append([name] + [ba_flat[k].get(name) for k in keys])
+            if name.split(" / ")[0] != group:
+                group, banded = name.split(" / ")[0], not banded
+            for c in ws[ws.max_row]:
+                if banded:
+                    c.fill = band_fill
+                if name in ("was_correct_became_wrong", "class_switches"):
+                    c.font = bold
+    ws.column_dimensions["A"].width = fit_width("Metric", metric_names + ba_names)
     for i, k in enumerate(keys, 2):
         ws.column_dimensions[get_column_letter(i)].width = fit_width(
             k, [flat_stats[k].get(name) for name in metric_names])
@@ -458,6 +785,15 @@ def main() -> int:
         ("sonara_vs_mik", "Sonara vs MIK", None),
         ("rb_vs_mik", "RB vs MIK", None), ("rb_octave_vs_mik", "RB octave", None),
         ("sonara_vs_rb", "Sonara vs RB", None), ("rb_dynamic", "RB dynamic", None),
+        ("consensus", "Consensus", None), ("target_bpm", "Target BPM", "0.000"),
+        ("rb_vs_mik_rel", "RB/MIK - 1", "+0.000%;-0.000%;0.000%"),
+        ("class_ref_bpm", "Class ref BPM", "0.000"), ("class_ref_source", "Class ref", None),
+        ("sonara_class", "Sonara class", None), ("sonara_rel_err", "Sonara/MIK - 1", "+0.000%;-0.000%;0.000%"),
+        ("sonara_prec_ok", "Within 0.1%", None), ("sonara_bpm_unfolded", "Sonara unfolded", "0.000"),
+        ("win_79_192", "Window 79-192", "0.000"), ("win_80_160", "Window 80-160", "0.000"),
+        ("win_rb", "Window RB (90,180]", "0.000"), ("octave_ok_79_192", "Octave 79-192", None),
+        ("octave_ok_80_160", "Octave 80-160", None), ("octave_ok_rb", "Octave RB", None),
+        ("target_reason", "No target: why", None),
         ("phase_class", "Beat phase", None), ("beat_phase", "Phase (beats)", "+0.00;-0.00;0.00"),
         ("phase_ms", "Phase ms", "+0;-0;0"), ("beat_f", "Beat F ±70ms", "0.00"),
         ("downbeat_f", "Downbeat F", "0.00"), ("bar_phase_ok", "Bar phase ok", None),
@@ -557,6 +893,65 @@ def main() -> int:
             L, rng = col("sonara_status")
             cf.add(rng, CellIsRule(operator="equal", formula=['"ok"'], fill=green))
             cf.add(rng, FormulaRule(formula=[f'AND({L}2<>"",{L}2<>"ok")'], fill=red))
+            # target metrics
+            L, rng = col("sonara_class")
+            cf.add(rng, CellIsRule(operator="equal", formula=['"correct"'], fill=green))
+            cf.add(rng, CellIsRule(operator="equal", formula=['"n/a"'], fill=grey))
+            cf.add(rng, FormulaRule(formula=[f'AND({L}2<>"correct",{L}2<>"n/a",{L}2<>"")'], fill=red))
+            _, rng = col("class_ref_source")
+            cf.add(rng, CellIsRule(operator="equal", formula=['"mik+rb"'], fill=green))
+            cf.add(rng, CellIsRule(operator="equal", formula=['"listed"'], fill=amber))
+            cf.add(rng, CellIsRule(operator="equal", formula=['"n/a"'], fill=grey))
+            _, rng = col("consensus")
+            cf.add(rng, CellIsRule(operator="equal", formula=["TRUE"], fill=green))
+            cf.add(rng, CellIsRule(operator="equal", formula=["FALSE"], fill=amber))
+            for key in ("sonara_prec_ok", "octave_ok_79_192", "octave_ok_80_160", "octave_ok_rb"):
+                _, rng = col(key)
+                cf.add(rng, CellIsRule(operator="equal", formula=["TRUE"], fill=green))
+                cf.add(rng, CellIsRule(operator="equal", formula=["FALSE"], fill=red))
+            L, rng = col("sonara_rel_err")
+            cf.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({L}2),ABS({L}2)<=0.001)"], fill=green))
+            cf.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({L}2),ABS({L}2)>0.001,ABS({L}2)<=0.03)"], fill=amber))
+            cf.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({L}2),ABS({L}2)>0.03)"], fill=red))
+        w.freeze_panes = "D2"
+        w.auto_filter.ref = w.dimensions
+
+    def before_after_sheet(ba_rows):
+        """Tracks whose category, precision, class or phase changed, or whose class switched."""
+        bcols = [("set", "Set", None), ("idx", "#", "0"), ("file", "File", None),
+                 ("sonara_bpm_before", "Sonara BPM before", "0.000"),
+                 ("sonara_bpm_after", "Sonara BPM after", "0.000"), ("class_switch", "Class switch", None)]
+        for dim, label in BA_LABELS.items():
+            bcols += [(f"{dim}_status", label, None), (f"{dim}_before", f"{label} before", None),
+                      (f"{dim}_after", f"{label} after", None)]
+        changes = [e for e in ba_rows if e["class_switch"] or any(e[f"{d}_status"] in BA_CHANGES for d in BA_DIMS)]
+        w = wb.create_sheet("Before-after")
+        w.sheet_properties.tabColor = "00B050"
+        w.append([c[1] for c in bcols])
+        for cell in w[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(vertical="top")
+        for e in changes:
+            w.append([e[c[0]] for c in bcols])
+            w.cell(w.max_row, 1).fill = set_fills[e["set"]]
+        last = w.max_row
+        for i, (key, header, fmt) in enumerate(bcols, 1):
+            letter = get_column_letter(i)
+            w.column_dimensions[letter].width = fit_width(
+                header, [e[key] for e in changes], fmt, WIDTH_CAPS.get(key, WIDTH_CAP))
+            if fmt:
+                for cell in w[letter][1:]:
+                    cell.number_format = fmt
+            if last > 1 and key.endswith("_status"):
+                rng = f"{letter}2:{letter}{last}"
+                w.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"fixed"'], fill=green))
+                w.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"broken"'], fill=red))
+                w.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"changed"'], fill=amber))
+                w.conditional_formatting.add(rng, CellIsRule(operator="equal", formula=['"n/a"'], fill=grey))
+            elif last > 1 and key == "class_switch":
+                w.conditional_formatting.add(f"{letter}2:{letter}{last}",
+                                             CellIsRule(operator="equal", formula=["TRUE"], fill=red))
         w.freeze_panes = "D2"
         w.auto_filter.ref = w.dimensions
 
@@ -565,18 +960,25 @@ def main() -> int:
           lambda r: (r["set"], r["sonara_cat"], r["idx"]), tab="C00000")
     sheet("Beats on offbeat", [r for r in rows if r["phase_class"] == "half-beat"],
           lambda r: (r["set"], r["idx"]), tab="ED7D31")
-    sheet("Refs disagree", [r for r in rows if r["refs"] == "disagree"],
+    sheet("Refs disagree", [r for r in rows if LISTENING["Refs disagree"](r)],
           lambda r: (r["set"], r["bt_vs_mik"], r["idx"]), tab="7030A0")
     sheet("Not exact", [r for r in rows if r["refs"] == "agree" and r["sonara_cat"] in ("fine", "minor")],
           lambda r: -abs(r["sonara_minus_ref"] or 0), tab="FFC000")
     sheet("Sonara errors", [r for r in rows if r["sonara_status"] != "ok"], lambda r: (r["set"], r["idx"]),
           tab="7F7F7F")
-    sheet("MIK vs RB disagree", [r for r in rows if r["rb_vs_mik"] not in ("exact", "fine", "n/a")],
+    sheet("MIK vs RB disagree", [r for r in rows if LISTENING["MIK vs RB disagree"](r)],
           lambda r: (r["set"], r["rb_vs_mik"], r["idx"]), tab="548235")
-    sheet("RB dynamic tempo", [r for r in rows if r["rb_dynamic"]], lambda r: (r["set"], r["idx"]), tab="BF8F00")
-    out = DATA / "bpm_comparison_2000.xlsx"
+    sheet("RB dynamic tempo", [r for r in rows if LISTENING["RB dynamic tempo"](r)], lambda r: (r["set"], r["idx"]),
+          tab="BF8F00")
+    sheet("Target disputed", [r for r in rows if not r["consensus"]],
+          lambda r: (r["set"], r["target_reason"], r["idx"]), tab="806000")
+    if previous is not None:
+        before_after_sheet(result["before_after"]["rows"])
+    out = DATA / f"{stem}.xlsx"
     wb.save(out)
     print(json.dumps(stats, indent=1, ensure_ascii=False))
+    if previous is not None:
+        print(json.dumps({"before_after": result["before_after"]["stats"]}, indent=1, ensure_ascii=False))
     print(f"\nwritten: {out}")
     return 0
 

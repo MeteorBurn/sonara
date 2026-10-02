@@ -7,6 +7,18 @@ The input is json_<set>/ only, which is never modified. One exception: the JSON
 does not carry Sonara's onset_strength_bands, so they are copied from the
 existing sonara-<set>.sqlite.
 
+A Sonara revision run (--sonara-run <set>_<rev>, written by extract_reference.py
+as json_<name>/ + run-<name>.sqlite) builds only sonara-<name>.{sqlite,xlsx} in
+data/1_sonara/. Its tracks are read from json_<name>/ exactly like json_<set>/;
+its onset_strength_bands come from run-<name>.sqlite (arrays keyed by path,
+idx = tracks.playlist_idx + 1). Its run table keeps the baseline keys (set = the
+set prefix) and adds run_name. The bare names broken and straight are refused:
+they would overwrite the baseline tables.
+
+A Sonara track whose analysis failed (status not ok) keeps its row, with no
+arrays and no onset_strength_bands; the run table's provenance comes from the
+first track that is ok.
+
 BPM fields are named the same for every program:
     bpm           the program's BPM rounded to 2 decimals
     bpm_raw       the BPM as the program reports it
@@ -15,6 +27,7 @@ BPM fields are named the same for every program:
 Only values a program stores, or exact transforms of them, are written.
 
     python build_tables.py [--only sonara|mik|rekordbox|beat_this ...] [--out-dir DIR]
+    python build_tables.py --sonara-run broken_<rev> [--out-dir DIR]
 """
 
 from __future__ import annotations
@@ -42,6 +55,7 @@ import bpm_grid_paths as P  # noqa: E402
 from beat_this_bpm import beats_per_bar, bpm_estimates, fold_to_range  # noqa: E402
 
 SETS = ("broken", "straight")
+RUN_NAME = re.compile(r"(broken|straight)_[A-Za-z0-9._-]+")   # --sonara-run: <set>_<rev>
 BPM_LO, BPM_HI = 79.0, 192.0
 AMBER = PatternFill("solid", fgColor="FCE8B2")
 GREEN = PatternFill("solid", fgColor="D9EAD3")
@@ -94,21 +108,54 @@ SONARA_RUN_KEYS = ("sonara_version", "sonara_repo_head", "wheel_sha256", "playli
                    "playlist_sha256", "playlist_tracks", "last_started_at")
 
 
-def load_sonara(set_name: str, folder: Path):
-    jdir = folder / f"json_{set_name}"
-    meta = read_meta(jdir)
-    bands_db = folder / f"sonara-{set_name}.sqlite"
-    if not bands_db.is_file():
-        sys.exit(f"{bands_db} is missing: it is the only copy of onset_strength_bands")
-    con = sqlite3.connect(f"file:{bands_db}?mode=ro&immutable=1", uri=True)
-    bands = {i: (d, s, b) for i, d, s, b in con.execute(
-        "SELECT idx, dtype, shape, data FROM arrays WHERE name = 'onset_strength_bands'")}
+def run_bands(db: Path) -> tuple[dict, dict]:
+    """onset_strength_bands of an extract_reference.py run database.
+
+    Returns ({idx: path}, {idx: (dtype, shape, data)}) with idx = tracks.playlist_idx + 1.
+    """
+    if not db.is_file():
+        sys.exit(f"{db} is missing: a revision run takes its onset_strength_bands from its run database")
+    wal = db.with_name(db.name + "-wal")
+    if wal.is_file() and wal.stat().st_size > 0:
+        sys.exit(f"{wal} is not empty: the run database has writes that are not checkpointed yet, and the "
+                 "read-only (immutable) open would skip them. Let extract_reference.py finish, or rerun it "
+                 "to close the database cleanly, then retry.")
+    # immutable: a read-only open of a WAL database would leave -wal/-shm files
+    con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+    found = con.execute(
+        "SELECT t.playlist_idx + 1, t.path, a.dtype, a.shape, a.data FROM arrays a "
+        "JOIN tracks t ON t.path = a.path WHERE a.name = 'onset_strength_bands'").fetchall()
     con.close()
+    paths = {i: p for i, p, *_ in found}
+    if len(paths) != len(found):
+        sys.exit(f"{db}: several tracks share a playlist_idx; remove the replaced tracks' rows and rerun")
+    return paths, {i: (d, s, b) for i, _, d, s, b in found}
+
+
+def load_sonara(set_name: str, folder: Path, run_name: str | None = None):
+    """Sonara tables of a set from json_<set>/, or of a revision run from json_<run_name>/."""
+    jdir = folder / f"json_{run_name or set_name}"
+    meta = read_meta(jdir)
+    if run_name is None:
+        bands_db = folder / f"sonara-{set_name}.sqlite"
+        if not bands_db.is_file():
+            sys.exit(f"{bands_db} is missing: it is the only copy of onset_strength_bands")
+        con = sqlite3.connect(f"file:{bands_db}?mode=ro&immutable=1", uri=True)
+        bands = {i: (d, s, b) for i, d, s, b in con.execute(
+            "SELECT idx, dtype, shape, data FROM arrays WHERE name = 'onset_strength_bands'")}
+        con.close()
+        band_paths = None
+    else:
+        if not any(jdir.glob("[0-9][0-9][0-9][0-9] - *.json")):
+            sys.exit(f"{jdir} holds no per-track JSON: run extract_reference.py --name {run_name} first")
+        bands_db = folder / f"run-{run_name}.sqlite"
+        band_paths, bands = run_bands(bands_db)
     run, rows, arrays = None, [], {}
     for idx, t in track_files(jdir):
         prov = t.get("provenance") or {}
-        if run is None:
-            run = {"set": set_name, "program": "Sonara", **{k: meta.get(k) for k in SONARA_RUN_KEYS},
+        if run is None and t.get("status") == "ok":
+            run = {"set": set_name, **({"run_name": run_name} if run_name else {}), "program": "Sonara",
+                   **{k: meta.get(k) for k in SONARA_RUN_KEYS},
                    "schema_version": prov.get("schema_version"), "mode": prov.get("mode"),
                    "sample_rate": prov.get("sample_rate"), "hop_length": prov.get("hop_length"),
                    "bpm_min": prov.get("bpm_min"), "bpm_max": prov.get("bpm_max"),
@@ -123,11 +170,22 @@ def load_sonara(set_name: str, folder: Path):
         for k in ("rhythmic_regularity_candidates", "meter_rhythmic_regularity_candidates"):
             row[k] = None if t.get(k) is None else json.dumps(t[k], ensure_ascii=False)
         rows.append(row)
+        if t.get("status") != "ok":
+            continue        # a failed track keeps its row; it has no arrays and needs no onset bands
         arrays[idx] = {n: encode(t[n], d) for n, d in SONARA_ARRAYS.items() if isinstance(t.get(n), list)}
         if idx not in bands:
-            sys.exit(f"no onset_strength_bands for {set_name} idx {idx} in {bands_db}")
+            sys.exit(f"no onset_strength_bands for {run_name or set_name} idx {idx} in {bands_db}")
+        if band_paths is not None and band_paths[idx] != t["path"]:
+            sys.exit(f"{run_name} idx {idx}: {bands_db.name} holds {band_paths[idx]}, the JSON {t['path']}")
         arrays[idx]["onset_strength_bands"] = bands[idx]
-    run["source"] = f"{jdir.name}/ + onset_strength_bands from the previous {bands_db.name}"
+    if run_name is None:
+        run["source"] = f"{jdir.name}/ + onset_strength_bands from the previous {bands_db.name}"
+    else:
+        orphans = sorted(set(bands) - set(arrays))
+        if orphans:
+            sys.exit(f"{bands_db} has onset_strength_bands for idx {orphans[:10]} "
+                     f"({len(orphans)} tracks) with no JSON in {jdir}")
+        run["source"] = f"{jdir.name}/ + onset_strength_bands from {bands_db.name}"
     return run, rows, arrays
 
 
@@ -501,26 +559,52 @@ def write_xlsx(path: Path, set_name: str, spec: dict, run: dict, rows: list[dict
     wb.save(path)
 
 
+def build(key: str, set_name: str, out: Path, run_name: str | None = None) -> None:
+    """Load one program and set (or one Sonara revision run) and write its sqlite and xlsx into `out`."""
+    spec = PROGRAMS[key]
+    name = run_name or set_name
+    if run_name is None:
+        run, rows, arrays = spec["load"](set_name, spec["dir"])
+    else:
+        run, rows, arrays = load_sonara(set_name, spec["dir"], run_name)
+    idxs = [r["idx"] for r in rows]
+    if sorted(idxs) != list(range(1, len(idxs) + 1)):
+        sys.exit(f"{key} {name}: track numbers are not 1..{len(idxs)}")
+    db = out / f"{spec['prefix']}-{name}.sqlite"
+    xlsx = out / f"{spec['prefix']}-{name}.xlsx"
+    write_sqlite(db, spec, run, rows, arrays)
+    write_xlsx(xlsx, set_name, spec, run, rows)
+    print(f"{key} {name}: {len(rows)} tracks -> {db.name} {db.stat().st_size / 1e6:.1f} MB, "
+          f"{xlsx.name} {xlsx.stat().st_size / 1e6:.2f} MB")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--only", choices=tuple(PROGRAMS), action="append")
+    ap.add_argument("--sonara-run", metavar="NAME",
+                    help="build only Sonara from a revision run: json_NAME/ + run-NAME.sqlite -> "
+                         "sonara-NAME.{sqlite,xlsx}; NAME = broken_<rev> or straight_<rev>")
     ap.add_argument("--out-dir", help="write here instead of the program folders (for checks)")
     args = ap.parse_args()
+    if args.sonara_run is not None:
+        name = args.sonara_run
+        if name in SETS:
+            ap.error(f"--sonara-run {name}: the bare set name would overwrite the baseline sonara-{name}.sqlite")
+        m = RUN_NAME.fullmatch(name)
+        if not m:
+            ap.error(f"--sonara-run {name!r}: expected broken_<rev> or straight_<rev>, "
+                     "<rev> made of letters, digits, '.', '_' and '-'")
+        if any(k != "sonara" for k in args.only or ()):
+            ap.error("--sonara-run builds only Sonara; it cannot be combined with --only for another program")
+        out = Path(args.out_dir) if args.out_dir else SONARA["dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        build("sonara", m.group(1), out, name)
+        return 0
     for key in args.only or PROGRAMS:
-        spec = PROGRAMS[key]
-        out = Path(args.out_dir) if args.out_dir else spec["dir"]
+        out = Path(args.out_dir) if args.out_dir else PROGRAMS[key]["dir"]
         out.mkdir(parents=True, exist_ok=True)
         for s in SETS:
-            run, rows, arrays = spec["load"](s, spec["dir"])
-            idxs = [r["idx"] for r in rows]
-            if sorted(idxs) != list(range(1, len(idxs) + 1)):
-                sys.exit(f"{key} {s}: track numbers are not 1..{len(idxs)}")
-            db = out / f"{spec['prefix']}-{s}.sqlite"
-            xlsx = out / f"{spec['prefix']}-{s}.xlsx"
-            write_sqlite(db, spec, run, rows, arrays)
-            write_xlsx(xlsx, s, spec, run, rows)
-            print(f"{key} {s}: {len(rows)} tracks -> {db.name} {db.stat().st_size / 1e6:.1f} MB, "
-                  f"{xlsx.name} {xlsx.stat().st_size / 1e6:.2f} MB")
+            build(key, s, out)
     return 0
 
 

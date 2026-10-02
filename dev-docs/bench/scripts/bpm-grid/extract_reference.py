@@ -18,7 +18,10 @@ Run (resumable: already analysed tracks are skipped):
         "<repo>\\dev-docs\\bench\\scripts\\bpm-grid\\extract_reference.py"
 
 Options: --playlist, --name, --workers, --threads, --limit, --retry-failed,
---export-json (only rebuild the JSON from the database).
+--export-json (only rebuild the JSON from the database), --revision (source
+revision of the build, recorded as sonara_repo_head), --wheel (wheel whose
+SHA-256 is recorded; default: README machine paths sonara_wheel). The path and
+SHA-256 of the loaded native module are always recorded, whatever the flags say.
 """
 
 from __future__ import annotations
@@ -314,6 +317,12 @@ def main() -> int:
                     help="re-analyse tracks stored as error/missing")
     ap.add_argument("--export-json", action="store_true",
                     help="only rebuild the per-track JSON files from the existing database")
+    ap.add_argument("--revision",
+                    help="source revision the analysing build was made from, recorded as "
+                         "sonara_repo_head (default: recorded as unknown, with a warning)")
+    ap.add_argument("--wheel", default=str(WHEEL) if WHEEL else None,
+                    help="wheel the analysing environment was installed from; its SHA-256 "
+                         "is recorded (default: README machine paths sonara_wheel)")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -338,6 +347,15 @@ def main() -> int:
     # Children inherit this; it must be set before sonara (rayon) loads.
     os.environ["RAYON_NUM_THREADS"] = str(args.threads)
     import sonara
+    import sonara._sonara as sonara_native
+
+    # Provenance: the native module that actually runs is pinned by its hash.
+    native_path = Path(sonara_native.__file__)
+    wheel = Path(args.wheel) if args.wheel else None
+    revision = args.revision
+    if not revision:
+        revision = "unknown (no --revision)"
+        print(f"WARNING: no --revision given; sonara_repo_head is recorded as '{revision}'.")
 
     playlist_path = Path(args.playlist)
     paths = read_playlist(playlist_path)
@@ -355,9 +373,11 @@ def main() -> int:
         "preset": PRESET,
         "sonara_version": sonara.__version__,
         "sonara_module": sonara.__file__,
-        "wheel": str(WHEEL),
-        "wheel_sha256": sha256(WHEEL),
-        "sonara_repo_head": "459bd3c (v0.3.7-meteorburn.1)",
+        "sonara_native_module": str(native_path),
+        "sonara_module_sha256": sha256(native_path),
+        "wheel": str(wheel) if wheel else None,
+        "wheel_sha256": sha256(wheel) if wheel else None,
+        "sonara_repo_head": revision,
         "playlist": str(playlist_path),
         "playlist_sha256": sha256(playlist_path),
         "playlist_tracks": len(paths),
@@ -382,6 +402,9 @@ def main() -> int:
 
     print(f"SONARA {sonara.__version__}  preset '{PRESET['name']}'  "
           f"sr={PRESET['sr']}  bpm={PRESET['bpm_min']}..{PRESET['bpm_max']}")
+    print(f"revision : {revision}")
+    print(f"module   : {native_path}  (sha256 {meta['sonara_module_sha256']})")
+    print(f"wheel    : {meta['wheel']}  (sha256 {meta['wheel_sha256']})")
     print(f"playlist : {playlist_path}  ({len(paths)} tracks)")
     print(f"database : {db_path}")
     print(f"json     : {json_dir}  (one file per track)")
