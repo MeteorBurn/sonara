@@ -802,8 +802,18 @@ fn best_supported_metrical_candidate(
         .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
 }
 
+/// Relative tolerance at the range edges: a tempo within 0.1% outside a bound
+/// stays at that bound's octave (179.994 and 180.001 both stay near 180 in a
+/// 70–180 range) instead of jumping a whole octave on measurement noise.
+const RANGE_EDGE_TOLERANCE: Float = 0.001;
+
 /// Deterministically double/halve a tempo into an optional user-supplied BPM
-/// range. Both bounds must be supplied together and span at least one octave.
+/// range. Both bounds must be supplied together and span about one octave or
+/// more: `bpm_max + 1 >= 2 * bpm_min`, so Rekordbox's one-octave ranges
+/// `[a, 2a - 1]` (e.g. 68–135) are accepted. The edges are inclusive within
+/// [`RANGE_EDGE_TOLERANCE`]. A tempo halved from above `bpm_max` can land in
+/// the small gap below `bpm_min` of a one-octave range; it stays there, inside
+/// `(bpm_max / 2, bpm_max]`, the window Rekordbox itself shows.
 fn align_tempo_to_bpm_range(
     mut tempo: Float,
     bpm_min: Option<Float>,
@@ -826,20 +836,20 @@ fn align_tempo_to_bpm_range(
             reason: "expected finite values with 0 < bpm_min < bpm_max".into(),
         });
     }
-    if max_bpm < min_bpm * 2.0 {
+    if max_bpm + 1.0 < min_bpm * 2.0 {
         return Err(SonaraError::InvalidParameter {
             param: "bpm_range",
-            reason: "bpm_max must be at least double bpm_min for octave folding".into(),
+            reason: "bpm_max + 1 must be at least double bpm_min for octave folding".into(),
         });
     }
     if !tempo.is_finite() || tempo <= 0.0 {
         return Ok(tempo);
     }
 
-    while tempo < min_bpm {
+    while tempo < min_bpm * (1.0 - RANGE_EDGE_TOLERANCE) {
         tempo *= 2.0;
     }
-    while tempo > max_bpm {
+    while tempo > max_bpm * (1.0 + RANGE_EDGE_TOLERANCE) {
         tempo /= 2.0;
     }
     Ok(tempo)
@@ -1258,6 +1268,29 @@ mod tests {
         assert!(align_tempo_to_bpm_range(120.0, None, Some(192.0)).is_err());
         assert!(align_tempo_to_bpm_range(120.0, Some(192.0), Some(79.0)).is_err());
         assert!(align_tempo_to_bpm_range(120.0, Some(100.0), Some(150.0)).is_err());
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_accepts_one_octave_ranges() {
+        // Rekordbox's one-octave presets [a, 2a - 1].
+        for a in [48.0, 58.0, 68.0, 78.0, 88.0, 98.0, 108.0, 118.0, 128.0] {
+            let tempo = align_tempo_to_bpm_range(150.0, Some(a), Some(2.0 * a - 1.0)).unwrap();
+            assert!(tempo > (2.0 * a - 1.0) / 2.0 && tempo <= 2.0 * a - 1.0, "{a}: {tempo}");
+        }
+        // Halved from above the top it may land just below a, inside (max/2, max].
+        let tempo = align_tempo_to_bpm_range(135.5, Some(68.0), Some(135.0)).unwrap();
+        assert!((tempo - 67.75).abs() < 1e-4, "{tempo}");
+    }
+
+    #[test]
+    fn test_align_tempo_to_bpm_range_edges_are_inclusive_within_tolerance() {
+        let near = |t: Float| align_tempo_to_bpm_range(t, Some(70.0), Some(180.0)).unwrap();
+        assert!((near(179.994) - 179.994).abs() < 1e-3);
+        assert!((near(180.001) - 180.001).abs() < 1e-3);
+        assert!((near(69.95) - 69.95).abs() < 1e-3);
+        // Beyond the tolerance the octave still folds.
+        assert!((near(181.0) - 90.5).abs() < 1e-3);
+        assert!((near(69.0) - 138.0).abs() < 1e-3);
     }
 
     #[test]
