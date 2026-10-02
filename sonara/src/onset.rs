@@ -15,6 +15,25 @@ use crate::util::utils;
 const DEFAULT_ONSET_BAND_SPLITS_HZ: [Float; 4] = [200.0, 800.0, 3200.0, 8000.0];
 const DEFAULT_ONSET_BAND_N_MELS: usize = 128;
 
+/// Upper frequency of the beat-tracking envelope: the beat tracker follows the
+/// flux of the mel bins centred below it (the three lowest default onset
+/// bands: kick, bass and snare body), not the off-beat hats above it.
+pub(crate) const BEAT_ENVELOPE_MAX_HZ: Float = 3200.0;
+
+/// Number of mel bins whose filter centre lies below `max_hz`, for a slaney
+/// mel filterbank spanning `0..sr / 2`. Centres ascend, so these are the
+/// leading bins; the count follows the onset-band rule (a band ends at the
+/// first centre at or above its upper edge).
+pub(crate) fn mel_bins_below(sr: u32, n_mels: usize, max_hz: Float) -> usize {
+    let nyquist = sr as Float / 2.0;
+    let mel_points = crate::core::convert::mel_frequencies(n_mels + 2, 0.0, nyquist, false);
+    mel_points
+        .slice(ndarray::s![1..n_mels + 1])
+        .iter()
+        .position(|&frequency| frequency >= max_hz)
+        .unwrap_or(n_mels)
+}
+
 /// Frequency-banded onset envelopes and their Hz boundaries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnsetBands {
@@ -726,6 +745,13 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn beat_envelope_spans_the_mel_bins_below_3200_hz() {
+        // 22050 Hz, 128 slaney mels: the three lowest default onset bands,
+        // 7 + 24 + 51 bins.
+        assert_eq!(mel_bins_below(22050, 128, BEAT_ENVELOPE_MAX_HZ), 82);
     }
 
     #[test]

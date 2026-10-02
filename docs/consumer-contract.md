@@ -99,15 +99,20 @@ Downstreams pin a compatible pre-1.0 sonara release and key stored records on
 fingerprint version where those are consumed). sonagram's current floor is
 `sonara >= 0.2.2`. Heuristic-semantics changes bump `ANALYSIS_SCHEMA_VERSION`.
 
-### Schema 7: BPM from the beat grid (2026-10-02)
+### Schema 7: beats and BPM from the beat grid (2026-10-02)
 
 `bpm` and `bpm_raw` keep their meaning and units: the tempo in BPM, folded into
 `bpm_min..bpm_max` for `bpm` and before folding for `bpm_raw`. They are now the
 period of the tracked beats instead of the autocorrelation peak, so they are
 more precise and stored schema-6 values differ slightly. The autocorrelation
 estimate remains the fallback when fewer than 17 beats are tracked or the beat
-period deviates from it by more than 5%. `beats` and `bpm_candidates` are
-unchanged; the `bpm_confidence` formula is unchanged, its value follows `bpm`.
+period deviates from it by more than 5%. `beats` keep their meaning, but they
+are now tracked on the onset envelope of the mel bins below 3.2 kHz, so they
+follow the kick and snare rather than off-beat hi-hats; stored schema-6 beats,
+and the fields derived from them, can differ. The tempo estimate and
+`bpm_candidates` still come from the broadband envelope and are unchanged. The
+`bpm_confidence` formula is unchanged; its value follows `bpm` and the beat
+count.
 
 ### Per-feature freshness
 

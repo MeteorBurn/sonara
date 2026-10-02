@@ -131,6 +131,9 @@ pub fn beat_track_with_bpm_range(
 /// stays as the fallback when fewer than 17 beats are tracked or the beat
 /// period deviates from it by more than 5%. The beats and the candidates do
 /// not depend on this step.
+///
+/// The beats are tracked on the same broadband onset envelope; see
+/// [`beat_track_detailed_with_dp_envelope`] for a separate tracking envelope.
 #[allow(clippy::too_many_arguments)]
 pub fn beat_track_detailed(
     y: Option<ArrayView1<Float>>,
@@ -142,6 +145,42 @@ pub fn beat_track_detailed(
     trim: bool,
     bpm_min: Option<Float>,
     bpm_max: Option<Float>,
+) -> Result<(TempoEstimate, Vec<usize>)> {
+    beat_track_detailed_with_dp_envelope(
+        y,
+        onset_envelope,
+        sr,
+        hop_length,
+        start_bpm,
+        tightness,
+        trim,
+        bpm_min,
+        bpm_max,
+        None,
+    )
+}
+
+/// Like [`beat_track_detailed`], with a separate envelope for the beat tracker.
+///
+/// The tempo, its ACF candidates and the tracker's integer beat period come
+/// from the broadband onset envelope (`onset_envelope`, or computed from `y`).
+/// The dynamic-programming tracker (local score, DP and trimming) runs on
+/// `dp_envelope`, and the beat-period consensus then measures the tempo on
+/// those beats. `dp_envelope = None` tracks on the broadband envelope, which is
+/// [`beat_track_detailed`]. Both envelopes share one frame grid: a
+/// `dp_envelope` of another length is an error.
+#[allow(clippy::too_many_arguments)]
+pub fn beat_track_detailed_with_dp_envelope(
+    y: Option<ArrayView1<Float>>,
+    onset_envelope: Option<ArrayView1<Float>>,
+    sr: u32,
+    hop_length: usize,
+    start_bpm: Float,
+    tightness: Float,
+    trim: bool,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+    dp_envelope: Option<ArrayView1<Float>>,
 ) -> Result<(TempoEstimate, Vec<usize>)> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
@@ -157,6 +196,18 @@ pub fn beat_track_detailed(
             onset::onset_strength(y, sr, hop_length)?
         }
     };
+    if let Some(dp) = dp_envelope {
+        if dp.len() != oenv.len() {
+            return Err(SonaraError::InvalidParameter {
+                param: "dp_envelope",
+                reason: format!(
+                    "length {} differs from the onset envelope length {}",
+                    dp.len(),
+                    oenv.len()
+                ),
+            });
+        }
+    }
 
     if oenv.len() < 4 {
         return Ok((TempoEstimate::fallback(start_bpm), vec![]));
@@ -185,18 +236,20 @@ pub fn beat_track_detailed(
         return Ok((estimate, vec![]));
     }
 
-    // Normalize onset envelope
-    let mean = oenv.iter().sum::<Float>() / oenv.len() as Float;
-    let std =
-        (oenv.iter().map(|&v| (v - mean).powi(2)).sum::<Float>() / oenv.len() as Float).sqrt();
-    let oenv_norm = if std > 0.0 {
-        oenv.mapv(|v| (v - mean) / (std + 1e-10))
+    // Normalize the tracking envelope: the DP envelope, else the broadband one
+    let track_env = dp_envelope.unwrap_or_else(|| oenv.view());
+    let mean = track_env.iter().sum::<Float>() / track_env.len() as Float;
+    let std = (track_env.iter().map(|&v| (v - mean).powi(2)).sum::<Float>()
+        / track_env.len() as Float)
+        .sqrt();
+    let track_norm = if std > 0.0 {
+        track_env.mapv(|v| (v - mean) / (std + 1e-10))
     } else {
-        oenv.clone()
+        track_env.to_owned()
     };
 
     // Compute local score via Gaussian-windowed autocorrelation
-    let local_score = beat_local_score(oenv_norm.view(), frames_per_beat);
+    let local_score = beat_local_score(track_norm.view(), frames_per_beat);
 
     // Run DP beat tracker
     let beats = beat_track_dp(local_score.view(), frames_per_beat, tightness);
@@ -978,6 +1031,31 @@ mod tests {
             estimate.tempo
         );
         assert_eq!(estimate.tempo.to_bits(), estimate.tempo_raw.to_bits());
+    }
+
+    #[test]
+    fn test_dp_envelope_must_match_the_onset_envelope_length() {
+        let onset_envelope = Array1::<Float>::zeros(128);
+        let dp_envelope = Array1::<Float>::zeros(127);
+        let result = beat_track_detailed_with_dp_envelope(
+            None,
+            Some(onset_envelope.view()),
+            22050,
+            512,
+            120.0,
+            100.0,
+            true,
+            None,
+            None,
+            Some(dp_envelope.view()),
+        );
+        assert!(matches!(
+            result,
+            Err(SonaraError::InvalidParameter {
+                param: "dp_envelope",
+                ..
+            })
+        ));
     }
 
     #[test]

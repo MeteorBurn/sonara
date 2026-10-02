@@ -745,8 +745,11 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 ///
 /// v7 (2026-10-02): `bpm` and `bpm_raw` are the period of the tracked beats
 /// (a hierarchical consensus of beat pairs) instead of the fractional ACF
-/// peak, which remains the fallback. Same meaning and units, more precise;
-/// stored values differ slightly. `beats` and `bpm_candidates` are unchanged.
+/// peak, which remains the fallback. The beats are tracked on the onset
+/// envelope of the mel bins below 3.2 kHz; the tempo estimate and
+/// `bpm_candidates` still come from the broadband envelope. Same meaning and
+/// units; stored `bpm`, `bpm_raw` and `beats`, and what derives from them,
+/// differ.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 7;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
@@ -2035,22 +2038,35 @@ fn analyze_signal_inner(
 
     let s_db = spectrum::power_to_db(mel_spec.view(), 1.0, 1e-10, Some(80.0));
     let lag = 1usize;
+    // The beat tracker follows the mel bins below 3.2 kHz (the leading bins);
+    // tempo and its candidates keep the broadband envelope.
+    let n_beat_mels =
+        crate::onset::mel_bins_below(sr, n_mels, crate::onset::BEAT_ENVELOPE_MAX_HZ).max(1);
 
     let out_frames = if n_frames > lag { n_frames - lag } else { 0 };
     let mut onset_env = Array1::<Float>::zeros(out_frames);
+    let mut beat_env = Array1::<Float>::zeros(out_frames);
     for t in 0..out_frames {
         let mut sum = 0.0;
+        let mut beat_sum = 0.0;
         for m in 0..n_mels {
-            sum += (s_db[(m, t + lag)] - s_db[(m, t)]).max(0.0);
+            let flux = (s_db[(m, t + lag)] - s_db[(m, t)]).max(0.0);
+            sum += flux;
+            if m < n_beat_mels {
+                beat_sum += flux;
+            }
         }
         onset_env[t] = sum / n_mels as Float;
+        beat_env[t] = beat_sum / n_beat_mels as Float;
     }
 
     let pad_left = lag + n_fft / (2 * hop_length);
     let total_oenv_frames = out_frames + pad_left;
     let mut oenv_padded = Array1::<Float>::zeros(total_oenv_frames);
+    let mut beat_env_padded = Array1::<Float>::zeros(total_oenv_frames);
     for t in 0..out_frames {
         oenv_padded[pad_left + t] = onset_env[t];
+        beat_env_padded[pad_left + t] = beat_env[t];
     }
 
     let onset_bands = if config.wants("onset_bands") {
@@ -2080,7 +2096,7 @@ fn analyze_signal_inner(
     // BEAT TRACKING + ONSET DETECTION
     // ================================================================
 
-    let (tempo_estimate, beats) = crate::beat::beat_track_detailed(
+    let (tempo_estimate, beats) = crate::beat::beat_track_detailed_with_dp_envelope(
         None,
         Some(oenv_padded.view()),
         sr,
@@ -2090,6 +2106,7 @@ fn analyze_signal_inner(
         true,
         config.bpm_min,
         config.bpm_max,
+        Some(beat_env_padded.view()),
     )?;
     let bpm = tempo_estimate.tempo;
     let bpm_raw = tempo_estimate.tempo_raw;
