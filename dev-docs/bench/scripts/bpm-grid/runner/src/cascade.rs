@@ -22,8 +22,20 @@ fn list<T: ToString>(v: &[T]) -> String {
     v.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
 }
 
+/// Aggression fields exist only in a build with Sonara's `aggression` feature.
+#[cfg(feature = "aggression")]
+fn aggression(t: &TrackAnalysis) -> (Option<f32>, Option<f32>) {
+    (t.aggression_score, t.aggression_rhythm)
+}
+
+#[cfg(not(feature = "aggression"))]
+fn aggression(_: &TrackAnalysis) -> (Option<f32>, Option<f32>) {
+    (None, None)
+}
+
 pub fn row(out: &mut String, idx: usize, t: &TrackAnalysis) {
     let chords: Vec<f32> = t.chord_events.as_deref().unwrap_or(&[]).iter().map(|c| c.start_sec).collect();
+    let (aggression_score, aggression_rhythm) = aggression(t);
     let _ = writeln!(
         out,
         "{idx}\tok\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -38,8 +50,8 @@ pub fn row(out: &mut String, idx: usize, t: &TrackAnalysis) {
         opt(t.mood_aggressive),
         opt(t.mood_relaxed),
         opt(t.mood_sad),
-        opt(t.aggression_score),
-        opt(t.aggression_rhythm),
+        opt(aggression_score),
+        opt(aggression_rhythm),
         list(t.downbeats.as_deref().unwrap_or(&[])),
         list(&chords),
         list(t.tempo_curve.as_deref().unwrap_or(&[])),
