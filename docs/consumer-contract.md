@@ -106,7 +106,17 @@ fingerprint version where those are consumed). sonagram's current floor is
 period of the tracked beats instead of the autocorrelation peak, so they are
 more precise and stored schema-6 values differ slightly. The autocorrelation
 estimate remains the fallback when fewer than 17 beats are tracked or the beat
-period deviates from it by more than 5%. `beats` keep their meaning, but they
+period deviates from it by more than 5%. A steady track, whose tracked beats
+stay on one constant grid over the whole track and also fit the nearest integer
+tempo, reports that integer (`bpm_raw` keeps the same octave relation).
+The tempo level is re-checked: the selected autocorrelation level and up to
+four other distinct levels are tracked again, and another level replaces the
+selected one only when its beats agree with the onsets clearly better (beat-pair
+consensus plus the tracker's local score). The level is chosen within 79–192 BPM
+whatever `bpm_min`/`bpm_max` are, which only fold the reported value, so the
+tempo ignoring octave no longer depends on the range. On a switched track,
+`bpm`, `bpm_raw` and `beats` follow the new level; `bpm_candidates` do not change.
+`beats` keep their meaning, but they
 are now tracked on the onset envelope of the mel bins below 3.2 kHz, so they
 follow the kick and snare rather than off-beat hi-hats; stored schema-6 beats,
 and the fields derived from them, can differ. The tempo estimate and

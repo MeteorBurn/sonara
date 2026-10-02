@@ -785,14 +785,15 @@ mod tests {
         // transforms may differ by a few ULPs across platform math libraries.
         // Score and rhythm were re-frozen for schema 7 because the lane's BPM
         // is now the beat-period consensus, and again because the lane's
-        // beats follow the onset envelope below 3.2 kHz.
-        assert_eq!(reference.score.unwrap().to_bits(), 0x3ee8_ce88);
+        // beats follow the onset envelope below 3.2 kHz, and again because the
+        // tempo-level re-check switches this fixture to another level.
+        assert_eq!(reference.score.unwrap().to_bits(), 0x3ee6_aa9c);
         assert_eq!(reference.confidence.to_bits(), 0x3f7a_f022);
         for (name, actual, expected) in [
             ("forcefulness", reference.forcefulness, 0x3f04_a1e1),
             ("harshness", reference.harshness, 0x3d0e_c9bd),
             ("tension", reference.tension, 0x3d4a_50db),
-            ("rhythm", reference.rhythm, 0x3f35_786d),
+            ("rhythm", reference.rhythm, 0x3f22_e9e5),
         ] {
             assert!(
                 actual.to_bits().abs_diff(expected) <= 8,
