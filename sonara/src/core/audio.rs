@@ -285,6 +285,43 @@ fn probe_symphonia_without_metadata<'s>(
     )
 }
 
+/// Move `mss` past the ID3v2 tags at its start (taggers may stack several) without reading
+/// their frames, so the tag-less probe cannot sync on tag bytes such as a UTF-16 BOM `FF FE`,
+/// which is also an MPEG Layer I sync word. Stays at the start when no tag is found or a tag
+/// claims to run past the end of the stream.
+fn skip_leading_id3v2(mss: &mut symphonia::core::io::MediaSourceStream<'_>) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let end = symphonia::core::io::MediaSource::byte_len(mss);
+    let mut offset = mss.stream_position()?;
+    let mut header = [0_u8; 10];
+    loop {
+        if mss.read_exact(&mut header).is_err() {
+            break;
+        }
+        let synchsafe = header[6..10].iter().all(|b| b & 0x80 == 0);
+        if &header[..3] != b"ID3"
+            || !(2..=4).contains(&header[3])
+            || header[4] == 0xFF
+            || !synchsafe
+        {
+            break;
+        }
+        let size = header[6..10]
+            .iter()
+            .fold(0_u64, |acc, &b| (acc << 7) | u64::from(b));
+        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+        let next = offset + 10 + size + footer;
+        if end.is_some_and(|end| next > end) {
+            break;
+        }
+        offset = next;
+        mss.seek(SeekFrom::Start(offset))?;
+    }
+    mss.seek(SeekFrom::Start(offset))?;
+    Ok(())
+}
+
 /// Load audio file using symphonia (supports mp3, flac, ogg, etc.).
 ///
 /// When `want_tags` is `true`, container/stream metadata tags are also collected
@@ -301,7 +338,11 @@ fn load_symphonia(
 
     let file = std::fs::File::open(path)
         .map_err(|e| SonaraError::AudioFile(format!("{}: {}", path.display(), e)))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut mss = MediaSourceStream::new(Box::new(file), Default::default());
+    if !want_tags {
+        skip_leading_id3v2(&mut mss)
+            .map_err(|e| SonaraError::AudioFile(format!("{}: {}", path.display(), e)))?;
+    }
 
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1532,6 +1573,44 @@ data\x02\x00\x00\x00\x34\x12"[..];
         assert_eq!(tags.artist.as_deref(), Some("Test Artist"));
         assert_eq!(tags.album.as_deref(), Some("Test Album"));
         assert_eq!(tags.year, Some(2024));
+    }
+
+    #[test]
+    fn test_load_skips_stacked_id3v2_tags_with_utf16_text() {
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.mp3"
+        ));
+        let original = std::fs::read(fixture).unwrap();
+
+        // An extra ID3v2.3 tag in front of the fixture's own, as some taggers leave. Its
+        // UTF-16 text starts every character with the BOM `FF FE`, which is also an MPEG
+        // Layer I sync word: a probe that does not skip the tag syncs on it.
+        let mut value = Vec::new();
+        for _ in 0..2_000 {
+            value.extend_from_slice(&[0xFF, 0xFE, b'T', 0x00]);
+        }
+        let mut frame_body = vec![0x01, 0xFF, 0xFE, b'D', 0x00, 0x00, 0x00];
+        frame_body.extend_from_slice(&value);
+        let mut frames = b"TXXX".to_vec();
+        frames.extend_from_slice(&(frame_body.len() as u32).to_be_bytes());
+        frames.extend_from_slice(&[0, 0]);
+        frames.extend_from_slice(&frame_body);
+        let size = frames.len() as u32;
+        let mut bytes = b"ID3\x03\x00\x00".to_vec();
+        bytes.extend((0..4).rev().map(|i| ((size >> (7 * i)) & 0x7F) as u8));
+        bytes.extend_from_slice(&frames);
+        bytes.extend_from_slice(&original);
+
+        let dir = std::env::temp_dir().join("sonara_stacked_id3v2_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stacked-id3v2.mp3");
+        std::fs::write(&path, bytes).unwrap();
+
+        let (expected, expected_sr) = load(fixture, 22_050, true, 0.0, 0.0).unwrap();
+        let (y, sr) = load(&path, 22_050, true, 0.0, 0.0).unwrap();
+        assert_eq!(sr, expected_sr);
+        assert_eq!(y, expected);
     }
 
     // Fixtures for decode-recovery tests (both fully synthetic):
