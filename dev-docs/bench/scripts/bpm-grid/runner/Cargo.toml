@@ -20,3 +20,7 @@ opt-level = 3
 lto = false
 codegen-units = 16
 incremental = true
+
+[features]
+# The Python wheel always enables aggression; the cascade run needs its fields.
+aggression = ["sonara/aggression"]
