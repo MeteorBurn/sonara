@@ -4,9 +4,11 @@
 //! cargo run --release -- <playlist.txt> <out.tsv> [--idx idx.txt] [--bpm-min 79 --bpm-max 192 | --no-range] [--sr 22050]
 //! ```
 //! The playlist line number is the 1-based `idx`; `--idx` limits the run to the listed idx
-//! (one per line); `--no-range` passes no BPM range; `--cascade` writes the BPM-dependent
-//! fields instead (build with `--features aggression`). Output: one TSV row per track with bpm, bpm_raw, confidence, the five
-//! candidates, beats and downbeats (frames, hop 512).
+//! (one per line); `--no-range` passes no BPM range; `--regularity` adds the
+//! `rhythmic_regularity` score, label and confidence as three trailing columns; `--cascade`
+//! writes the BPM-dependent fields instead (build with `--features aggression`). Output: one
+//! TSV row per track with bpm, bpm_raw, confidence, the five candidates, beats and downbeats
+//! (frames, hop 512).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -19,7 +21,7 @@ mod cascade;
 fn main() {
     let mut pos = Vec::new();
     let (mut idx_file, mut lo, mut hi, mut sr) = (None, 79.0f32, 192.0f32, 22050u32);
-    let (mut cascade_mode, mut no_range) = (false, false);
+    let (mut cascade_mode, mut no_range, mut regularity) = (false, false, false);
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -29,6 +31,7 @@ fn main() {
             "--sr" => sr = it.next().unwrap().parse().unwrap(),
             "--cascade" => cascade_mode = true,
             "--no-range" => no_range = true,
+            "--regularity" => regularity = true,
             _ => pos.push(a),
         }
     }
@@ -44,13 +47,15 @@ fn main() {
         .filter(|(i, l)| !l.is_empty() && wanted.as_ref().map_or(true, |w| w.contains(i)))
         .collect();
     let paths: Vec<&Path> = lines.iter().map(|(_, l)| Path::new(l.as_str())).collect();
+    let features: &[&str] = if cascade_mode {
+        cascade::FEATURES
+    } else if regularity {
+        &["bpm", "beats", "beatgrid", "rhythmic_regularity"]
+    } else {
+        &["bpm", "beats", "beatgrid"]
+    };
     let config = analyze::AnalysisConfig {
-        features: Some(
-            if cascade_mode { cascade::FEATURES } else { &["bpm", "beats", "beatgrid"][..] }
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        ),
+        features: Some(features.iter().map(|s| s.to_string()).collect()),
         bpm_min: (!no_range).then_some(lo),
         bpm_max: (!no_range).then_some(hi),
         ..Default::default()
@@ -59,18 +64,27 @@ fn main() {
     let results = analyze::analyze_batch(&paths, sr, &config);
     let mut tsv = String::from(if cascade_mode {
         cascade::HEADER
+    } else if regularity {
+        "idx\tstatus\tbpm\tbpm_raw\tconf\tcands\tbeats\tdownbeats\tregularity\tregularity_label\tregularity_conf\n"
     } else {
         "idx\tstatus\tbpm\tbpm_raw\tconf\tcands\tbeats\tdownbeats\n"
     });
     let join = |v: &[usize]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+    let opt = |v: Option<f32>| v.map(|x| x.to_string()).unwrap_or_default();
     for ((idx, _), r) in lines.iter().zip(results.iter()) {
         match r {
             Ok(t) if cascade_mode => cascade::row(&mut tsv, *idx, t),
             Ok(t) => {
                 let cands: Vec<String> = t.bpm_candidates.iter().map(|(b, s)| format!("{b}:{s}")).collect();
                 let down = t.downbeats.as_deref().map(join).unwrap_or_default();
-                let _ = writeln!(tsv, "{idx}\tok\t{}\t{}\t{}\t{}\t{}\t{down}", t.bpm, t.bpm_raw,
+                let _ = write!(tsv, "{idx}\tok\t{}\t{}\t{}\t{}\t{}\t{down}", t.bpm, t.bpm_raw,
                     t.bpm_confidence, cands.join(";"), join(&t.beats));
+                if regularity {
+                    let _ = write!(tsv, "\t{}\t{}\t{}", opt(t.rhythmic_regularity),
+                        t.rhythmic_regularity_label.as_deref().unwrap_or(""),
+                        opt(t.rhythmic_regularity_confidence));
+                }
+                tsv.push('\n');
             }
             Err(e) => {
                 let _ = writeln!(tsv, "{idx}\terror: {}\t\t\t\t\t\t", e.to_string().replace(['\t', '\n'], " "));
