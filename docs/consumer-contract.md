@@ -120,7 +120,10 @@ The onset envelope is padded one frame less than librosa's
 `lag + n_fft / (2 * hop_length)`, so `onset_frames`, `onset_strength_bands`,
 `beats` and `downbeats` sit one frame (about 23 ms) earlier than in schema 6,
 on the audible onset; every analysis path shares that padding. The public
-`onset_strength_method` keeps librosa's padding.
+`onset_strength_method` keeps librosa's padding. `downbeats` (beatgrid) now
+follow the kick: the bar phase is the one whose beats carry the most low-band
+(below 200 Hz) accent relative to the 200–800 Hz band, rather than the loudest
+broadband accent, which is often the snare on beats two and four.
 `beats` keep their meaning, but they
 are now tracked on the onset envelope of the mel bins below 3.2 kHz, so they
 follow the kick and snare rather than off-beat hi-hats; stored schema-6 beats,

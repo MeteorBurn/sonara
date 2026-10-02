@@ -189,6 +189,92 @@ pub fn detect_downbeats(
     downbeats
 }
 
+/// Mean accent of `env` over the beats of each phase `0..beats_per_bar`.
+fn phase_means(beats: &[usize], env: ArrayView1<Float>, beats_per_bar: usize) -> Vec<Float> {
+    (0..beats_per_bar)
+        .map(|phase| {
+            let accents: Vec<Float> = beats
+                .iter()
+                .skip(phase)
+                .step_by(beats_per_bar)
+                .map(|&frame| accent_at(env, frame))
+                .collect();
+            if accents.is_empty() {
+                Float::NEG_INFINITY
+            } else {
+                accents.iter().sum::<Float>() / accents.len() as Float
+            }
+        })
+        .collect()
+}
+
+/// Detect downbeats from the low (kick) and low-mid (snare body) onset bands.
+///
+/// The loudest broadband accent of a bar is often the snare on beats two and
+/// four, so [`detect_downbeats`] tends to pick a back beat. Here the kick
+/// decides, in two stages:
+/// 1. among the phase pairs `{p, p + bpb/2}` (an even meter), the pair whose
+///    beats carry the largest mean `low - mid` accent: kicks, not snares;
+/// 2. of that pair, the phase with the larger mean `low` accent.
+///
+/// An odd meter takes the phase with the largest mean `low - mid` directly.
+/// `low` and `mid` are onset envelopes of the mel bins below 200 Hz and from
+/// 200 to 800 Hz, in the frame space of `beats`; accents are their peaks within
+/// [`ACCENT_WINDOW`] frames of each beat. Returns a subset of `beats`.
+pub fn detect_downbeats_low_mid(
+    beats: &[usize],
+    low: ArrayView1<Float>,
+    mid: ArrayView1<Float>,
+    beats_per_bar: usize,
+) -> Vec<usize> {
+    if beats.is_empty() {
+        return vec![];
+    }
+    let bpb = beats_per_bar.max(1);
+    if bpb == 1 {
+        return beats.to_vec();
+    }
+    let bpb = bpb.min(beats.len());
+    let low_means = phase_means(beats, low, bpb);
+    let mid_means = phase_means(beats, mid, bpb);
+    let kick: Vec<Float> = low_means.iter().zip(&mid_means).map(|(l, m)| l - m).collect();
+    let argmax = |values: &[Float]| {
+        values
+            .iter()
+            .enumerate()
+            .fold((0usize, Float::NEG_INFINITY), |best, (i, &v)| if v > best.1 { (i, v) } else { best })
+            .0
+    };
+    let phase = if bpb % 2 == 0 {
+        let half = bpb / 2;
+        let pairs: Vec<Float> = (0..half).map(|p| kick[p] + kick[p + half]).collect();
+        let p = argmax(&pairs);
+        if low_means[p + half] > low_means[p] { p + half } else { p }
+    } else {
+        argmax(&kick)
+    };
+    beats.iter().skip(phase).step_by(bpb).copied().collect()
+}
+
+/// Beat-grid analysis like [`analyze_grid`], with downbeats chosen by
+/// [`detect_downbeats_low_mid`] from the low and low-mid onset envelopes.
+pub fn analyze_grid_low_mid(
+    beats: &[usize],
+    low: ArrayView1<Float>,
+    mid: ArrayView1<Float>,
+    sr: u32,
+    hop_length: usize,
+    beats_per_bar: usize,
+) -> BeatGrid {
+    let bpb = beats_per_bar.max(1);
+    BeatGrid {
+        grid_offset_sec: grid_offset(beats, sr, hop_length),
+        downbeats: detect_downbeats_low_mid(beats, low, mid, bpb),
+        grid_stability: grid_stability(beats),
+        beats_per_bar: bpb,
+    }
+}
+
 /// Full beat-grid analysis: offset, downbeats, and stability in one call.
 ///
 /// `beats` are frame indices (as returned by beat tracking), `onset_env` is the

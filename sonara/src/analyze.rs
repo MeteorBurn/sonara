@@ -2045,31 +2045,47 @@ fn analyze_signal_inner(
     // tempo and its candidates keep the broadband envelope.
     let n_beat_mels =
         crate::onset::mel_bins_below(sr, n_mels, crate::onset::BEAT_ENVELOPE_MAX_HZ).max(1);
+    // Downbeats weigh the kick (bins below 200 Hz) against the snare body
+    // (200-800 Hz); both are sums in the same loop, no onset bands needed.
+    let n_low_mels = crate::onset::mel_bins_below(sr, n_mels, 200.0).max(1);
+    let n_mid_end = crate::onset::mel_bins_below(sr, n_mels, 800.0).max(n_low_mels + 1);
 
     let out_frames = if n_frames > lag { n_frames - lag } else { 0 };
     let mut onset_env = Array1::<Float>::zeros(out_frames);
     let mut beat_env = Array1::<Float>::zeros(out_frames);
+    let mut low_env = Array1::<Float>::zeros(out_frames);
+    let mut mid_env = Array1::<Float>::zeros(out_frames);
     for t in 0..out_frames {
-        let mut sum = 0.0;
-        let mut beat_sum = 0.0;
+        let (mut sum, mut beat_sum, mut low_sum, mut mid_sum) = (0.0, 0.0, 0.0, 0.0);
         for m in 0..n_mels {
             let flux = (s_db[(m, t + lag)] - s_db[(m, t)]).max(0.0);
             sum += flux;
             if m < n_beat_mels {
                 beat_sum += flux;
             }
+            if m < n_low_mels {
+                low_sum += flux;
+            } else if m < n_mid_end {
+                mid_sum += flux;
+            }
         }
         onset_env[t] = sum / n_mels as Float;
         beat_env[t] = beat_sum / n_beat_mels as Float;
+        low_env[t] = low_sum / n_low_mels as Float;
+        mid_env[t] = mid_sum / (n_mid_end - n_low_mels) as Float;
     }
 
     let pad_left = crate::onset::onset_envelope_pad_frames(lag, n_fft, hop_length);
     let total_oenv_frames = out_frames + pad_left;
     let mut oenv_padded = Array1::<Float>::zeros(total_oenv_frames);
     let mut beat_env_padded = Array1::<Float>::zeros(total_oenv_frames);
+    let mut low_env_padded = Array1::<Float>::zeros(total_oenv_frames);
+    let mut mid_env_padded = Array1::<Float>::zeros(total_oenv_frames);
     for t in 0..out_frames {
         oenv_padded[pad_left + t] = onset_env[t];
         beat_env_padded[pad_left + t] = beat_env[t];
+        low_env_padded[pad_left + t] = low_env[t];
+        mid_env_padded[pad_left + t] = mid_env[t];
     }
 
     let onset_bands = if config.wants("onset_bands") {
@@ -2354,9 +2370,10 @@ fn analyze_signal_inner(
     };
 
     let (grid_offset_sec, downbeats, grid_stability) = if config.wants("beatgrid") {
-        let grid = crate::beatgrid::analyze_grid(
+        let grid = crate::beatgrid::analyze_grid_low_mid(
             &beats,
-            oenv_padded.view(),
+            low_env_padded.view(),
+            mid_env_padded.view(),
             sr,
             hop_length,
             detected_beats_per_bar(),
