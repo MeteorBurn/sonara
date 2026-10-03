@@ -65,9 +65,9 @@ needs no read.
 rename-aware.** Identical: done. Divergent: classify each hunk before touching
 either side — an *improvement* is merged into the **authority** first and the
 adapter regenerated from it; *staleness* is simply regenerated away. Never run
-a blind sync on a divergent pair: blind sync deletes improvements (sonara,
-2026-08-10, ~20 lines), and no sync preserves stale doctrine the other harness
-will follow. The mirror check must pass afterwards.
+a blind sync on a divergent pair: blind sync deletes improvements, and no sync
+preserves stale doctrine the other harness will follow. The mirror check must
+pass afterwards.
 
 sonara's authorities are declared in `CLAUDE.md`'s header: `CLAUDE.md` itself
 for the conventions (`AGENTS.md` is generated from it, title line aside), and

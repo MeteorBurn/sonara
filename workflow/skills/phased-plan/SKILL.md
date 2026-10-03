@@ -151,9 +151,8 @@ For every phase, in order:
    **A NEW GATE IS NOT TRUSTED UNTIL YOU HAVE SEEN IT FAIL.** If the phase adds
    or changes a check — a test, a CI step, an assertion in a script — break the
    thing it guards, confirm it goes red, then restore. Reading a gate cannot tell
-   you whether it works: every vacuous gate found on 2026-07-28 looked correct,
-   and the only thing that separated the live ones from the dead ones was
-   mutation. Three ways a gate is born dead:
+   you whether it works: a vacuous gate looks correct, and only mutation separates
+   a live gate from a dead one. Three ways a gate is born dead:
    - **Substring subsumption.** `assert "cmd" in block` also matches
      `cmd --self-test`, so deleting the real invocation stays green. Compare
      whole stripped lines, not `in`.
