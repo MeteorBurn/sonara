@@ -511,8 +511,9 @@ pub fn py_analyze_batch<'py>(
     let path_refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
 
     let results = match progress {
-        // Fast path: no callback → exactly the original code, zero overhead.
-        None => rs::analyze_batch(&path_refs, sr, &config),
+        // No callback: the batch never touches Python, so release the GIL for it
+        // (other Python threads keep running while the files are analysed).
+        None => py.detach(|| rs::analyze_batch(&path_refs, sr, &config)),
         Some(cb) => {
             // Fail fast on a non-callable so a typo can't silently no-op.
             if !cb.is_callable() {

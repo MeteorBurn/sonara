@@ -13,6 +13,8 @@ import pathlib
 import struct
 import sys
 import tempfile
+import threading
+import time
 import wave
 
 import sonara
@@ -163,6 +165,30 @@ def main():
     check("analyze_file accepts a Path",
           sonara.analyze_file(pathlib.Path(corrupt_mp3)).get("bpm")
           == sonara.analyze_file(corrupt_mp3).get("bpm"))
+
+    # 11. Without progress the batch releases the GIL too: another Python thread
+    #     keeps ticking in the middle of the call, not only around its edges.
+    stamps = []
+    stop = threading.Event()
+
+    def tick():
+        while not stop.is_set():
+            stamps.append(time.perf_counter())
+            time.sleep(0.001)
+
+    ticker = threading.Thread(target=tick)
+    ticker.start()
+    try:
+        start = time.perf_counter()
+        sonara.analyze_batch([corrupt_mp3] * 512, mode="compact")
+        end = time.perf_counter()
+    finally:
+        stop.set()
+        ticker.join()
+    quarter = (end - start) / 4
+    mid_ticks = [s for s in stamps if start + quarter < s < end - quarter]
+    print(f"    batch {end - start:.3f}s, ticks in its middle half: {len(mid_ticks)}")
+    check("analyze_batch without progress releases the GIL", len(mid_ticks) > 0)
 
     print(f"\n{'='*60}")
     print(f"  RESULTS: {passed} PASSED, {failed} FAILED")

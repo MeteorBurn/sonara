@@ -63,7 +63,8 @@ pub fn py_analyze_aggression_batch<'py>(
     sr: u32,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
     let path_refs = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    rs::analyze_batch(&path_refs, sr)
+    // The batch never touches Python: release the GIL while it runs.
+    py.detach(|| rs::analyze_batch(&path_refs, sr))
         .into_iter()
         .zip(paths)
         .map(|(result, path)| {

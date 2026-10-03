@@ -102,7 +102,8 @@ def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=Non
     ``done`` counts completions in *completion order* (not input order) and
     ``total == len(paths)``. A raising/broken callback never aborts the batch —
     its exception is swallowed (per-file isolation is a contract). Passing
-    ``progress=None`` (the default) runs the original zero-overhead path.
+    ``progress=None`` (the default) runs the original zero-overhead path. Both
+    paths release the GIL while the files are analysed.
 
     ``genre_model`` (path to a user-trained model JSON) adds ``genre`` and
     ``genre_confidence`` to each successful entry. See ``sonara.genre``.
