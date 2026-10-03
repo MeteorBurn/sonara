@@ -155,6 +155,14 @@ consumer that relied on them from a narrow request must now name them (`mfcc`,
 `chroma`, `contrast`, `bandwidth`, `rolloff`, `flatness`). Mode runs and requests
 that include `embedding` are unaffected.
 
+`mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
+schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`
+term even when `dissonance` was not requested, and emits it only when it was.
+Before, a request without `dissonance` scored that term as 0, so stored
+`mood_aggressive` values from such requests are lower than a fresh run by
+`0.20·dissonance` (about 0.002–0.005 on real music). Requests that included
+`dissonance`, and `augment_analysis`, already used the full formula.
+
 `rhythmic_regularity` is additive and therefore ships without a schema bump,
 but it carries a shape consumers must handle explicitly: it **abstains**. When
 a track has no measurable rhythmic evidence (silence, ambient, drumless), the

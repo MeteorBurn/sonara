@@ -577,6 +577,11 @@ impl AnalysisConfig {
         if self.needs_rhythmic_regularity() && RHYTHMIC_REGULARITY_DEPS.contains(&name) {
             return true;
         }
+        // mood_aggressive weighs dissonance; computing it whenever mood is wanted
+        // keeps the score independent of whether dissonance was also requested.
+        if name == "dissonance" && self.wants("mood") {
+            return true;
+        }
         if self.features.is_some() {
             self.emits(name)
         } else {
@@ -2967,6 +2972,10 @@ fn analyze_signal_inner(
         suppress_internal_embedding_components(&mut result, config);
     } else if config.features.is_some() {
         suppress_unrequested_spectral_summaries(&mut result, config);
+        // Computed for mood even when not requested (see `AnalysisConfig::wants`).
+        if !config.emits("dissonance") {
+            result.dissonance = None;
+        }
     }
     if config.needs_rhythmic_regularity() {
         suppress_internal_rhythm_components(&mut result, config);
@@ -5428,9 +5437,10 @@ mod tests {
                 v
             );
         }
-        // Requesting mood must NOT leak the key / valence fields.
+        // Requesting mood must NOT leak the key / valence / dissonance fields.
         assert!(r.key.is_none(), "mood must not leak key");
         assert!(r.valence.is_none(), "mood must not leak valence");
+        assert!(r.dissonance.is_none(), "mood must not leak dissonance");
     }
 
     #[test]
@@ -5875,8 +5885,8 @@ mod tests {
             ("vocalness", &["vocalness"]),
             ("instrumentalness", &["instrumentalness"]),
             // mood's declared evidence includes dissonance: augment feeds the
-            // record's value, equal to a run co-requesting dissonance.
-            ("mood", &["mood", "dissonance"]),
+            // record's value, and a mood-only run computes it as well.
+            ("mood", &["mood"]),
             ("embedding", &["embedding"]),
         ];
         let mut mismatches: Vec<String> = Vec::new();
