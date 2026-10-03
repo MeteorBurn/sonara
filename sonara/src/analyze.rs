@@ -3257,14 +3257,11 @@ fn silence_offsets(
     // Trailing: last index that ends a sustained above-threshold run.
     let mut trail_frames = n; // all-silence fallback
     for i in (0..n).rev() {
-        if rms[i] >= thresh {
-            let start = i + 1 - need; // i - (need-1)
-                                      // `start` underflow-safe because i >= need-1 is required for a run.
-            if i + 1 >= need && (i + 1 - need..=i).all(|k| rms[k] >= thresh) {
-                trail_frames = n - 1 - i;
-                break;
-            }
-            let _ = start;
+        // A run ending at `i` needs `i + 1 >= need`; check it before `i + 1 - need`
+        // so a loud frame near the start cannot underflow.
+        if rms[i] >= thresh && i + 1 >= need && (i + 1 - need..=i).all(|k| rms[k] >= thresh) {
+            trail_frames = n - 1 - i;
+            break;
         }
     }
 
@@ -5438,6 +5435,16 @@ mod tests {
                 "instrumentalness must be opt-in"
             );
         }
+    }
+
+    #[test]
+    fn test_silence_offsets_loud_first_frame_does_not_underflow() {
+        // The trailing scan reached frame 0 and computed `0 + 1 - 3` before checking
+        // that a run could end there: a debug build panicked.
+        let rms = [0.9_f32, 0.0, 0.0, 0.0, 0.0];
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        let dur = rms.len() as Float * SPF;
+        assert_eq!((lead, trail), (dur, dur), "a lone click is not audio");
     }
 
     #[test]
