@@ -9,6 +9,7 @@ still succeed.
 
 import math
 import os
+import pathlib
 import struct
 import sys
 import tempfile
@@ -150,6 +151,18 @@ def main():
     except Exception as e:  # noqa: BLE001
         check("non-callable progress raises TypeError", False)
         print(f"    wrong exception type: {e!r}")
+
+    # 10. pathlib.Path inputs are accepted; result paths stay str.
+    path_results = sonara.analyze_batch(
+        [pathlib.Path(corrupt_mp3), pathlib.Path(missing)], mode="compact"
+    )
+    check("Path batch entries echo str paths",
+          [r.get("path") for r in path_results] == [corrupt_mp3, missing])
+    check("Path batch keeps per-file isolation",
+          not path_results[0].failed and path_results[1].get("error_kind") == "io")
+    check("analyze_file accepts a Path",
+          sonara.analyze_file(pathlib.Path(corrupt_mp3)).get("bpm")
+          == sonara.analyze_file(corrupt_mp3).get("bpm"))
 
     print(f"\n{'='*60}")
     print(f"  RESULTS: {passed} PASSED, {failed} FAILED")

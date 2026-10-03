@@ -1,7 +1,7 @@
 //! Python bindings for the bundled aggression model.
 
 use crate::array::ArrayIn1;
-use std::path::Path;
+use std::path::PathBuf;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -37,10 +37,10 @@ fn analysis_dict<'py>(
 #[pyo3(name = "analyze_aggression_file", signature = (path, *, sr=22050))]
 pub fn py_analyze_aggression_file<'py>(
     py: Python<'py>,
-    path: &str,
+    path: PathBuf,
     sr: u32,
 ) -> PyResult<Bound<'py, PyDict>> {
-    analysis_dict(py, rs::analyze_file(Path::new(path), sr).into_pyresult()?)
+    analysis_dict(py, rs::analyze_file(&path, sr).into_pyresult()?)
 }
 
 /// Analyze a mono signal and return its aggression rank record.
@@ -59,19 +59,16 @@ pub fn py_analyze_aggression_signal<'py>(
 #[pyo3(name = "analyze_aggression_batch", signature = (paths, *, sr=22050))]
 pub fn py_analyze_aggression_batch<'py>(
     py: Python<'py>,
-    paths: Vec<String>,
+    paths: Vec<PathBuf>,
     sr: u32,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let path_refs = paths
-        .iter()
-        .map(|path| Path::new(path.as_str()))
-        .collect::<Vec<_>>();
+    let path_refs = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     rs::analyze_batch(&path_refs, sr)
         .into_iter()
         .zip(paths)
         .map(|(result, path)| {
             let item = PyDict::new(py);
-            item.set_item("path", path)?;
+            item.set_item("path", path.as_os_str())?;
             match result {
                 Ok(analysis) => {
                     item.set_item("aggression_score", analysis.score)?;

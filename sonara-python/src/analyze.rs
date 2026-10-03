@@ -2,7 +2,7 @@ use crate::array::ArrayIn1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{error_kind, IntoPyResult};
 use sonara::analyze as rs;
@@ -334,8 +334,8 @@ fn parse_config(
     features: Option<Vec<String>>,
     bpm_min: Option<f32>,
     bpm_max: Option<f32>,
-    genre_model: Option<String>,
-    vocalness_model: Option<String>,
+    genre_model: Option<PathBuf>,
+    vocalness_model: Option<PathBuf>,
 ) -> PyResult<rs::AnalysisConfig> {
     let mode = rs::AnalysisMode::from_str(mode).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
@@ -351,14 +351,14 @@ fn parse_config(
     // The embedding_version match is enforced later, at analysis time.
     let genre_model = match genre_model {
         Some(path) => Some(std::sync::Arc::new(
-            sonara::genre::load(Path::new(&path)).into_pyresult()?,
+            sonara::genre::load(&path).into_pyresult()?,
         )),
         None => None,
     };
     // Same one-load-per-call handling for the vocalness model.
     let vocalness_model = match vocalness_model {
         Some(path) => Some(std::sync::Arc::new(
-            sonara::vocal_model::load(Path::new(&path)).into_pyresult()?,
+            sonara::vocal_model::load(&path).into_pyresult()?,
         )),
         None => None,
     };
@@ -377,14 +377,14 @@ fn parse_config(
 #[allow(clippy::too_many_arguments)]
 pub fn py_analyze_file<'py>(
     py: Python<'py>,
-    path: &str,
+    path: PathBuf,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,
     bpm_min: Option<f32>,
     bpm_max: Option<f32>,
-    genre_model: Option<String>,
-    vocalness_model: Option<String>,
+    genre_model: Option<PathBuf>,
+    vocalness_model: Option<PathBuf>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let config = parse_config(
         mode,
@@ -394,7 +394,7 @@ pub fn py_analyze_file<'py>(
         genre_model,
         vocalness_model,
     )?;
-    let result = rs::analyze_file(Path::new(path), sr, &config).into_pyresult()?;
+    let result = rs::analyze_file(&path, sr, &config).into_pyresult()?;
     result_to_dict(py, &result)
 }
 
@@ -409,8 +409,8 @@ pub fn py_analyze_signal<'py>(
     features: Option<Vec<String>>,
     bpm_min: Option<f32>,
     bpm_max: Option<f32>,
-    genre_model: Option<String>,
-    vocalness_model: Option<String>,
+    genre_model: Option<PathBuf>,
+    vocalness_model: Option<PathBuf>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let config = parse_config(
         mode,
@@ -430,11 +430,12 @@ pub fn py_analyze_signal<'py>(
 /// codec and underlying cause) and `error_kind` (short stable category).
 fn error_to_dict<'py>(
     py: Python<'py>,
-    path: &str,
+    path: &Path,
     err: &sonara::SonaraError,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("path", path)?;
+    // `as_os_str` keeps the echoed path a `str` (a `Path` would become `pathlib.Path`).
+    d.set_item("path", path.as_os_str())?;
     d.set_item("error", err.to_string())?;
     d.set_item("error_kind", error_kind(err))?;
     Ok(d)
@@ -447,7 +448,7 @@ fn error_to_dict<'py>(
 fn batch_results_to_dicts<'py>(
     py: Python<'py>,
     results: Vec<Result<rs::TrackAnalysis, sonara::SonaraError>>,
-    paths: &[String],
+    paths: &[PathBuf],
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
     results
         .into_iter()
@@ -457,7 +458,7 @@ fn batch_results_to_dicts<'py>(
                 // Every batch entry carries its input path so consumers can
                 // correlate results without zipping against the input list.
                 let d = result_to_dict(py, &analysis)?;
-                d.set_item("path", path)?;
+                d.set_item("path", path.as_os_str())?;
                 Ok(d)
             }
             Err(err) => error_to_dict(py, path, &err),
@@ -487,15 +488,15 @@ fn batch_results_to_dicts<'py>(
 #[allow(clippy::too_many_arguments)]
 pub fn py_analyze_batch<'py>(
     py: Python<'py>,
-    paths: Vec<String>,
+    paths: Vec<PathBuf>,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,
     bpm_min: Option<f32>,
     bpm_max: Option<f32>,
     progress: Option<Bound<'py, PyAny>>,
-    genre_model: Option<String>,
-    vocalness_model: Option<String>,
+    genre_model: Option<PathBuf>,
+    vocalness_model: Option<PathBuf>,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
     // Load the models once for the whole batch (parse_config validates them);
     // the Arcs are cheaply cloned per file inside the core.
@@ -507,7 +508,7 @@ pub fn py_analyze_batch<'py>(
         genre_model,
         vocalness_model,
     )?;
-    let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
+    let path_refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
 
     let results = match progress {
         // Fast path: no callback → exactly the original code, zero overhead.
@@ -1040,11 +1041,11 @@ pub fn py_augment_analysis<'py>(
     py: Python<'py>,
     cached: &Bound<'py, PyDict>,
     features: Option<Vec<String>>,
-    audio_path: Option<String>,
+    audio_path: Option<PathBuf>,
     bpm_min: Option<f32>,
     bpm_max: Option<f32>,
-    genre_model: Option<String>,
-    vocalness_model: Option<String>,
+    genre_model: Option<PathBuf>,
+    vocalness_model: Option<PathBuf>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let record = analysis_from_dict(cached)?;
     // Reuse the analyzers' model-loading path; the mode is irrelevant here
@@ -1060,13 +1061,8 @@ pub fn py_augment_analysis<'py>(
     )?;
     let names = features.unwrap_or_default();
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let result = rs::augment_analysis(
-        &record,
-        &name_refs,
-        audio_path.as_deref().map(Path::new),
-        &config,
-    )
-    .into_pyresult()?;
+    let result = rs::augment_analysis(&record, &name_refs, audio_path.as_deref(), &config)
+        .into_pyresult()?;
     result_to_dict(py, &result)
 }
 

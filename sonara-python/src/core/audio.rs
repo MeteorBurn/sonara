@@ -1,7 +1,7 @@
 use crate::array::{ArrayIn1, ArrayIn2};
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
-use std::path::Path;
+use std::path::PathBuf;
 
 use crate::error::IntoPyResult;
 use sonara::core::audio as rs;
@@ -10,13 +10,13 @@ use sonara::core::audio as rs;
 #[pyo3(name = "load", signature = (path, *, sr=22050, mono=true, offset=0.0, duration=0.0))]
 pub fn py_load<'py>(
     py: Python<'py>,
-    path: &str,
+    path: PathBuf,
     sr: u32,
     mono: bool,
     offset: f32,
     duration: f32,
 ) -> PyResult<(Bound<'py, PyArray1<f32>>, u32)> {
-    let (y, sr_out) = rs::load(Path::new(path), sr, mono, offset, duration).into_pyresult()?;
+    let (y, sr_out) = rs::load(&path, sr, mono, offset, duration).into_pyresult()?;
     Ok((y.into_pyarray(py), sr_out))
 }
 
@@ -41,14 +41,14 @@ pub fn py_resample<'py>(
 
 #[pyfunction]
 #[pyo3(name = "get_duration")]
-pub fn py_get_duration(path: &str) -> PyResult<f32> {
-    rs::get_duration(Path::new(path)).into_pyresult()
+pub fn py_get_duration(path: PathBuf) -> PyResult<f32> {
+    rs::get_duration(&path).into_pyresult()
 }
 
 #[pyfunction]
 #[pyo3(name = "get_samplerate")]
-pub fn py_get_samplerate(path: &str) -> PyResult<u32> {
-    rs::get_samplerate(Path::new(path)).into_pyresult()
+pub fn py_get_samplerate(path: PathBuf) -> PyResult<u32> {
+    rs::get_samplerate(&path).into_pyresult()
 }
 
 #[pyfunction]
@@ -147,7 +147,7 @@ pub fn py_mu_expand<'py>(
 ))]
 pub fn py_stream_with_resample<'py>(
     py: Python<'py>,
-    path: &str,
+    path: PathBuf,
     block_length: usize,
     frame_length: usize,
     hop_length: usize,
@@ -155,7 +155,7 @@ pub fn py_stream_with_resample<'py>(
     mono: bool,
 ) -> PyResult<Vec<Bound<'py, PyArray1<f32>>>> {
     let blocks = rs::stream_with_resample(
-        Path::new(path),
+        &path,
         block_length,
         frame_length,
         hop_length,
