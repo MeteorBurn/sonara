@@ -285,6 +285,19 @@ try:
 except ImportError:
     test("display (matplotlib not available)", lambda: None)
 
+def _check_dotted_submodule_imports():
+    # The extension's submodules used to be attributes only: `sonara.feature.tempo`
+    # worked while `from sonara.feature import tempo` raised ModuleNotFoundError.
+    from sonara.feature import tempo
+    from sonara.core import load
+    from sonara.effects import trim
+    import sonara.util
+    assert tempo is sonara.feature.tempo
+    assert callable(load) and callable(trim) and sonara.util is not None
+
+
+test("dotted submodule imports", _check_dotted_submodule_imports)
+
 # ============================================================
 # Pattern 21: Fused Analysis
 # ============================================================

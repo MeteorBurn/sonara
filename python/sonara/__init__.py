@@ -23,6 +23,27 @@ from sonara import genre  # noqa: F401 — bring-your-own genre model trainer/lo
 from sonara import vocal_model  # noqa: F401 — bring-your-own vocalness model trainer/loader
 
 
+def _register_extension_submodules():
+    """Make `import sonara.feature` / `from sonara.core import ...` work.
+
+    PyO3's `add_submodule` exposes the extension's submodules (`core`, `effects`,
+    `feature`, `util`) only as attributes and leaves them out of `sys.modules`,
+    so dotted imports failed while `sonara.feature.tempo` worked.
+    """
+    import sys
+    from types import ModuleType
+
+    from sonara import _sonara
+
+    for name, module in vars(_sonara).items():
+        if isinstance(module, ModuleType):
+            # setdefault: never shadow a real module of this package.
+            sys.modules.setdefault(f"{__name__}.{name}", module)
+
+
+_register_extension_submodules()
+
+
 def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None):
     """Analyze an audio file and return a `TrackAnalysis` (dict subclass with `.print()`).
 
