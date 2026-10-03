@@ -551,6 +551,21 @@ fn extract_fp_string(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     }
     if let Ok(item) = obj.get_item("fingerprint") {
         if let Ok(s) = item.extract::<String>() {
+            // A record that names its format must name this build's: fingerprints
+            // of different versions are never compared (a bare string carries none).
+            if let Some(version) = obj
+                .get_item("fingerprint_version")
+                .ok()
+                .and_then(|v| v.extract::<u32>().ok())
+            {
+                if version != sonara::fingerprint::FINGERPRINT_VERSION {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "fingerprint_version {version} does not match this build's \
+                         FINGERPRINT_VERSION {}; re-fingerprint the audio",
+                        sonara::fingerprint::FINGERPRINT_VERSION
+                    )));
+                }
+            }
             return Ok(s);
         }
     }
@@ -1109,6 +1124,12 @@ pub fn py_feature_dependencies(py: Python<'_>) -> PyResult<Vec<Bound<'_, PyDict>
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Record versions a consumer compares stored results against.
+    m.add("ANALYSIS_SCHEMA_VERSION", rs::ANALYSIS_SCHEMA_VERSION)?;
+    m.add(
+        "FINGERPRINT_VERSION",
+        sonara::fingerprint::FINGERPRINT_VERSION,
+    )?;
     m.add_function(wrap_pyfunction!(py_analyze_file, m)?)?;
     m.add_function(wrap_pyfunction!(py_analyze_signal, m)?)?;
     m.add_function(wrap_pyfunction!(py_analyze_batch, m)?)?;

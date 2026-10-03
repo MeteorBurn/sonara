@@ -205,6 +205,11 @@ def mel(*, sr: float = 22050.0, n_fft: int = 2048, n_mels: int = 128, fmin: floa
 
 AnalysisResult = Dict[str, Union[float, int, str, List[int], List[float], List[List[float]], List[str], List[Tuple[float, float]]]]
 
+# Versions to compare stored records against: provenance["schema_version"] and
+# the "fingerprint_version" field.
+ANALYSIS_SCHEMA_VERSION: int
+FINGERPRINT_VERSION: int
+
 class TrackAnalysis(Dict[str, Any]):
     """dict subclass returned by analyze_file / analyze_signal / analyze_batch / augment_analysis."""
     @property

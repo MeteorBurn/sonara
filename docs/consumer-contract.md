@@ -2,7 +2,7 @@
 
 **Owner:** sonara. This is the single durable copy.
 **Status:** current, `ANALYSIS_SCHEMA_VERSION = 7` since 2026-10-02; last verified
-against sonara 0.3.5 / schema 6 on 2026-07-29.
+against sonara 0.3.7 (MeteorBurn fork, `dev`) / schema 7 on 2026-10-03.
 **Consumer of record:** sonagram (since 2026-07-18). Originally raised by
 kglite on 2026-07-15.
 
@@ -60,8 +60,8 @@ The original asks and what shipped. Kept for lineage; do not re-raise them.
 
 ## Standing boundaries — what sonara undertakes to hold
 
-Verified against sonara 0.3.5 on 2026-07-29 (`sonara/Cargo.toml`,
-`cargo tree -p sonara`):
+Verified against sonara 0.3.5 on 2026-07-29 and re-verified against 0.3.7 on
+2026-10-03 (`sonara/Cargo.toml`, `cargo tree -p sonara`):
 
 - **The core crate stays PyO3-free.** PyO3 and NumPy are confined to
   `sonara-python`. A consumer's core dependency path must never acquire them
@@ -139,10 +139,17 @@ the whole-record version moves only when existing field meaning or units
 change. A consumer deciding whether a stored record needs refreshing should
 therefore key **per feature**, not on the whole-record version: field presence
 on the record, the per-feature model ids in provenance (`vocalness_model_id`,
-`genre_model_id`), and the declared dependency map `feature_dependencies()` —
+`genre_model_id`, `aggression_model_id`), and the declared dependency map
+`feature_dependencies()` —
 which names each feature's dependency class and the record fields a decode-free
 recompute reads (`augment_analysis` / `can_augment` consume the same map, so a
 missing feature can often be filled in without re-decoding the audio).
+Presence fails for one group: `tags` is an absent key, not an empty map, when the
+container carries none (WAV always), so key it on
+`provenance.requested_features` instead. The Python module exports
+`ANALYSIS_SCHEMA_VERSION` and `FINGERPRINT_VERSION` for these comparisons, and
+`fingerprint_match` refuses a record whose `fingerprint_version` differs from
+this build's.
 
 An explicit `features=[...]` request returns only the named groups plus the core
 signal scalars every run reports (2026-10-03, no schema bump: values are
