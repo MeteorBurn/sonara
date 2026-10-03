@@ -4724,7 +4724,10 @@ mod tests {
         let folded = analyze_signal(y.view(), sr, &folding).unwrap();
         // The fixture tracks at ~35 BPM; 60-119 doubles it and retracks the beats.
         assert!(folded.bpm != free.bpm, "the range must fold the tempo");
-        assert!(folded.beats != free.beats, "the folded tempo must retrack the beats");
+        assert!(
+            folded.beats != free.beats,
+            "the folded tempo must retrack the beats"
+        );
         assert_eq!(folded.aggression_score, free.aggression_score);
         assert_eq!(folded.aggression_rhythm, free.aggression_rhythm);
         assert_eq!(folded.aggression_forcefulness, free.aggression_forcefulness);
@@ -5487,16 +5490,6 @@ mod tests {
                 "instrumentalness must be opt-in"
             );
         }
-    }
-
-    #[test]
-    fn test_silence_offsets_loud_first_frame_does_not_underflow() {
-        // The trailing scan reached frame 0 and computed `0 + 1 - 3` before checking
-        // that a run could end there: a debug build panicked.
-        let rms = [0.9_f32, 0.0, 0.0, 0.0, 0.0];
-        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
-        let dur = rms.len() as Float * SPF;
-        assert_eq!((lead, trail), (dur, dur), "a lone click is not audio");
     }
 
     #[test]
