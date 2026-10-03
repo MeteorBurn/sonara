@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod analyze;
+mod array;
 mod aggression;
 mod beat;
 mod core;

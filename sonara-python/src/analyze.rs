@@ -1,4 +1,4 @@
-use numpy::PyReadonlyArray1;
+use crate::array::ArrayIn1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
@@ -403,7 +403,7 @@ pub fn py_analyze_file<'py>(
 #[allow(clippy::too_many_arguments)]
 pub fn py_analyze_signal<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,

@@ -1,4 +1,5 @@
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use crate::array::{ArrayIn1, ArrayIn2};
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
 use std::path::Path;
 
@@ -21,10 +22,7 @@ pub fn py_load<'py>(
 
 #[pyfunction]
 #[pyo3(name = "to_mono")]
-pub fn py_to_mono<'py>(
-    py: Python<'py>,
-    y: numpy::PyReadonlyArray2<'py, f32>,
-) -> Bound<'py, PyArray1<f32>> {
+pub fn py_to_mono<'py>(py: Python<'py>, y: ArrayIn2<'py, f32>) -> Bound<'py, PyArray1<f32>> {
     rs::to_mono(y.as_array()).into_pyarray(py)
 }
 
@@ -32,7 +30,7 @@ pub fn py_to_mono<'py>(
 #[pyo3(name = "resample", signature = (y, *, orig_sr, target_sr))]
 pub fn py_resample<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     orig_sr: u32,
     target_sr: u32,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
@@ -57,7 +55,7 @@ pub fn py_get_samplerate(path: &str) -> PyResult<u32> {
 #[pyo3(name = "autocorrelate", signature = (y, *, max_size=None))]
 pub fn py_autocorrelate<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     max_size: Option<usize>,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
     rs::autocorrelate(y.as_array(), max_size)
@@ -69,7 +67,7 @@ pub fn py_autocorrelate<'py>(
 #[pyo3(name = "lpc", signature = (y, *, order))]
 pub fn py_lpc<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     order: usize,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
     rs::lpc(y.as_array(), order)
@@ -81,7 +79,7 @@ pub fn py_lpc<'py>(
 #[pyo3(name = "zero_crossings", signature = (y, *, threshold=0.0))]
 pub fn py_zero_crossings<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     threshold: f32,
 ) -> Bound<'py, numpy::PyArray1<bool>> {
     rs::zero_crossings(y.as_array(), threshold).into_pyarray(py)
@@ -127,7 +125,7 @@ pub fn py_clicks<'py>(
 #[pyo3(name = "mu_compress", signature = (x, *, mu=255.0))]
 pub fn py_mu_compress<'py>(
     py: Python<'py>,
-    x: PyReadonlyArray1<'py, f32>,
+    x: ArrayIn1<'py, f32>,
     mu: f32,
 ) -> Bound<'py, PyArray1<f32>> {
     rs::mu_compress(x.as_array(), mu).into_pyarray(py)
@@ -137,7 +135,7 @@ pub fn py_mu_compress<'py>(
 #[pyo3(name = "mu_expand", signature = (y, *, mu=255.0))]
 pub fn py_mu_expand<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     mu: f32,
 ) -> Bound<'py, PyArray1<f32>> {
     rs::mu_expand(y.as_array(), mu).into_pyarray(py)

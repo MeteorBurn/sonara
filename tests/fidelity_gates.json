@@ -234,6 +234,7 @@
     {
       "paths": [
         "python/sonara/display.py",
+        "sonara-python/src/array.rs",
         "sonara-python/src/core/audio.rs",
         "sonara-python/src/core/convert.rs",
         "sonara-python/src/core/mod.rs",

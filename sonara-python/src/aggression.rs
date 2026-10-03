@@ -1,8 +1,8 @@
 //! Python bindings for the bundled aggression model.
 
+use crate::array::ArrayIn1;
 use std::path::Path;
 
-use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -48,7 +48,7 @@ pub fn py_analyze_aggression_file<'py>(
 #[pyo3(name = "analyze_aggression_signal", signature = (y, *, sr=22050))]
 pub fn py_analyze_aggression_signal<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, Float>,
+    y: ArrayIn1<'py, Float>,
     sr: u32,
 ) -> PyResult<Bound<'py, PyDict>> {
     analysis_dict(py, rs::analyze_signal(y.as_array(), sr).into_pyresult()?)

@@ -1,4 +1,5 @@
-use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use crate::array::{ArrayIn1, ArrayIn2};
+use numpy::PyArray2;
 use pyo3::prelude::*;
 
 use sonara::tonal as rs;
@@ -8,8 +9,8 @@ use sonara::types::Float;
 #[pyo3(name = "hpcp", signature = (power_spec, freqs, *, n_harmonics=4, min_freq=40.0, max_freq=5000.0, peak_threshold=0.0, max_peaks=50))]
 pub fn py_hpcp<'py>(
     py: Python<'py>,
-    power_spec: PyReadonlyArray2<'py, Float>,
-    freqs: PyReadonlyArray1<'py, Float>,
+    power_spec: ArrayIn2<'py, Float>,
+    freqs: ArrayIn1<'py, Float>,
     n_harmonics: usize,
     min_freq: Float,
     max_freq: Float,
@@ -32,7 +33,7 @@ pub fn py_hpcp<'py>(
 #[pyo3(name = "chords_from_beats")]
 pub fn py_chords_from_beats<'py>(
     _py: Python<'py>,
-    hpcp: PyReadonlyArray2<'py, Float>,
+    hpcp: ArrayIn2<'py, Float>,
     beats: Vec<usize>,
 ) -> PyResult<Vec<String>> {
     Ok(rs::chords_from_beats(hpcp.as_array(), &beats))
@@ -42,7 +43,7 @@ pub fn py_chords_from_beats<'py>(
 #[pyo3(name = "chords_from_frames", signature = (hpcp, *, segment_frames=10))]
 pub fn py_chords_from_frames<'py>(
     _py: Python<'py>,
-    hpcp: PyReadonlyArray2<'py, Float>,
+    hpcp: ArrayIn2<'py, Float>,
     segment_frames: usize,
 ) -> PyResult<Vec<String>> {
     Ok(rs::chords_from_frames(hpcp.as_array(), segment_frames))
@@ -67,8 +68,8 @@ pub fn py_chord_descriptors<'py>(
 #[pyo3(name = "dissonance", signature = (power_spec, freqs, *, peak_threshold=0.0, max_peaks=50))]
 pub fn py_dissonance<'py>(
     _py: Python<'py>,
-    power_spec: PyReadonlyArray2<'py, Float>,
-    freqs: PyReadonlyArray1<'py, Float>,
+    power_spec: ArrayIn2<'py, Float>,
+    freqs: ArrayIn1<'py, Float>,
     peak_threshold: Float,
     max_peaks: usize,
 ) -> PyResult<Float> {

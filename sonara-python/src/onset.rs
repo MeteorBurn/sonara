@@ -1,4 +1,5 @@
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+use crate::array::ArrayIn1;
+use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -7,8 +8,8 @@ use sonara::onset as rs;
 #[pyfunction]
 #[pyo3(name = "onset_detect", signature = (*, y=None, onset_envelope=None, sr=22050, hop_length=512, backtrack=false, delta=0.07, wait=0))]
 pub fn py_onset_detect(
-    y: Option<PyReadonlyArray1<'_, f32>>,
-    onset_envelope: Option<PyReadonlyArray1<'_, f32>>,
+    y: Option<ArrayIn1<'_, f32>>,
+    onset_envelope: Option<ArrayIn1<'_, f32>>,
     sr: u32,
     hop_length: usize,
     backtrack: bool,
@@ -24,7 +25,7 @@ pub fn py_onset_detect(
 #[pyo3(name = "onset_strength", signature = (y, *, sr=22050, hop_length=512))]
 pub fn py_onset_strength<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
@@ -36,7 +37,7 @@ pub fn py_onset_strength<'py>(
 #[pyo3(name = "onset_strength_bands", signature = (y, *, sr=22050, hop_length=512, band_edges_hz=None))]
 pub fn py_onset_strength_bands<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
     band_edges_hz: Option<Vec<f32>>,
@@ -50,7 +51,7 @@ pub fn py_onset_strength_bands<'py>(
 #[pyo3(name = "onset_strength_method", signature = (y, *, sr=22050, hop_length=512, method="spectral_flux"))]
 pub fn py_onset_strength_method<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
     method: &str,

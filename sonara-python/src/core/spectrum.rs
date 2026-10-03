@@ -1,5 +1,6 @@
+use crate::array::{ArrayIn1, ArrayIn2};
 use num_complex::Complex32;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -10,7 +11,7 @@ use sonara::types::*;
 #[pyo3(name = "stft", signature = (y, *, n_fft=2048, hop_length=None, win_length=None, window="hann", center=true, pad_mode="constant"))]
 pub fn py_stft<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     n_fft: usize,
     hop_length: Option<usize>,
     win_length: Option<usize>,
@@ -37,7 +38,7 @@ pub fn py_stft<'py>(
 #[pyo3(name = "istft", signature = (stft_matrix, *, hop_length=None, win_length=None, window="hann", center=true, length=None))]
 pub fn py_istft<'py>(
     py: Python<'py>,
-    stft_matrix: PyReadonlyArray2<'py, Complex32>,
+    stft_matrix: ArrayIn2<'py, Complex32>,
     hop_length: Option<usize>,
     win_length: Option<usize>,
     window: &str,
@@ -61,7 +62,7 @@ pub fn py_istft<'py>(
 #[pyo3(name = "power_to_db", signature = (s, *, ref_power=1.0, amin=1e-10, top_db=80.0))]
 pub fn py_power_to_db<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
+    s: ArrayIn2<'py, f32>,
     ref_power: f32,
     amin: f32,
     top_db: f32,
@@ -74,7 +75,7 @@ pub fn py_power_to_db<'py>(
 #[pyo3(name = "amplitude_to_db", signature = (s, *, ref_amplitude=1.0, amin=1e-5, top_db=80.0))]
 pub fn py_amplitude_to_db<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
+    s: ArrayIn2<'py, f32>,
     ref_amplitude: f32,
     amin: f32,
     top_db: f32,
@@ -87,7 +88,7 @@ pub fn py_amplitude_to_db<'py>(
 #[pyo3(name = "griffinlim", signature = (s_mag, *, n_iter=32, hop_length=None, win_length=None, window="hann"))]
 pub fn py_griffinlim<'py>(
     py: Python<'py>,
-    s_mag: PyReadonlyArray2<'py, f32>,
+    s_mag: ArrayIn2<'py, f32>,
     n_iter: usize,
     hop_length: Option<usize>,
     win_length: Option<usize>,
@@ -103,7 +104,7 @@ pub fn py_griffinlim<'py>(
 #[pyo3(name = "db_to_power", signature = (s_db, *, ref_power=1.0))]
 pub fn py_db_to_power<'py>(
     py: Python<'py>,
-    s_db: PyReadonlyArray2<'py, f32>,
+    s_db: ArrayIn2<'py, f32>,
     ref_power: f32,
 ) -> Bound<'py, PyArray2<f32>> {
     rs::db_to_power(s_db.as_array(), ref_power).into_pyarray(py)
@@ -113,7 +114,7 @@ pub fn py_db_to_power<'py>(
 #[pyo3(name = "db_to_amplitude", signature = (s_db, *, ref_amplitude=1.0))]
 pub fn py_db_to_amplitude<'py>(
     py: Python<'py>,
-    s_db: PyReadonlyArray2<'py, f32>,
+    s_db: ArrayIn2<'py, f32>,
     ref_amplitude: f32,
 ) -> Bound<'py, PyArray2<f32>> {
     rs::db_to_amplitude(s_db.as_array(), ref_amplitude).into_pyarray(py)
@@ -123,7 +124,7 @@ pub fn py_db_to_amplitude<'py>(
 #[pyo3(name = "magphase", signature = (d, *, power=1.0))]
 pub fn py_magphase<'py>(
     py: Python<'py>,
-    d: PyReadonlyArray2<'py, Complex32>,
+    d: ArrayIn2<'py, Complex32>,
     power: f32,
 ) -> (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<Complex32>>) {
     let (mag, phase) = rs::magphase(d.as_array(), power);
@@ -134,7 +135,7 @@ pub fn py_magphase<'py>(
 #[pyo3(name = "phase_vocoder", signature = (d, *, rate, hop_length=None))]
 pub fn py_phase_vocoder<'py>(
     py: Python<'py>,
-    d: PyReadonlyArray2<'py, Complex32>,
+    d: ArrayIn2<'py, Complex32>,
     rate: f32,
     hop_length: Option<usize>,
 ) -> PyResult<Bound<'py, PyArray2<Complex32>>> {
@@ -147,7 +148,7 @@ pub fn py_phase_vocoder<'py>(
 #[pyo3(name = "pcen", signature = (s, *, sr=22050.0, hop_length=512, gain=0.98, bias=2.0, power=0.5, time_constant=0.06, eps=1e-6))]
 pub fn py_pcen<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
+    s: ArrayIn2<'py, f32>,
     sr: f32,
     hop_length: usize,
     gain: f32,
@@ -174,8 +175,8 @@ pub fn py_pcen<'py>(
 #[pyo3(name = "perceptual_weighting", signature = (s, frequencies, *, kind="A"))]
 pub fn py_perceptual_weighting<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    s: ArrayIn2<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
     kind: &str,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
     rs::perceptual_weighting(s.as_array(), frequencies.as_array(), kind)
@@ -188,7 +189,7 @@ pub fn py_perceptual_weighting<'py>(
 #[pyo3(name = "cqt", signature = (y, *, sr=22050, hop_length=512, fmin=None, n_bins=84, bins_per_octave=12, filter_scale=1.0))]
 pub fn py_cqt<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
     fmin: Option<f32>,
@@ -213,7 +214,7 @@ pub fn py_cqt<'py>(
 #[pyo3(name = "vqt", signature = (y, *, sr=22050, hop_length=512, fmin=None, n_bins=84, bins_per_octave=12, filter_scale=1.0, gamma=0.0))]
 pub fn py_vqt<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
     fmin: Option<f32>,
@@ -240,7 +241,7 @@ pub fn py_vqt<'py>(
 #[pyo3(name = "hybrid_cqt", signature = (y, *, sr=22050, hop_length=512, fmin=None, n_bins=84, bins_per_octave=12, filter_scale=1.0))]
 pub fn py_hybrid_cqt<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
     fmin: Option<f32>,
@@ -265,7 +266,7 @@ pub fn py_hybrid_cqt<'py>(
 #[pyo3(name = "pseudo_cqt", signature = (y, *, sr=22050, hop_length=512, fmin=None, n_bins=84, bins_per_octave=12, filter_scale=1.0))]
 pub fn py_pseudo_cqt<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     hop_length: usize,
     fmin: Option<f32>,
@@ -290,7 +291,7 @@ pub fn py_pseudo_cqt<'py>(
 #[pyo3(name = "icqt", signature = (cq, *, sr=22050, hop_length=512, fmin=None, bins_per_octave=12, filter_scale=1.0))]
 pub fn py_icqt<'py>(
     py: Python<'py>,
-    cq: PyReadonlyArray2<'py, Complex32>,
+    cq: ArrayIn2<'py, Complex32>,
     sr: u32,
     hop_length: usize,
     fmin: Option<f32>,
@@ -313,7 +314,7 @@ pub fn py_icqt<'py>(
 #[pyo3(name = "griffinlim_cqt", signature = (cq_mag, *, sr=22050, hop_length=512, fmin=None, bins_per_octave=12, n_iter=32))]
 pub fn py_griffinlim_cqt<'py>(
     py: Python<'py>,
-    cq_mag: PyReadonlyArray2<'py, f32>,
+    cq_mag: ArrayIn2<'py, f32>,
     sr: u32,
     hop_length: usize,
     fmin: Option<f32>,
@@ -337,7 +338,7 @@ pub fn py_griffinlim_cqt<'py>(
 #[pyo3(name = "yin", signature = (y, *, fmin, fmax, sr=22050, frame_length=2048, hop_length=None, trough_threshold=0.1))]
 pub fn py_yin<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     fmin: f32,
     fmax: f32,
     sr: u32,
@@ -362,7 +363,7 @@ pub fn py_yin<'py>(
 #[pyo3(name = "pyin", signature = (y, *, fmin, fmax, sr=22050, frame_length=2048, hop_length=None))]
 pub fn py_pyin<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     fmin: f32,
     fmax: f32,
     sr: u32,
@@ -386,7 +387,7 @@ pub fn py_pyin<'py>(
 #[pyfunction]
 #[pyo3(name = "estimate_tuning", signature = (*, y=None, sr=22050, n_fft=None, resolution=None, bins_per_octave=None))]
 pub fn py_estimate_tuning(
-    y: Option<PyReadonlyArray1<'_, f32>>,
+    y: Option<ArrayIn1<'_, f32>>,
     sr: u32,
     n_fft: Option<usize>,
     resolution: Option<f32>,
@@ -416,7 +417,7 @@ pub fn py_pitch_tuning(
 #[pyo3(name = "piptrack", signature = (y, *, sr=22050, n_fft=2048, hop_length=None))]
 pub fn py_piptrack<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     n_fft: usize,
     hop_length: Option<usize>,
@@ -431,8 +432,8 @@ pub fn py_piptrack<'py>(
 #[pyo3(name = "salience", signature = (s, freqs, *, harmonics, weights=None, fill_value=0.0))]
 pub fn py_salience<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
-    freqs: PyReadonlyArray1<'py, f32>,
+    s: ArrayIn2<'py, f32>,
+    freqs: ArrayIn1<'py, f32>,
     harmonics: Vec<usize>,
     weights: Option<Vec<f32>>,
     fill_value: f32,
@@ -452,8 +453,8 @@ pub fn py_salience<'py>(
 #[pyo3(name = "interp_harmonics", signature = (s, freqs, *, harmonics, fill_value=0.0))]
 pub fn py_interp_harmonics<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
-    freqs: PyReadonlyArray1<'py, f32>,
+    s: ArrayIn2<'py, f32>,
+    freqs: ArrayIn1<'py, f32>,
     harmonics: Vec<f32>,
     fill_value: f32,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
@@ -466,9 +467,9 @@ pub fn py_interp_harmonics<'py>(
 #[pyo3(name = "f0_harmonics", signature = (s, freqs, f0, *, harmonics, fill_value=0.0))]
 pub fn py_f0_harmonics<'py>(
     py: Python<'py>,
-    s: PyReadonlyArray2<'py, f32>,
-    freqs: PyReadonlyArray1<'py, f32>,
-    f0: PyReadonlyArray1<'py, f32>,
+    s: ArrayIn2<'py, f32>,
+    freqs: ArrayIn1<'py, f32>,
+    f0: ArrayIn1<'py, f32>,
     harmonics: Vec<f32>,
     fill_value: f32,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {

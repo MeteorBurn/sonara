@@ -1,4 +1,5 @@
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use crate::array::ArrayIn1;
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -8,7 +9,7 @@ use sonara::effects as rs;
 #[pyo3(name = "trim", signature = (y, *, top_db=60.0, frame_length=2048, hop_length=512))]
 pub fn py_trim<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     top_db: f32,
     frame_length: usize,
     hop_length: usize,
@@ -21,7 +22,7 @@ pub fn py_trim<'py>(
 #[pyfunction]
 #[pyo3(name = "split", signature = (y, *, top_db=60.0, frame_length=2048, hop_length=512))]
 pub fn py_split(
-    y: PyReadonlyArray1<'_, f32>,
+    y: ArrayIn1<'_, f32>,
     top_db: f32,
     frame_length: usize,
     hop_length: usize,
@@ -35,7 +36,7 @@ pub fn py_split(
     min_silence_duration=None, min_signal_duration=None
 ))]
 pub fn py_split_with_constraints(
-    y: PyReadonlyArray1<'_, f32>,
+    y: ArrayIn1<'_, f32>,
     sr: u32,
     top_db: f32,
     frame_length: usize,
@@ -61,7 +62,7 @@ pub fn py_split_with_constraints(
 ))]
 pub fn py_melody_separate<'py>(
     py: Python<'py>,
-    y: PyReadonlyArray1<'py, f32>,
+    y: ArrayIn1<'py, f32>,
     sr: u32,
     fmin: f32,
     fmax: f32,

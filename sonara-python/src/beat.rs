@@ -1,4 +1,4 @@
-use numpy::PyReadonlyArray1;
+use crate::array::ArrayIn1;
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -7,8 +7,8 @@ use sonara::beat as rs;
 #[pyfunction]
 #[pyo3(name = "beat_track", signature = (*, y=None, onset_envelope=None, sr=22050, hop_length=512, start_bpm=120.0, tightness=100.0, trim=true, bpm_min=None, bpm_max=None))]
 pub fn py_beat_track(
-    y: Option<PyReadonlyArray1<'_, f32>>,
-    onset_envelope: Option<PyReadonlyArray1<'_, f32>>,
+    y: Option<ArrayIn1<'_, f32>>,
+    onset_envelope: Option<ArrayIn1<'_, f32>>,
     sr: u32,
     hop_length: usize,
     start_bpm: f32,

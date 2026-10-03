@@ -1,4 +1,5 @@
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use crate::array::ArrayIn1;
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -240,7 +241,7 @@ pub fn py_blocks_to_time(blocks: Vec<usize>, block_length: usize, sr: f32) -> Ve
 #[pyo3(name = "A_weighting")]
 pub fn py_a_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
 ) -> Bound<'py, PyArray1<f32>> {
     frequencies
         .as_array()
@@ -252,7 +253,7 @@ pub fn py_a_weighting<'py>(
 #[pyo3(name = "B_weighting")]
 pub fn py_b_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
 ) -> Bound<'py, PyArray1<f32>> {
     frequencies
         .as_array()
@@ -264,7 +265,7 @@ pub fn py_b_weighting<'py>(
 #[pyo3(name = "C_weighting")]
 pub fn py_c_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
 ) -> Bound<'py, PyArray1<f32>> {
     frequencies
         .as_array()
@@ -276,7 +277,7 @@ pub fn py_c_weighting<'py>(
 #[pyo3(name = "D_weighting")]
 pub fn py_d_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
 ) -> Bound<'py, PyArray1<f32>> {
     frequencies
         .as_array()
@@ -288,7 +289,7 @@ pub fn py_d_weighting<'py>(
 #[pyo3(name = "Z_weighting")]
 pub fn py_z_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
 ) -> Bound<'py, PyArray1<f32>> {
     frequencies
         .as_array()
@@ -300,7 +301,7 @@ pub fn py_z_weighting<'py>(
 #[pyo3(name = "frequency_weighting", signature = (frequencies, *, kind="A"))]
 pub fn py_frequency_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
     kind: &str,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
     rs::frequency_weighting(frequencies.as_array(), kind)
@@ -312,7 +313,7 @@ pub fn py_frequency_weighting<'py>(
 #[pyo3(name = "multi_frequency_weighting")]
 pub fn py_multi_frequency_weighting<'py>(
     py: Python<'py>,
-    frequencies: PyReadonlyArray1<'py, f32>,
+    frequencies: ArrayIn1<'py, f32>,
     kinds: Vec<String>,
 ) -> PyResult<Bound<'py, numpy::PyArray2<f32>>> {
     let kind_refs: Vec<&str> = kinds.iter().map(|s| s.as_str()).collect();

@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use crate::array::{ArrayIn1, ArrayIn2};
+use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;
 
 use crate::error::IntoPyResult;
@@ -10,8 +11,8 @@ use sonara::feature::spectral as rs;
 #[pyo3(name = "melspectrogram", signature = (*, y=None, S=None, sr=22050.0, n_fft=2048, hop_length=512, n_mels=128, fmin=0.0, fmax=0.0, power=2.0))]
 pub fn py_melspectrogram<'py>(
     py: Python<'py>,
-    y: Option<PyReadonlyArray1<'py, f32>>,
-    S: Option<PyReadonlyArray2<'py, f32>>,
+    y: Option<ArrayIn1<'py, f32>>,
+    S: Option<ArrayIn2<'py, f32>>,
     sr: f32,
     n_fft: usize,
     hop_length: usize,
@@ -33,8 +34,8 @@ pub fn py_melspectrogram<'py>(
 #[pyo3(name = "mfcc", signature = (*, y=None, S=None, sr=22050.0, n_mfcc=20, n_fft=2048, hop_length=512, n_mels=128, fmin=0.0, fmax=0.0))]
 pub fn py_mfcc<'py>(
     py: Python<'py>,
-    y: Option<PyReadonlyArray1<'py, f32>>,
-    S: Option<PyReadonlyArray2<'py, f32>>,
+    y: Option<ArrayIn1<'py, f32>>,
+    S: Option<ArrayIn2<'py, f32>>,
     sr: f32,
     n_mfcc: usize,
     n_fft: usize,
@@ -56,8 +57,8 @@ pub fn py_mfcc<'py>(
 #[pyo3(name = "chroma_stft", signature = (*, y=None, S=None, sr=22050.0, n_fft=2048, hop_length=512, n_chroma=12, tuning=0.0))]
 pub fn py_chroma_stft<'py>(
     py: Python<'py>,
-    y: Option<PyReadonlyArray1<'py, f32>>,
-    S: Option<PyReadonlyArray2<'py, f32>>,
+    y: Option<ArrayIn1<'py, f32>>,
+    S: Option<ArrayIn2<'py, f32>>,
     sr: f32,
     n_fft: usize,
     hop_length: usize,
@@ -75,8 +76,8 @@ pub fn py_chroma_stft<'py>(
 #[pyo3(name = "spectral_centroid", signature = (*, y=None, S=None, sr=22050.0, n_fft=2048, hop_length=512))]
 pub fn py_spectral_centroid<'py>(
     py: Python<'py>,
-    y: Option<PyReadonlyArray1<'py, f32>>,
-    S: Option<PyReadonlyArray2<'py, f32>>,
+    y: Option<ArrayIn1<'py, f32>>,
+    S: Option<ArrayIn2<'py, f32>>,
     sr: f32,
     n_fft: usize,
     hop_length: usize,
@@ -91,8 +92,8 @@ pub fn py_spectral_centroid<'py>(
 #[pyo3(name = "rms", signature = (*, y=None, S=None, frame_length=2048, hop_length=512))]
 pub fn py_rms<'py>(
     py: Python<'py>,
-    y: Option<PyReadonlyArray1<'py, f32>>,
-    S: Option<PyReadonlyArray2<'py, f32>>,
+    y: Option<ArrayIn1<'py, f32>>,
+    S: Option<ArrayIn2<'py, f32>>,
     frame_length: usize,
     hop_length: usize,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
