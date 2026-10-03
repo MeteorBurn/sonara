@@ -6,13 +6,25 @@ including the raw inputs the measure is computed from (multiband onset
 envelopes, beats, downbeats), so the algorithm can later be re-run offline
 without decoding audio again.
 
+Writes into data/1_sonara/: run-<name>.sqlite (the full run: every scalar and
+array; it is what makes the run resumable) and json_<name>/ (one JSON per
+track). <name> is the set, plus a revision suffix for a new Sonara build
+(broken_<sha>). The 0.3.7 baseline lives in json_broken/ and json_straight/
+without its run database, so those names are refused.
+
 Run (resumable: already analysed tracks are skipped):
 
-    & <paths.json sonara_python> `
+    & <README machine paths: sonara_python> `
         "<repo>\\dev-docs\\bench\\scripts\\bpm-grid\\extract_reference.py"
 
 Options: --playlist, --name, --workers, --threads, --limit, --retry-failed,
---export-json (only rebuild the JSON from the database).
+--export-json (only rebuild the JSON from the database), --revision (source
+revision of the build, recorded as sonara_repo_head), --wheel (wheel whose
+SHA-256 is recorded; default: README machine paths sonara_wheel). The path and
+SHA-256 of the loaded native module are always recorded, whatever the flags say.
+--features (comma list) replaces the main pass's PRESET features and
+--no-meter-pass skips the separate time_signature pass; the run database
+records the preset actually used.
 """
 
 from __future__ import annotations
@@ -34,7 +46,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bpm_grid_paths as P  # noqa: E402
 
-WHEEL = P.SONARA_WHEEL  # paths.json sonara_wheel
+WHEEL = P.SONARA_WHEEL  # README machine paths: sonara_wheel
 
 # ---------------------------------------------------------------------------
 # PRESET: every analysis parameter lives here and is recorded in the database.
@@ -110,7 +122,8 @@ def analyze_one(path: str, preset: dict):
         result = dict(sonara.analyze_file(
             path, features=preset["features"],
             vocalness_model=preset["vocalness_model"], **common))
-        meter = sonara.analyze_file(path, features=preset["meter_pass"], **common)
+        meter = (sonara.analyze_file(path, features=preset["meter_pass"], **common)
+                 if preset["meter_pass"] else {})
         for key, value in meter.items():
             if key in ("time_signature", "time_signature_confidence"):
                 result[key] = value
@@ -295,9 +308,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--playlist", default=str(P.PLAYLIST_BROKEN))
-    ap.add_argument("--name", default="broken_1000",
-                    help="output base name: <name>.sqlite and folder <name>_json")
-    ap.add_argument("--out-dir", default=str(P.DATA))
+    ap.add_argument("--name", required=True,
+                    help="run name: the set plus a revision suffix, e.g. broken_<sha>; "
+                         "writes run-<name>.sqlite and json_<name>/")
+    ap.add_argument("--out-dir", default=str(P.SONARA_DIR))
     ap.add_argument("--workers", type=int, default=4,
                     help="parallel processes (default 4 = ssd-balanced profile)")
     ap.add_argument("--threads", type=int, default=4,
@@ -307,12 +321,37 @@ def main() -> int:
                     help="re-analyse tracks stored as error/missing")
     ap.add_argument("--export-json", action="store_true",
                     help="only rebuild the per-track JSON files from the existing database")
+    ap.add_argument("--revision",
+                    help="source revision the analysing build was made from, recorded as "
+                         "sonara_repo_head (default: recorded as unknown, with a warning)")
+    ap.add_argument("--wheel", default=str(WHEEL) if WHEEL else None,
+                    help="wheel the analysing environment was installed from; its SHA-256 "
+                         "is recorded (default: README machine paths sonara_wheel)")
+    ap.add_argument("--features",
+                    help="comma-separated features of the main pass, instead of the PRESET list")
+    ap.add_argument("--no-meter-pass", action="store_true",
+                    help="skip the separate time_signature (meter_) pass")
     args = ap.parse_args()
+
+    # The preset actually used: PRESET unless --features / --no-meter-pass change it.
+    preset = dict(PRESET)
+    if args.features:
+        preset["features"] = [f.strip() for f in args.features.split(",") if f.strip()]
+    if args.no_meter_pass:
+        preset["meter_pass"] = []
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    db_path = out_dir / f"{args.name}.sqlite"
-    json_dir = out_dir / f"{args.name}_json"
+    db_path = out_dir / f"run-{args.name}.sqlite"
+    json_dir = out_dir / f"json_{args.name}"
+    if not db_path.exists():
+        if args.export_json:
+            print(f"ERROR: no run database {db_path}; nothing to export.")
+            return 2
+        if any(json_dir.glob("[0-9][0-9][0-9][0-9] - *.json")):
+            print(f"ERROR: {json_dir} holds results of a run without a database "
+                  "(e.g. the 0.3.7 baseline); use another --name.")
+            return 2
     con = open_db(db_path)
 
     if args.export_json:
@@ -323,6 +362,15 @@ def main() -> int:
     # Children inherit this; it must be set before sonara (rayon) loads.
     os.environ["RAYON_NUM_THREADS"] = str(args.threads)
     import sonara
+    import sonara._sonara as sonara_native
+
+    # Provenance: the native module that actually runs is pinned by its hash.
+    native_path = Path(sonara_native.__file__)
+    wheel = Path(args.wheel) if args.wheel else None
+    revision = args.revision
+    if not revision:
+        revision = "unknown (no --revision)"
+        print(f"WARNING: no --revision given; sonara_repo_head is recorded as '{revision}'.")
 
     playlist_path = Path(args.playlist)
     paths = read_playlist(playlist_path)
@@ -331,18 +379,20 @@ def main() -> int:
 
     stored_preset = con.execute(
         "SELECT value FROM run_meta WHERE key = 'preset'").fetchone()
-    if stored_preset and json.loads(stored_preset[0]) != PRESET:
+    if stored_preset and json.loads(stored_preset[0]) != preset:
         print("ERROR: this database was filled with a different PRESET.\n"
               f"       Use another --name or delete {db_path}.")
         return 2
 
     meta = {
-        "preset": PRESET,
+        "preset": preset,
         "sonara_version": sonara.__version__,
         "sonara_module": sonara.__file__,
-        "wheel": str(WHEEL),
-        "wheel_sha256": sha256(WHEEL),
-        "sonara_repo_head": "459bd3c (v0.3.7-meteorburn.1)",
+        "sonara_native_module": str(native_path),
+        "sonara_module_sha256": sha256(native_path),
+        "wheel": str(wheel) if wheel else None,
+        "wheel_sha256": sha256(wheel) if wheel else None,
+        "sonara_repo_head": revision,
         "playlist": str(playlist_path),
         "playlist_sha256": sha256(playlist_path),
         "playlist_tracks": len(paths),
@@ -365,8 +415,14 @@ def main() -> int:
     index = {p: i for i, p in enumerate(paths)}
     todo = [p for p in paths if p not in done]
 
-    print(f"SONARA {sonara.__version__}  preset '{PRESET['name']}'  "
-          f"sr={PRESET['sr']}  bpm={PRESET['bpm_min']}..{PRESET['bpm_max']}")
+    print(f"SONARA {sonara.__version__}  preset '{preset['name']}'  "
+          f"sr={preset['sr']}  bpm={preset['bpm_min']}..{preset['bpm_max']}")
+    if preset != PRESET:
+        print(f"features : {','.join(preset['features'])}  meter pass: "
+              f"{','.join(preset['meter_pass']) or 'skipped'}")
+    print(f"revision : {revision}")
+    print(f"module   : {native_path}  (sha256 {meta['sonara_module_sha256']})")
+    print(f"wheel    : {meta['wheel']}  (sha256 {meta['wheel_sha256']})")
     print(f"playlist : {playlist_path}  ({len(paths)} tracks)")
     print(f"database : {db_path}")
     print(f"json     : {json_dir}  (one file per track)")
@@ -377,7 +433,7 @@ def main() -> int:
     started = time.perf_counter()
     try:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(analyze_one, p, PRESET): p for p in todo}
+            futures = {pool.submit(analyze_one, p, preset): p for p in todo}
             for n, fut in enumerate(as_completed(futures), 1):
                 res = fut.result()
                 store(con, index[res["path"]], res)

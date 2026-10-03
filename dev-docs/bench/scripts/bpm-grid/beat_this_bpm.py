@@ -1,6 +1,7 @@
 """Beat This! beat/downbeat tracking and exact BPM for a playlist.
 
-Writes, under <dataset>/data/beat_this/ (see bpm_grid_paths.py):
+Writes, under <dataset>/data/4_beat_this/json_broken/ (default; --out-dir for the
+straight set; see bpm_grid_paths.py):
   - one JSON per track: `0001 - <file stem>.json` (beats, downbeats, BPM
     estimates, interval statistics), numbered by playlist position;
   - `_bpm.json`: only the BPM of every track, two decimals;
@@ -157,7 +158,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--playlist", default=str(P.PLAYLIST_BROKEN))
-    ap.add_argument("--out-dir", default=str(P.DATA / "beat_this"))
+    ap.add_argument("--out-dir", default=str(P.BEAT_THIS_DIR / "json_broken"))
     ap.add_argument("--model", default="final0", help="Beat This! checkpoint")
     ap.add_argument("--device", default="cuda", help="cuda or cpu")
     ap.add_argument("--float16", action="store_true", help="half precision on GPU")

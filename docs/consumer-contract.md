@@ -1,8 +1,8 @@
 # Consumer contract — sonara's core Rust API
 
 **Owner:** sonara. This is the single durable copy.
-**Status:** current, verified against sonara 0.3.5 / `ANALYSIS_SCHEMA_VERSION = 6`
-on 2026-07-29.
+**Status:** current, `ANALYSIS_SCHEMA_VERSION = 7` since 2026-10-02; last verified
+against sonara 0.3.5 / schema 6 on 2026-07-29.
 **Consumer of record:** sonagram (since 2026-07-18). Originally raised by
 kglite on 2026-07-15.
 
@@ -56,7 +56,7 @@ The original asks and what shipped. Kept for lineage; do not re-raise them.
 |---|---|
 | **Self-describing time.** `beats` / `onset_frames` / downbeats were frame indices; effective sample rate and `hop_length` were internal to `analyze.rs`. | `TrackAnalysis.provenance: AnalysisProvenance` (always present) carries effective post-resample `sample_rate` and `hop_length`, plus `frame_to_sec` / `beats_sec` / `onsets_sec` / `downbeats_sec` helpers. |
 | **Typed event records with spans.** `chord_sequence: Option<Vec<String>>` had no temporal alignment; segments were tuples. | `chord_events: Option<Vec<ChordEvent>>` (`{ label, start_sec, end_sec }`, merged runs, contiguous, covering the track); `segments` is a named `SegmentEvent { start_sec, end_sec, energy }`. |
-| **Persistable provenance** to detect stale analysis. | `AnalysisProvenance { schema_version, sample_rate, hop_length, mode, requested_features (sorted), vocalness_model_id, … }`, pinned to `ANALYSIS_SCHEMA_VERSION` (now 6), bumped whenever field meaning or units change. |
+| **Persistable provenance** to detect stale analysis. | `AnalysisProvenance { schema_version, sample_rate, hop_length, mode, requested_features (sorted), vocalness_model_id, … }`, pinned to `ANALYSIS_SCHEMA_VERSION` (now 7), bumped whenever field meaning or units change. |
 
 ## Standing boundaries — what sonara undertakes to hold
 
@@ -98,6 +98,39 @@ Downstreams pin a compatible pre-1.0 sonara release and key stored records on
 `provenance.schema_version` (plus the per-subsystem `embedding_version` /
 fingerprint version where those are consumed). sonagram's current floor is
 `sonara >= 0.2.2`. Heuristic-semantics changes bump `ANALYSIS_SCHEMA_VERSION`.
+
+### Schema 7: beats and BPM from the beat grid (2026-10-02)
+
+`bpm` and `bpm_raw` keep their meaning and units: the tempo in BPM, folded into
+`bpm_min..bpm_max` for `bpm` and before folding for `bpm_raw`. They are now the
+period of the tracked beats instead of the autocorrelation peak, so they are
+more precise and stored schema-6 values differ slightly. The autocorrelation
+estimate remains the fallback when fewer than 17 beats are tracked or the beat
+period deviates from it by more than 5%. A steady track, whose tracked beats
+stay on one constant grid over the whole track and also fit the nearest integer
+tempo, reports that integer (`bpm_raw` keeps the same octave relation).
+The tempo level is re-checked: the selected autocorrelation level and up to
+four other distinct levels are tracked again, and another level replaces the
+selected one only when its beats agree with the onsets clearly better (beat-pair
+consensus plus the tracker's local score). The level is chosen within 79–192 BPM
+whatever `bpm_min`/`bpm_max` are, which only fold the reported value, so the
+tempo ignoring octave no longer depends on the range. On a switched track,
+`bpm`, `bpm_raw` and `beats` follow the new level; `bpm_candidates` do not change.
+The onset envelope is padded one frame less than librosa's
+`lag + n_fft / (2 * hop_length)`, so `onset_frames`, `onset_strength_bands`,
+`beats` and `downbeats` sit one frame (about 23 ms) earlier than in schema 6,
+on the audible onset; every analysis path shares that padding. The public
+`onset_strength_method` keeps librosa's padding. `downbeats` (beatgrid) now
+follow the kick: the bar phase is the one whose beats carry the most low-band
+(below 200 Hz) accent relative to the 200–800 Hz band, rather than the loudest
+broadband accent, which is often the snare on beats two and four.
+`beats` keep their meaning, but they
+are now tracked on the onset envelope of the mel bins below 3.2 kHz, so they
+follow the kick and snare rather than off-beat hi-hats; stored schema-6 beats,
+and the fields derived from them, can differ. The tempo estimate and
+`bpm_candidates` still come from the broadband envelope and are unchanged. The
+`bpm_confidence` formula is unchanged; its value follows `bpm` and the beat
+count.
 
 ### Per-feature freshness
 
