@@ -26,12 +26,6 @@
       "reason": "one-time bit-preserving extraction guarded by frozen scalar outputs"
     },
     {
-      "path": "sonara/src/perceptual.rs",
-      "base_sha256": "cbbd1056cd517f412bd0310f4bce4b1c6807afc87b434028030f736c319b9203",
-      "head_sha256": "c155879147650103802c47d215d356bfe75438b7427ea379a5755a6b0a626eab",
-      "reason": "one-time re-export transition guarded by frozen scalar outputs"
-    },
-    {
       "path": "scripts/mood_aggression_probe.py",
       "base_sha256": "f28de68e811ff7967e96b3382dd4dadfd448feba9a97ab2c7124787482ae9fe0",
       "head_sha256": null,
