@@ -4546,6 +4546,20 @@ mod tests {
     }
 
     #[test]
+    fn test_analyze_signal_strided_view_matches_contiguous_copy() {
+        // NumPy `analyze_signal(y[::2])` panicked inside Rust instead of analysing.
+        let (y, sr) = crate::core::audio::load(&fixture("tagged.flac"), 0, true, 0.0, 0.0).unwrap();
+        let config = AnalysisConfig::default();
+        for view in [y.slice(ndarray::s![..;2]), y.slice(ndarray::s![..;-1])] {
+            let copy = ndarray::Array1::from(view.to_vec());
+            assert_eq!(
+                analyze_signal(view, sr, &config).unwrap(),
+                analyze_signal(copy.view(), sr, &config).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn test_analyze_file_tags_populated() {
         let config = AnalysisConfig {
             mode: AnalysisMode::Compact,

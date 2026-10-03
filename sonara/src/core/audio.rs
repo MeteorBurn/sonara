@@ -702,7 +702,8 @@ pub fn to_mono(y: ndarray::ArrayView2<Float>) -> Array1<Float> {
 /// Falls back to rubato sinc interpolation for all other ratios.
 pub fn resample(y: ArrayView1<Float>, orig_sr: u32, target_sr: u32) -> Result<Array1<Float>> {
     if orig_sr == target_sr {
-        return Ok(y.to_owned());
+        // `to_owned` keeps a reversed view's negative stride; callers slice the result.
+        return Ok(y.as_standard_layout().into_owned());
     }
 
     // Fast path: exact 2:1 decimation (e.g., 44100 → 22050)
@@ -763,6 +764,8 @@ fn decimate_half(y: ArrayView1<Float>) -> Array1<Float> {
     let n = y.len();
     let n_out = n / 2;
     let mut out = Array1::<Float>::zeros(n_out);
+    // A strided view has no slice: copy it once.
+    let y = y.as_standard_layout();
     let raw = y.as_slice().unwrap();
 
     // Interior samples (no boundary checks needed)
@@ -1284,6 +1287,24 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_resample_strided_view_matches_contiguous_copy() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.flac"
+        ));
+        let (y, sr) = load(path, 0, true, 0.0, 0.0).unwrap();
+        for view in [y.slice(ndarray::s![..;2]), y.slice(ndarray::s![..;-1])] {
+            let copy = Array1::from(view.to_vec());
+            // 2:1 decimation sliced the view; the same-rate copy must come back standard.
+            let half = resample(view, sr, sr / 2).unwrap();
+            assert_eq!(half, resample(copy.view(), sr, sr / 2).unwrap());
+            let same = resample(view, sr, sr).unwrap();
+            assert!(same.as_slice().is_some());
+            assert_eq!(same, copy);
+        }
+    }
 
     #[test]
     fn test_to_mono_stereo() {

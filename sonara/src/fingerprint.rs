@@ -137,7 +137,8 @@ const MAX_OFFSET_FRAMES: isize = 24;
 pub fn compute(y: ArrayView1<Float>, sr: u32) -> Vec<u32> {
     // --- Front end: resample to the fixed low analysis rate ---
     let ys = if sr == FP_SR {
-        y.to_owned()
+        // `to_owned` keeps a reversed view's negative stride; `as_slice` below needs it standard.
+        y.as_standard_layout().into_owned()
     } else {
         match audio::resample(y, sr, FP_SR) {
             Ok(r) => r,

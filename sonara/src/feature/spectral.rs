@@ -569,7 +569,9 @@ pub fn rms(
             let padded_len = n + 2 * pad;
             let n_frames = 1 + (padded_len - frame_length) / hop_length;
             let mut result = Spectrogram::zeros((1, n_frames));
-            let y_raw = y.as_slice().unwrap_or(&[]);
+            // A strided view has no slice: copy it once rather than index an empty one.
+            let y = y.as_standard_layout();
+            let y_raw = y.as_slice().unwrap();
 
             for t in 0..n_frames {
                 let frame_start = t * hop_length; // in padded coordinates
@@ -695,6 +697,23 @@ mod tests {
     fn sine(freq: Float, sr: Float, dur: Float) -> Array1<Float> {
         let n = (sr * dur) as usize;
         Array1::from_shape_fn(n, |i| (2.0 * PI * freq * i as Float / sr).sin())
+    }
+
+    #[test]
+    fn test_rms_strided_view_matches_contiguous_copy() {
+        // A strided view used to read as an empty slice and panic out of bounds.
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.flac"
+        ));
+        let (y, _sr) = crate::core::audio::load(path, 0, true, 0.0, 0.0).unwrap();
+        for view in [y.slice(s![..;2]), y.slice(s![..;-1])] {
+            let copy = Array1::from(view.to_vec());
+            assert_eq!(
+                rms(Some(view), None, 2048, 512).unwrap(),
+                rms(Some(copy.view()), None, 2048, 512).unwrap()
+            );
+        }
     }
 
     #[test]

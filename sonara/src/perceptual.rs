@@ -96,6 +96,8 @@ pub fn loudness_lufs(y: ArrayView1<Float>, sr: u32) -> Float {
     }
 
     let c = KWeightCoeffs::for_sample_rate(sr);
+    // A strided view (`stereo[:, 0]`, `y[::2]`) has no slice: copy it once.
+    let y = y.as_standard_layout();
     let raw = y.as_slice().unwrap();
 
     // Apply K-weighting: two cascaded biquad sections (Direct Form II Transposed)
@@ -289,6 +291,7 @@ pub fn danceability_dfa(y: ArrayView1<Float>, sr: u32) -> Float {
         return 0.0;
     }
 
+    let y = y.as_standard_layout();
     let raw = y.as_slice().unwrap();
 
     // Step 1: Compute stddev per 10ms frame
@@ -699,6 +702,24 @@ pub use crate::mood::{mood_scores, MoodScores};
 mod tests {
     use super::*;
     use ndarray::Array1;
+
+    #[test]
+    fn test_strided_view_matches_contiguous_copy() {
+        // NumPy `y[::2]` / `stereo[:, 0]` arrive as strided views with no slice.
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/tagged.flac"
+        ));
+        let (y, sr) = crate::core::audio::load(path, 0, true, 0.0, 0.0).unwrap();
+        for view in [y.slice(ndarray::s![..;2]), y.slice(ndarray::s![..;-1])] {
+            let copy = Array1::from(view.to_vec());
+            assert_eq!(loudness_lufs(view, sr), loudness_lufs(copy.view(), sr));
+            assert_eq!(
+                danceability_dfa(view, sr),
+                danceability_dfa(copy.view(), sr)
+            );
+        }
+    }
 
     #[test]
     fn test_energy_loud_vs_quiet() {
