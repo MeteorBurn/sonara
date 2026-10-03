@@ -232,6 +232,40 @@ pub fn beat_track_detailed_with_dp_envelope(
     bpm_max: Option<Float>,
     dp_envelope: Option<ArrayView1<Float>>,
 ) -> Result<(TempoEstimate, Vec<usize>)> {
+    let (estimate, beats, _) = beat_track_with_range_free_beats(
+        y,
+        onset_envelope,
+        sr,
+        hop_length,
+        start_bpm,
+        tightness,
+        trim,
+        bpm_min,
+        bpm_max,
+        dp_envelope,
+        false,
+    )?;
+    Ok((estimate, beats))
+}
+
+/// [`beat_track_detailed_with_dp_envelope`], plus, when `range_free_beats` is
+/// set, the beats a call without a BPM range would return (bit-identical to
+/// one). `tempo_raw` is that call's tempo. The aggression model reads both, so
+/// its score does not move with the caller's display range.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn beat_track_with_range_free_beats(
+    y: Option<ArrayView1<Float>>,
+    onset_envelope: Option<ArrayView1<Float>>,
+    sr: u32,
+    hop_length: usize,
+    start_bpm: Float,
+    tightness: Float,
+    trim: bool,
+    bpm_min: Option<Float>,
+    bpm_max: Option<Float>,
+    dp_envelope: Option<ArrayView1<Float>>,
+    range_free_beats: bool,
+) -> Result<(TempoEstimate, Vec<usize>, Option<Vec<usize>>)> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -260,7 +294,11 @@ pub fn beat_track_detailed_with_dp_envelope(
     }
 
     if oenv.len() < 4 {
-        return Ok((TempoEstimate::fallback(start_bpm), vec![]));
+        return Ok((
+            TempoEstimate::fallback(start_bpm),
+            vec![],
+            range_free_beats.then(Vec::new),
+        ));
     }
 
     // Guard against flat / degenerate onset envelopes (silence, DC): with no
@@ -274,7 +312,11 @@ pub fn beat_track_detailed_with_dp_envelope(
         || max_onset <= 1e-10
         || (max_onset - min_onset) <= 1e-10
     {
-        return Ok((TempoEstimate::fallback(start_bpm), vec![]));
+        return Ok((
+            TempoEstimate::fallback(start_bpm),
+            vec![],
+            range_free_beats.then(Vec::new),
+        ));
     }
 
     // Normalize the tracking envelope: the DP envelope, else the broadband one
@@ -310,7 +352,7 @@ pub fn beat_track_detailed_with_dp_envelope(
         let mut estimate = TempoEstimate::fallback(start_bpm);
         let frames_per_beat = frames_per_beat_of(start_bpm);
         if frames_per_beat == 0 {
-            return Ok((estimate, vec![]));
+            return Ok((estimate, vec![], range_free_beats.then(Vec::new)));
         }
         let (beats, _) = track(frames_per_beat);
         if let Some((tempo, tempo_raw)) =
@@ -319,7 +361,9 @@ pub fn beat_track_detailed_with_dp_envelope(
             estimate.tempo = tempo;
             estimate.tempo_raw = tempo_raw;
         }
-        return Ok((estimate, beats));
+        // Tracked at start_bpm whatever the range: the range-free beats are these.
+        let range_free = range_free_beats.then(|| beats.clone());
+        return Ok((estimate, beats, range_free));
     };
     let candidates = acf.ranked();
 
@@ -357,7 +401,7 @@ pub fn beat_track_detailed_with_dp_envelope(
                     tempo_raw: refined.clamp(30.0, 320.0),
                     candidates,
                 };
-                return Ok((estimate, vec![]));
+                return Ok((estimate, vec![], range_free_beats.then(Vec::new)));
             }
             continue;
         }
@@ -418,14 +462,27 @@ pub fn beat_track_detailed_with_dp_envelope(
 
     // The beats of the chosen level as the caller's range folds it: retracked
     // only when that changes the integer beat period.
-    let frames_per_beat = frames_per_beat_of(acf_tempo);
-    let beats = if frames_per_beat == level.frames_per_beat {
-        level.beats
-    } else if frames_per_beat == 0 {
-        vec![]
-    } else {
-        track(frames_per_beat).0
+    let beats_at = |frames_per_beat: usize| {
+        if frames_per_beat == level.frames_per_beat {
+            level.beats.clone()
+        } else if frames_per_beat == 0 {
+            vec![]
+        } else {
+            track(frames_per_beat).0
+        }
     };
+    let frames_per_beat = frames_per_beat_of(acf_tempo);
+    let beats = beats_at(frames_per_beat);
+    // The same level's beats as a call without a range tracks them (`raw` is
+    // `acf_tempo` unfolded); the level choice itself never depends on the range.
+    let range_free_beats = range_free_beats.then(|| {
+        let raw_frames_per_beat = frames_per_beat_of(raw);
+        if raw_frames_per_beat == frames_per_beat {
+            beats.clone()
+        } else {
+            beats_at(raw_frames_per_beat)
+        }
+    });
 
     Ok((
         TempoEstimate {
@@ -434,6 +491,7 @@ pub fn beat_track_detailed_with_dp_envelope(
             candidates,
         },
         beats,
+        range_free_beats,
     ))
 }
 

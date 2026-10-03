@@ -2124,7 +2124,13 @@ fn analyze_signal_inner(
     // BEAT TRACKING + ONSET DETECTION
     // ================================================================
 
-    let (tempo_estimate, beats) = crate::beat::beat_track_detailed_with_dp_envelope(
+    // The aggression model must not see the caller's range fold (the canonical
+    // lane tracks without one), so with a range it also gets the range-free beats.
+    #[cfg(feature = "aggression")]
+    let want_range_free_beats = wants_aggression && config.bpm_min.is_some();
+    #[cfg(not(feature = "aggression"))]
+    let want_range_free_beats = false;
+    let (tempo_estimate, beats, range_free_beats) = crate::beat::beat_track_with_range_free_beats(
         None,
         Some(oenv_padded.view()),
         sr,
@@ -2135,7 +2141,10 @@ fn analyze_signal_inner(
         config.bpm_min,
         config.bpm_max,
         Some(beat_env_padded.view()),
+        want_range_free_beats,
     )?;
+    #[cfg(not(feature = "aggression"))]
+    let _ = range_free_beats;
     let bpm = tempo_estimate.tempo;
     let bpm_raw = tempo_estimate.tempo_raw;
     let bpm_candidates = tempo_estimate.candidates;
@@ -2640,6 +2649,17 @@ fn analyze_signal_inner(
         );
         let mfcc = mfcc_mean.as_deref().unwrap_or(&[]);
         let contrast = spectral_contrast_mean.as_deref().unwrap_or(&[]);
+        // With a range, read the tempo and beats a range-free call reports, as the
+        // canonical lane does; without one they are the pipeline's own.
+        let (aggression_bpm, aggression_beats, aggression_danceability) =
+            match range_free_beats.as_deref() {
+                Some(free) => {
+                    let free_bpm = bpm_raw.clamp(30.0, 320.0);
+                    let dance = perceptual::danceability_heuristic(free_bpm, free, onset_density);
+                    (free_bpm, free, dance)
+                }
+                None => (bpm, beats.as_slice(), danceability.unwrap_or(0.5)),
+            };
         let crest_sorted = aggression_sorted(crest);
         let diss_sorted = aggression_sorted(&aggression_evenly_sample(diss, 48));
         let high_energy_sorted = aggression_sorted(high_energy);
@@ -2655,10 +2675,10 @@ fn analyze_signal_inner(
                 contrast: std::array::from_fn(|index| contrast.get(index).copied().unwrap_or(0.0)),
                 centroid: centroid_mean,
                 bandwidth: bw_mean,
-                bpm,
+                bpm: aggression_bpm,
                 onset_density_embedding: onset_density,
-                danceability: danceability.unwrap_or(0.5),
-                grid_regularity: aggression_grid_regularity(&beats),
+                danceability: aggression_danceability,
+                grid_regularity: aggression_grid_regularity(aggression_beats),
                 dynamic_range_db,
                 energy: energy.unwrap_or(0.5),
                 high_energy_p50: aggression_quantile_sorted(&high_energy_sorted, 0.50),
@@ -4692,6 +4712,28 @@ mod tests {
 
     #[cfg(feature = "aggression")]
     #[test]
+    fn test_aggression_ignores_the_bpm_range_fold() {
+        // The in-pass lane (22050 Hz) fed the model the range-folded tempo and the
+        // beats retracked at it, while the canonical lane tracks without a range,
+        // so a folding range moved the score at 22050 Hz only.
+        let (y, sr) = audio::load(&fixture("corrupt.mp3"), 22050, true, 0.0, 0.0).unwrap();
+        let free = analyze_signal(y.view(), sr, &feature_config(&["aggression"])).unwrap();
+        let mut folding = feature_config(&["aggression"]);
+        folding.bpm_min = Some(60.0);
+        folding.bpm_max = Some(119.0);
+        let folded = analyze_signal(y.view(), sr, &folding).unwrap();
+        // The fixture tracks at ~35 BPM; 60-119 doubles it and retracks the beats.
+        assert!(folded.bpm != free.bpm, "the range must fold the tempo");
+        assert!(folded.beats != free.beats, "the folded tempo must retrack the beats");
+        assert_eq!(folded.aggression_score, free.aggression_score);
+        assert_eq!(folded.aggression_rhythm, free.aggression_rhythm);
+        assert_eq!(folded.aggression_forcefulness, free.aggression_forcefulness);
+        assert_eq!(folded.aggression_harshness, free.aggression_harshness);
+        assert_eq!(folded.aggression_tension, free.aggression_tension);
+    }
+
+    #[cfg(feature = "aggression")]
+    #[test]
     fn test_aggression_uses_fused_evidence_without_dependency_leakage() {
         let y = sine(440.0, 22050, 2.0);
         let aggression_only = AnalysisConfig {
@@ -5395,6 +5437,16 @@ mod tests {
             lead,
             61.0 * SPF
         );
+    }
+
+    #[test]
+    fn test_silence_offsets_loud_first_frame_does_not_underflow() {
+        // The trailing scan reached frame 0 and computed `0 + 1 - 3` before checking
+        // that a run could end there: a debug build panicked.
+        let rms = [0.9_f32, 0.0, 0.0, 0.0, 0.0];
+        let (lead, trail) = silence_offsets(&rms, SR, HOP, -60.0);
+        let dur = rms.len() as Float * SPF;
+        assert_eq!((lead, trail), (dur, dur), "a lone click is not audio");
     }
 
     #[test]
