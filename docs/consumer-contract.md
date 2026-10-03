@@ -153,7 +153,10 @@ six spectral summaries: `mfcc_mean`, `chroma_mean` and
 evidence for recomputing `key`, `valence`, `energy` and similar features, so a
 consumer that relied on them from a narrow request must now name them (`mfcc`,
 `chroma`, `contrast`, `bandwidth`, `rolloff`, `flatness`). Mode runs and requests
-that include `embedding` are unaffected.
+that include `embedding` are unaffected. One deliberate exception: `valence` also
+returns the key it is derived from (`key`, `key_confidence`, `key_camelot`).
+Since 2026-10-03 `augment_analysis` writes those key fields when it fills
+`valence` too, as a fresh run does; before, it set only `valence`.
 
 `mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
 schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`

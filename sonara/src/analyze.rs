@@ -442,6 +442,8 @@ pub struct AnalysisConfig {
     /// When `Some`, only the listed feature groups are returned (plus the core
     /// signal scalars every run reports); groups computed internally for a
     /// requested feature, such as the spectral summaries behind `energy`, are not.
+    /// One exception: `valence` also returns the key it is derived from
+    /// (`key`, `key_confidence`, `key_camelot`), and so does augmenting it.
     /// Valid feature names (case-insensitive):
     ///
     /// **Core signal:**
@@ -3546,6 +3548,13 @@ pub fn can_augment(cached: &TrackAnalysis, feature: &str) -> bool {
     augment_blocker(cached, feature).is_none()
 }
 
+/// The three key fields exactly as the pipeline formats them.
+fn write_key_fields(out: &mut TrackAnalysis, kr: &perceptual::KeyResult) {
+    out.key = Some(perceptual::format_key(kr));
+    out.key_confidence = Some(kr.confidence);
+    out.key_camelot = perceptual::camelot(kr.key, kr.mode).map(|c| c.to_string());
+}
+
 /// Decode-free recompute of one feature onto `out` (evidence pre-checked by
 /// the caller). Calls the same pure functions the fused pipeline calls, on
 /// the cached fields, at the record's own rate — so results are bit-identical
@@ -3579,9 +3588,7 @@ fn recompute_decode_free(
         "key" => {
             let chroma = out.chroma_mean.as_ref().expect("evidence checked");
             let kr = perceptual::detect_key(chroma);
-            out.key = Some(perceptual::format_key(&kr));
-            out.key_confidence = Some(kr.confidence);
-            out.key_camelot = perceptual::camelot(kr.key, kr.mode).map(|c| c.to_string());
+            write_key_fields(out, &kr);
         }
         "valence" => {
             let chroma = out.chroma_mean.as_ref().expect("evidence checked");
@@ -3591,6 +3598,8 @@ fn recompute_decode_free(
                 out.bpm,
                 out.spectral_centroid_mean,
             ));
+            // A pipeline run emits the key valence is derived from (`emit_key`).
+            write_key_fields(out, &kr);
         }
         "acousticness" => {
             out.acousticness = Some(perceptual::acousticness(
@@ -3720,7 +3729,13 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.key_confidence = fresh.key_confidence;
             out.key_camelot = fresh.key_camelot.clone();
         }
-        "valence" => out.valence = fresh.valence,
+        "valence" => {
+            // A fresh valence run also emits the key it is derived from.
+            out.valence = fresh.valence;
+            out.key = fresh.key.clone();
+            out.key_confidence = fresh.key_confidence;
+            out.key_camelot = fresh.key_camelot.clone();
+        }
         "acousticness" => out.acousticness = fresh.acousticness,
         "tempo_curve" => {
             out.tempo_curve = fresh.tempo_curve.clone();
@@ -5957,6 +5972,23 @@ mod tests {
             mismatches.is_empty(),
             "augment != direct run for: {mismatches:?}"
         );
+    }
+
+    #[test]
+    fn test_augment_valence_writes_the_key_like_a_direct_run() {
+        // A direct ["valence"] run emits the key valence is derived from; augmenting
+        // a record with the evidence (chroma) but no key must emit it too.
+        let y = augment_rich_signal();
+        let record = analyze_signal(y.view(), SR, &feature_config(&["chroma"])).unwrap();
+        assert!(record.key.is_none() && can_augment(&record, "valence"));
+        let cfg = AnalysisConfig::default();
+        let aug = augment_analysis(&record, &["valence"], None, &cfg).unwrap();
+        let direct = analyze_signal(y.view(), SR, &feature_config(&["valence"])).unwrap();
+        assert!(direct.key.is_some());
+        assert_eq!(aug.valence, direct.valence);
+        assert_eq!(aug.key, direct.key);
+        assert_eq!(aug.key_confidence, direct.key_confidence);
+        assert_eq!(aug.key_camelot, direct.key_camelot);
     }
 
     #[test]
