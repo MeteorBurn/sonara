@@ -28,7 +28,7 @@ FUSED_ANALYZER_CONTRACT = {
             "genre_model",
             "vocalness_model",
         },
-        "AnalysisResult",
+        "TrackAnalysis",
     ),
     "analyze_signal": (
         "y",
@@ -41,7 +41,7 @@ FUSED_ANALYZER_CONTRACT = {
             "genre_model",
             "vocalness_model",
         },
-        "AnalysisResult",
+        "TrackAnalysis",
     ),
     "analyze_batch": (
         "paths",
@@ -55,7 +55,7 @@ FUSED_ANALYZER_CONTRACT = {
             "genre_model",
             "vocalness_model",
         },
-        "List[AnalysisResult]",
+        "List[TrackAnalysis]",
     ),
     # --- augment lane --- (positional spec may be a tuple of names)
     "augment_analysis": (
@@ -67,7 +67,7 @@ FUSED_ANALYZER_CONTRACT = {
             "genre_model",
             "vocalness_model",
         },
-        "AnalysisResult",
+        "TrackAnalysis",
     ),
     "can_augment": (("cached", "feature"), set(), "bool"),
     "augment_blocker": (("cached", "feature"), set(), "Optional[str]"),
@@ -248,10 +248,10 @@ def self_test() -> None:
             (root / "python" / "sonara" / "__init__.pyi").write_text(
                 stub_text
                 or """
-def analyze_file(path: str, *, sr: int = 22050, mode: str = \"compact\", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None) -> AnalysisResult: ...
-def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = \"compact\", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None) -> AnalysisResult: ...
-def analyze_batch(paths: list[str], *, sr: int = 22050, mode: str = \"compact\", features=None, bpm_min=None, bpm_max=None, progress=None, genre_model=None, vocalness_model=None) -> List[AnalysisResult]: ...
-def augment_analysis(cached: Dict, features=None, *, audio_path=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None) -> AnalysisResult: ...
+def analyze_file(path: str, *, sr: int = 22050, mode: str = \"compact\", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None) -> TrackAnalysis: ...
+def analyze_signal(y: AudioArray, *, sr: int = 22050, mode: str = \"compact\", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None) -> TrackAnalysis: ...
+def analyze_batch(paths: list[str], *, sr: int = 22050, mode: str = \"compact\", features=None, bpm_min=None, bpm_max=None, progress=None, genre_model=None, vocalness_model=None) -> List[TrackAnalysis]: ...
+def augment_analysis(cached: Dict, features=None, *, audio_path=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None) -> TrackAnalysis: ...
 def can_augment(cached: Dict, feature: str) -> bool: ...
 def augment_blocker(cached: Dict, feature: str) -> Optional[str]: ...
 def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
@@ -283,7 +283,7 @@ def embedding_distance(a: List[float], b: List[float], *, profile: str = \"defau
         expect_failure(stub_text=valid_stub.replace(", features=None", ""))
         expect_failure(
             stub_text=valid_stub.replace(
-                ") -> AnalysisResult: ...", ") -> dict: ...", 1
+                ") -> TrackAnalysis: ...", ") -> dict: ...", 1
             )
         )
         # Tuple-positional contracts must also pin their positional lists.
