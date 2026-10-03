@@ -439,7 +439,9 @@ pub struct AnalysisConfig {
     /// Analysis depth — which feature groups to compute.
     pub mode: AnalysisMode,
     /// Optional: override which features to include, regardless of mode.
-    /// When `Some`, only the listed features are computed.
+    /// When `Some`, only the listed feature groups are returned (plus the core
+    /// signal scalars every run reports); groups computed internally for a
+    /// requested feature, such as the spectral summaries behind `energy`, are not.
     /// Valid feature names (case-insensitive):
     ///
     /// **Core signal:**
@@ -2963,6 +2965,8 @@ fn analyze_signal_inner(
         }
     } {
         suppress_internal_embedding_components(&mut result, config);
+    } else if config.features.is_some() {
+        suppress_unrequested_spectral_summaries(&mut result, config);
     }
     if config.needs_rhythmic_regularity() {
         suppress_internal_rhythm_components(&mut result, config);
@@ -2988,7 +2992,11 @@ fn suppress_internal_rhythm_components(result: &mut TrackAnalysis, config: &Anal
     }
 }
 
-fn suppress_internal_embedding_components(result: &mut TrackAnalysis, config: &AnalysisConfig) {
+/// Drop the spectral summaries the extended pass computed but nobody requested.
+///
+/// The pass computes all six for its own features (`energy`, `key`,
+/// `vocalness`, ...); only the groups the caller named belong in the result.
+fn suppress_unrequested_spectral_summaries(result: &mut TrackAnalysis, config: &AnalysisConfig) {
     if !config.emits("bandwidth") {
         result.spectral_bandwidth_mean = None;
     }
@@ -3007,6 +3015,10 @@ fn suppress_internal_embedding_components(result: &mut TrackAnalysis, config: &A
     if !config.emits("chroma") {
         result.chroma_mean = None;
     }
+}
+
+fn suppress_internal_embedding_components(result: &mut TrackAnalysis, config: &AnalysisConfig) {
+    suppress_unrequested_spectral_summaries(result, config);
     if !config.emits("chords") {
         result.chord_sequence = None;
         result.chord_events = None;
@@ -5599,9 +5611,8 @@ mod tests {
     #[test]
     fn test_vocalness_requesting_triggers_extended() {
         // features=["vocalness"] alone must flip needs_extended() on (v2 is
-        // contrast-based). A side-effect of the extended pass is that
-        // spectral_flatness_mean gets computed — assert it's Some, which proves
-        // the pass ran solely from requesting vocalness.
+        // contrast-based), yet return only vocalness: the spectral summaries the
+        // pass computed for it are not part of the request.
         let cfg = feature_config(&["vocalness"]);
         assert!(
             cfg.needs_extended(),
@@ -5609,10 +5620,14 @@ mod tests {
         );
         let y = sine(440.0, SR, 3.0);
         let r = analyze_signal(y.view(), SR, &cfg).unwrap();
-        assert!(
-            r.spectral_flatness_mean.is_some(),
-            "extended pass (flatness) must have run when vocalness requested"
-        );
+        assert!(r.vocalness.is_some());
+        assert!(r.spectral_flatness_mean.is_none() && r.spectral_contrast_mean.is_none());
+        assert!(r.mfcc_mean.is_none() && r.chroma_mean.is_none());
+        assert!(r.spectral_bandwidth_mean.is_none() && r.spectral_rolloff_mean.is_none());
+
+        // A requested summary is still returned next to the feature it feeds.
+        let r = analyze_signal(y.view(), SR, &feature_config(&["vocalness", "flatness"])).unwrap();
+        assert!(r.spectral_flatness_mean.is_some() && r.spectral_contrast_mean.is_none());
     }
 
     #[test]

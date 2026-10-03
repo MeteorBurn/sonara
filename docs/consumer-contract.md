@@ -144,6 +144,17 @@ which names each feature's dependency class and the record fields a decode-free
 recompute reads (`augment_analysis` / `can_augment` consume the same map, so a
 missing feature can often be filled in without re-decoding the audio).
 
+An explicit `features=[...]` request returns only the named groups plus the core
+signal scalars every run reports (2026-10-03, no schema bump: values are
+unchanged, only presence differs). Before, any feature that runs the extended
+pass (`energy`, `key`, `vocalness`, `chords`, `structure`, ...) also returned all
+six spectral summaries: `mfcc_mean`, `chroma_mean` and
+`spectral_{contrast,bandwidth,rolloff,flatness}_mean`. They are the decode-free
+evidence for recomputing `key`, `valence`, `energy` and similar features, so a
+consumer that relied on them from a narrow request must now name them (`mfcc`,
+`chroma`, `contrast`, `bandwidth`, `rolloff`, `flatness`). Mode runs and requests
+that include `embedding` are unaffected.
+
 `rhythmic_regularity` is additive and therefore ships without a schema bump,
 but it carries a shape consumers must handle explicitly: it **abstains**. When
 a track has no measurable rhythmic evidence (silence, ambient, drumless), the
