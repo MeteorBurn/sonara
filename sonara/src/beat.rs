@@ -77,6 +77,28 @@ const LEVEL_SWITCH_MARGIN: Float = 0.25;
 /// selected level (but not at its octave) is skipped.
 const LEVEL_OCTAVE_GUARD_RATIO: Float = 1.03;
 
+/// Integer resonance between polymetric relatives: when the chosen level's
+/// beat tempo lies more than [`RESONANCE_FRACTIONAL_BPM`] from an integer, a
+/// level at 4/3, 3/4, 3/2, 2/3, 5/4 or 4/5 of it (within
+/// [`POLYMETRIC_RATIO_TOLERANCE`]) whose beat tempo lies within
+/// [`RESONANCE_INTEGER_BPM`] of an integer, and whose evidence is at most this
+/// much lower, is reported instead. Tracks made in a DAW usually have an
+/// integer tempo, and a 3-against-4 or 4-against-5 reading of one rarely lands
+/// on another integer; tempos that do (120 and 160) are left to the evidence.
+const RESONANCE_EVIDENCE_MARGIN: Float = 0.15;
+
+/// Largest distance (BPM) of a beat tempo from an integer to count as integer
+/// for the resonance.
+const RESONANCE_INTEGER_BPM: Float = 0.06;
+
+/// Smallest distance (BPM) of the chosen level's beat tempo from an integer
+/// for the resonance to look for an integer relative.
+const RESONANCE_FRACTIONAL_BPM: Float = 0.15;
+
+/// Polymetric ratios between tempo levels, and their relative tolerance.
+const POLYMETRIC_RATIOS: [Float; 6] = [4.0 / 3.0, 0.75, 1.5, 2.0 / 3.0, 1.25, 0.8];
+const POLYMETRIC_RATIO_TOLERANCE: Float = 0.02;
+
 /// Result of tempo estimation, including diagnostic tempo candidates.
 ///
 /// - `tempo`: final BPM, after optional `bpm_min`/`bpm_max` range alignment
@@ -181,7 +203,10 @@ pub fn beat_track_with_bpm_range(
 /// to four further ACF peaks with a beat period of at least 0.28 s are each
 /// tracked, and another level replaces the selected one only when its beats
 /// agree better with each other and with the onsets (pair agreement plus
-/// 0.75 × mean local score, a margin of 0.25), never an octave relative. The
+/// 0.75 × mean local score, a margin of 0.25), never an octave relative. When
+/// the chosen level's beats keep a fractional tempo and a polymetric relative
+/// (4/3, 3/2, 5/4 or their inverses) with nearly the same evidence keeps an
+/// integer one, the relative is chosen (integer resonance). The
 /// caller's range plays no part in the choice. The reported tempo is then the
 /// period of the chosen level's beats: a hierarchical consensus of beat pairs
 /// 32, 64 and 128 beats apart (±1 frame) on their sub-frame positions, at the
@@ -443,6 +468,7 @@ pub(crate) fn beat_track_with_range_free_beats(
             beats,
             times,
             strength,
+            beat_tempo: consensus.map(|(period, _)| (60.0 * frame_rate as f64 / period) as Float),
         });
     }
 
@@ -458,6 +484,9 @@ pub(crate) fn beat_track_with_range_free_beats(
     }
     if chosen != 0 && levels[chosen].evidence - levels[0].evidence < LEVEL_SWITCH_MARGIN {
         chosen = 0;
+    }
+    if let Some(resonant) = integer_resonance(&levels, chosen) {
+        chosen = resonant;
     }
     let level = levels.swap_remove(chosen);
 
@@ -531,6 +560,36 @@ struct TempoLevel {
     times: Vec<f64>,
     /// Local score at each beat.
     strength: Vec<Float>,
+    /// Tempo of the beats from the consensus of their frame positions, when
+    /// there are enough of them.
+    beat_tempo: Option<Float>,
+}
+
+/// The level to report instead of `chosen` by integer resonance (see
+/// [`RESONANCE_EVIDENCE_MARGIN`]), if any: the measured polymetric relative
+/// with the best evidence among those that qualify.
+fn integer_resonance(levels: &[TempoLevel], chosen: usize) -> Option<usize> {
+    let distance = |level: &TempoLevel| level.beat_tempo.map(|t| (t - t.round()).abs());
+    if !distance(&levels[chosen]).is_some_and(|d| d > RESONANCE_FRACTIONAL_BPM) {
+        return None;
+    }
+    let polymetric = |ratio: Float| {
+        POLYMETRIC_RATIOS
+            .iter()
+            .any(|&m| (ratio / m - 1.0).abs() <= POLYMETRIC_RATIO_TOLERANCE)
+    };
+    levels
+        .iter()
+        .enumerate()
+        .filter(|&(index, level)| {
+            index != chosen
+                && level.measured
+                && polymetric(level.folded / levels[chosen].folded)
+                && level.evidence >= levels[chosen].evidence - RESONANCE_EVIDENCE_MARGIN
+                && distance(level).is_some_and(|d| d <= RESONANCE_INTEGER_BPM)
+        })
+        .max_by(|a, b| a.1.evidence.total_cmp(&b.1.evidence))
+        .map(|(index, _)| index)
 }
 
 /// Sub-frame positions (frames) and local scores of the tracked beats.
