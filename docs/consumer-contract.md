@@ -113,7 +113,7 @@ track and also fit the nearest integer tempo, reports that integer (`bpm_raw`
 keeps the same octave relation); a track a few thousandths of a BPM off an
 integer reports the fraction.
 The tempo level is re-checked: the selected autocorrelation level and up to
-four other distinct levels with a beat period of at least 0.28 s are tracked
+five other distinct levels with a beat period of at least 0.28 s are tracked
 again at their own tempo, and another level replaces the selected one only when
 its beats agree with the onsets clearly better (beat-pair consensus plus the
 tracker's local score). When the chosen level's beats keep a tempo more than

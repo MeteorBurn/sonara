@@ -758,8 +758,8 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// nearest integer tempo reports that integer. The beats are tracked on the
 /// onset envelope of the mel bins below 3.2 kHz; the tempo estimate and
 /// `bpm_candidates` still come from the broadband envelope. The tempo level is
-/// re-checked against up to four other ACF levels by tracking each again, and
-/// is chosen within 79–192 BPM whatever the caller's range. Same meaning and
+/// re-checked against up to five other ACF levels by tracking each again at
+/// its own tempo, whatever the caller's range. Same meaning and
 /// units; stored `bpm`, `bpm_raw` and `beats`, and what derives from them,
 /// differ.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 7;

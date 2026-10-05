@@ -54,7 +54,17 @@ const STEADY_GRID_HARMONIC: f64 = 4.0;
 const INTEGER_TEMPO_TOLERANCE: Float = 0.03;
 
 /// Further ACF peaks retracked as alternatives to the selected tempo level.
-const MAX_ALTERNATIVE_LEVELS: usize = 4;
+/// Slow peaks (a bar or half a bar) are levels of their own and take places
+/// too: a drum and bass track at 164 BPM whose stronger peaks sit near 109, 82,
+/// 41, 131 and 66 reaches its 164 peak only as the fifth alternative.
+const MAX_ALTERNATIVE_LEVELS: usize = 5;
+
+/// Smallest autocorrelation of an alternative ACF peak, relative to the
+/// zero-lag value. Below it the peak is round-off of the FFT autocorrelation
+/// (about 1e-8) at a lag where no onset recurs, as between the onsets of an
+/// envelope with silent gaps, not a periodicity. Every peak tracked on the
+/// 2225 real tracks of the bench and off-bench sets lies at 0.026 or more.
+const MIN_PEAK_ACF_RATIO: Float = 1e-4;
 
 /// Shortest beat period (seconds) of an alternative tempo level; faster ACF
 /// peaks (above about 214 BPM) do not compete with the selected level. The
@@ -200,7 +210,7 @@ pub fn beat_track_with_bpm_range(
 /// The autocorrelation (ACF) estimate sets the integer beat period of the
 /// dynamic-programming tracker. The tempo level is chosen among the ACF peaks,
 /// each tracked at its own lag's tempo: the metrically selected ACF lag and up
-/// to four further ACF peaks with a beat period of at least 0.28 s are each
+/// to five further ACF peaks with a beat period of at least 0.28 s are each
 /// tracked, and another level replaces the selected one only when its beats
 /// agree better with each other and with the onsets (pair agreement plus
 /// 0.75 × mean local score, a margin of 0.25), never an octave relative. When
@@ -827,9 +837,11 @@ impl AcfCandidates {
         ranked
     }
 
-    /// Lags of the local score maxima, strongest first.
+    /// Lags of the local score maxima, strongest first, whose autocorrelation
+    /// clears [`MIN_PEAK_ACF_RATIO`] of the zero-lag value.
     fn peak_lags(&self) -> Vec<usize> {
         let c = &self.candidates;
+        let floor = MIN_PEAK_ACF_RATIO * self.acf[0];
         let score = |i: Option<usize>| {
             i.and_then(|i| c.get(i))
                 .map_or(Float::NEG_INFINITY, |c| c.2)
@@ -839,6 +851,7 @@ impl AcfCandidates {
                 c[i].2 >= score(i.checked_sub(1))
                     && c[i].2 >= score(Some(i + 1))
                     && c[i].2.is_finite()
+                    && self.acf[c[i].0] > floor
             })
             .map(|i| (c[i].0, c[i].2))
             .collect();

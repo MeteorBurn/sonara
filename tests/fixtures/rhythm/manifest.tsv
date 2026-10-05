@@ -11,3 +11,4 @@ straight-0426	tempo	120	0.1	199f24492241540967de98aed793bbb44d279c99a773cc0d5aca
 offbench-0089	tempo	139	0.2	1b73acca7a8b733ef09b842d6225cdf60bae2b1d3e8f27da63970844e69f5e8b	off-bench #89: Beat This! grid 139.0, tag 139; a9f6202 reported 278
 offbench-0036	tempo	157	0.2	ff3bfe2213f7dde9b19087c44bd249f7bfb95825cda1b8f2ccb1fb39bad8526e	off-bench #36: Beat This! grid 157.01, tag 157; a9f6202 reported 78.5
 offbench-0076	tempo	134	0.1	592028ae412fc3fb850766f85b7cc6ddbbd37f5b083aa1f8b842169a9f41c9e2	off-bench #76 (techno): Beat This! grid 134.04, fit 0.82, tag 67; 1c9384e reported 178.65 (x4/3)
+offbench-0034	tempo	164	0.2	f2f24b46fa4a3bb310ff9ab2a8d8f8eaf87e0fadfd4a0febba40cc9e4dfdcd96	off-bench #34 (drum and bass): Beat This! grid 163.999, fit 0.98, tag 164; e349b68 reported 82 (its 164 level was the fifth alternative)
