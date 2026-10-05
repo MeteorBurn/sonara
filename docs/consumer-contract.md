@@ -204,6 +204,11 @@ this section records the standing policy.
 
 ### Backfilling onset bands and regularity in 0.3.7
 
+Under schema 7 (fork release `v0.3.7-bpm-precision-20261005` and later)
+`augment_analysis` rejects a schema-6 record with `schema version mismatch`:
+re-analyse such tracks, requesting these groups along with the rest. The
+backfill below applies to records of the current schema.
+
 These additions do not invalidate existing 0.3.6 schema-v6 results. Consumers
 can preserve the old analysis and fill only the missing feature groups, but
 must re-read the audio: both groups are `FrameCurves` dependencies. In 0.3.7,

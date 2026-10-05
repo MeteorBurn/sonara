@@ -4,6 +4,112 @@ All notable changes to sonara are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.7-bpm-precision-20261005] - 2026-10-05
+
+Fork release of package `0.3.7` (tag `v0.3.7-bpm-precision-20261005`): the 0.3.7
+rhythm features plus precise tempo and beat tracking. `ANALYSIS_SCHEMA_VERSION`
+moves from `6` to `7`. `bpm`, `bpm_raw`, `beats` and `downbeats` keep their
+meaning and units, and no field is added or removed, but stored schema-6 values
+differ from a fresh run, and so do the fields derived from them. See
+`docs/consumer-contract.md` (Schema 7).
+
+### Changed (schema 7)
+
+- **`bpm` and `bpm_raw` are the tempo of the tracked beats.** The period comes
+  from a hierarchical consensus of beat pairs 32, 64 and 128 beats apart
+  (±1 frame), measured on sub-frame beat positions (the vertex of the tracker's
+  local score at each beat). The fractional autocorrelation peak stays as the
+  fallback when fewer than 17 beats are tracked or the beat period deviates from
+  it by more than 5%.
+- **Integer tempos of steady tracks.** A track whose stronger beats stay on one
+  constant grid over the whole track, where that grid also fits the nearest
+  integer tempo, reports that integer; a track a few thousandths of a BPM off an
+  integer reports the fraction.
+- **Tempo level.** The selected autocorrelation level and up to five other ACF
+  peaks with a beat period of at least 0.28 s are each tracked at their own
+  tempo. Another level replaces the selected one only when its beats agree with
+  the onsets clearly better, never an octave relative. When the chosen level
+  keeps a fractional tempo and a polymetric relative (4/3, 3/2, 5/4 or the
+  inverse) with nearly the same evidence keeps an integer one, the relative is
+  reported. `bpm_min`/`bpm_max` play no part in the choice; they only fold the
+  reported tempo.
+- **Beats** are tracked on the onset envelope of the mel bins below 3.2 kHz, so
+  they follow the kick and snare rather than off-beat hi-hats. The tempo
+  estimate and `bpm_candidates` still come from the broadband envelope.
+- **Onset timing.** The onset envelope is padded one frame less than librosa's,
+  so `onset_frames`, `onset_strength_bands`, `beats` and `downbeats` sit one
+  frame (about 23 ms) earlier, on the audible onset. The public
+  `onset_strength_method` keeps librosa's padding.
+- **`downbeats`** follow the kick: the bar phase is the one whose beats carry
+  the most low-band (below 200 Hz) accent relative to the 200–800 Hz band,
+  rather than the loudest broadband accent.
+- **BPM ranges** may span one octave in Rekordbox's form
+  (`bpm_max + 1 >= 2 * bpm_min`, e.g. 68–135); a tempo within 0.1% of an edge
+  stays at that edge's octave.
+
+### Changed (no schema bump)
+
+- An explicit `features=[...]` request returns only the named groups plus the
+  core signal scalars: the six spectral summaries no longer ride along with
+  features that run the extended pass. Name them (`mfcc`, `chroma`, `contrast`,
+  `bandwidth`, `rolloff`, `flatness`) if you relied on them. `valence` still
+  returns the key it is derived from.
+- `mood` computes `dissonance` for `mood_aggressive` whatever else is requested;
+  stored values from requests without `dissonance` were lower by about
+  0.002–0.005.
+- `augment_analysis` writes `key`, `key_confidence` and `key_camelot` when it
+  fills `valence`, as a fresh run does.
+- The aggression model reads the range-free tempo and beats, so
+  `aggression_score` no longer moves with the caller's BPM range.
+
+### Fixed
+
+- MP3 files with a large ID3v2 tag failed to decode when tags were not
+  requested: the tag-less probe now skips leading ID3v2 tags.
+- Strided NumPy input (for example `y[::2]`) panicked in the perceptual and
+  spectral paths; such views are copied before slicing.
+- Python: array arguments accept any numeric dtype (float64 is converted),
+  every file argument accepts `os.PathLike`, and `sonara.feature` and the other
+  extension submodules import directly (`from sonara.feature import tempo`).
+- `analyze_batch` releases the GIL when no progress callback is given.
+- `silence_offsets` checks the run length before subtracting (an underflow in
+  debug builds).
+- The `.pyi` stub matches the binding.
+- `rhythmic_regularity` reports a non-zero confidence when the first meter
+  wins, and JSON-revived `rhythmic_regularity_candidates` are accepted.
+- The source distribution ships `vendor/hound-3.5.1`, which `[patch.crates-io]`
+  requires, and the fidelity-map test finds retired upstream files with
+  `--full-history`.
+
+### Measured on real music
+
+Bench: 2 × 1000 tracks (broken-beat and straight), Mixed In Key and Rekordbox as
+validators, 1919 tracks where they agree on the tempo; Rust runner, no BPM range
+unless stated.
+
+- BPM within 0.1% of the validators: 99.95%. With the `v0.3.7-meteorburn.1`
+  code it was 15.7% of the broken-beat and 24.9% of the straight tracks.
+- Integer tempos (1605 tracks where both validators give the same integer):
+  99.0% reported as exactly that integer. Fractional tempos (305 tracks): 11
+  rounded to an integer.
+- Tempo class errors (±3%): 0 of 1923 tracks.
+- Octave equal to MIK: 99.48% without a range, 99.84% with 79–192 and 99.53%
+  with 70–180; no track changed from the right octave to a wrong one during the
+  precision work.
+- Beats in phase with Beat This! on 95.7% of the straight tracks (63.1% with
+  `v0.3.7-meteorburn.1`).
+- 226 further tracks chosen from a DJ library by text search across genres and
+  tempos, Beat This! as the judge: tempo class correct for 92.9% (89.8% before
+  the precision work).
+
+### Upgrading
+
+- Records written with schema 6 must be re-analysed to get the new values;
+  `augment_analysis` rejects them (`schema version mismatch`).
+- `SIMILARITY_VERSION` stays `2` and `FINGERPRINT_VERSION` `1`. On tracks whose
+  tempo level changed, `danceability`, `valence`, `mood_*`, `aggression_rhythm`
+  and embedding components 35, 37, 42 and 47 move with the tempo.
+
 ## [0.3.7] - 2026-09-23
 
 Two opt-in rhythm features, both additive: `ANALYSIS_SCHEMA_VERSION` remains

@@ -11,7 +11,7 @@ Feature extraction, batch analysis, and built-in perceptual features (energy, da
 ## Quick Start
 
 ```bash
-python -m pip install https://github.com/MeteorBurn/sonara/releases/download/v0.3.7-meteorburn.1/sonara-0.3.7-cp310-abi3-win_amd64.whl
+python -m pip install https://github.com/MeteorBurn/sonara/releases/download/v0.3.7-bpm-precision-20261005/sonara-0.3.7-cp310-abi3-win_amd64.whl
 ```
 
 One call gets you 30+ features — tempo, key, chords, energy, mood, timbre — in ~4 ms per 10-second track:
@@ -56,9 +56,9 @@ results = sonara.analyze_batch(files, mode="playlist")
 
 This fork release provides a Windows x64 wheel. Requires Python 3.10+.
 
-The package is based on SONARA 0.3.7 with Symphonia 0.6.1, patched Hound 3.5.1, WAV fallback, and reduced metadata probing when tags are not requested. 0.3.7 adds two opt-in rhythm features on top of 0.3.6: the [multiband onset timeline](#multiband-onset-strength-opt-in) (`onset_bands`) and [rhythmic regularity](#rhythmic-regularity-opt-in). Both are additive — `ANALYSIS_SCHEMA_VERSION` stays at `6` and every 0.3.6 field keeps its meaning.
+The package is based on SONARA 0.3.7 with Symphonia 0.6.1, patched Hound 3.5.1, WAV fallback, and reduced metadata probing when tags are not requested. 0.3.7 adds two opt-in rhythm features on top of 0.3.6: the [multiband onset timeline](#multiband-onset-strength-opt-in) (`onset_bands`) and [rhythmic regularity](#rhythmic-regularity-opt-in). This release also measures tempo and beats precisely (analysis schema `7`): `bpm` is the tempo of the tracked beats, steady tracks report their exact integer tempo, and the tempo level is chosen by how well each candidate level's beats fit the onsets. Every field keeps its meaning and units, but stored schema-6 `bpm`, `beats` and `downbeats` differ from a fresh run — see [CHANGELOG.md](CHANGELOG.md).
 
-The Quick Start above installs the `v0.3.7-meteorburn.1` release wheel (package version `0.3.7`) — [BUILD-METADATA.md](BUILD-METADATA.md) records that release, its exact source commit and its verification. On other platforms, build from a source checkout with `maturin build --release`.
+The Quick Start above installs the `v0.3.7-bpm-precision-20261005` release wheel (package version `0.3.7`) — [BUILD-METADATA.md](BUILD-METADATA.md) records that release, its exact source commit and its verification. On other platforms, build from a source checkout with `maturin build --release`.
 
 Installing `sonara` from PyPI retrieves the upstream package. Upstream also provides Linux and macOS wheels.
 
@@ -174,7 +174,10 @@ r['bpm_candidates']   # Ranked [bpm, score] candidates the estimate was chosen f
 ```
 
 Both bounds must be provided together, be finite and positive with
-`bpm_min < bpm_max`, and span at least one octave (`bpm_max >= 2 * bpm_min`).
+`bpm_min < bpm_max`, and span about one octave or more
+(`bpm_max + 1 >= 2 * bpm_min`, so Rekordbox's one-octave ranges such as 68–135
+work); a tempo within 0.1% of an edge stays at that edge's octave. The range
+only folds the reported tempo; it plays no part in choosing the tempo level.
 Alignment is opt-in: without a range, `bpm` equals `bpm_raw`. The same
 parameters are available on the lower-level beat tracker:
 
@@ -711,11 +714,17 @@ record.
 
 ### Adding the 0.3.7 rhythm features to an existing library
 
-**Keep your existing analysis.** Updating from 0.3.6 to 0.3.7 does not require
-recomputing existing fields just to obtain these additions. The analysis schema
-remains `6`. To get `onset_bands` and `rhythmic_regularity`, Sonara must read
-each original audio file again, but you can request only those features and
-keep the previously stored BPM, key, embeddings and other results.
+**Records written with schema 6 need a fresh analysis.** This release's
+`ANALYSIS_SCHEMA_VERSION` is `7` (precise tempo and beats), so `augment_analysis`
+rejects a record written by 0.3.6 or by the earlier `v0.3.7-meteorburn.1` wheel
+(`schema version mismatch`), and that record's stored `bpm`, `beats` and
+`downbeats` differ from a fresh run. Re-analyse such tracks, adding
+`onset_bands` and `rhythmic_regularity` to the request if you want them.
+
+**A schema-7 record keeps its analysis.** To get `onset_bands` and
+`rhythmic_regularity`, Sonara must read each original audio file again, but you
+can request only those features and keep the previously stored BPM, key,
+embeddings and other results.
 
 If you saved a complete Sonara result dict (including `provenance`), add both
 features in one call:
