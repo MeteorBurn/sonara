@@ -106,16 +106,20 @@ fingerprint version where those are consumed). sonagram's current floor is
 period of the tracked beats instead of the autocorrelation peak, so they are
 more precise and stored schema-6 values differ slightly. The autocorrelation
 estimate remains the fallback when fewer than 17 beats are tracked or the beat
-period deviates from it by more than 5%. A steady track, whose tracked beats
-stay on one constant grid over the whole track and also fit the nearest integer
-tempo, reports that integer (`bpm_raw` keeps the same octave relation).
+period deviates from it by more than 5%. The period is measured on sub-frame
+beat positions (the vertex of the tracker's local score at each beat). A
+steady track, whose stronger beats stay on one constant grid over the whole
+track and also fit the nearest integer tempo, reports that integer (`bpm_raw`
+keeps the same octave relation); a track a few thousandths of a BPM off an
+integer reports the fraction.
 The tempo level is re-checked: the selected autocorrelation level and up to
-four other distinct levels are tracked again, and another level replaces the
-selected one only when its beats agree with the onsets clearly better (beat-pair
-consensus plus the tracker's local score). The level is chosen within 79–192 BPM
-whatever `bpm_min`/`bpm_max` are, which only fold the reported value, so the
-tempo ignoring octave no longer depends on the range. On a switched track,
-`bpm`, `bpm_raw` and `beats` follow the new level; `bpm_candidates` do not change.
+four other distinct levels with a beat period of at least 0.28 s are tracked
+again at their own tempo, and another level replaces the selected one only when
+its beats agree with the onsets clearly better (beat-pair consensus plus the
+tracker's local score). `bpm_min`/`bpm_max` play no part in the choice and only
+fold the reported value, so the tempo ignoring octave does not depend on the
+range. On a switched track, `bpm`, `bpm_raw` and `beats` follow the new level;
+`bpm_candidates` do not change.
 The onset envelope is padded one frame less than librosa's
 `lag + n_fft / (2 * hop_length)`, so `onset_frames`, `onset_strength_bands`,
 `beats` and `downbeats` sit one frame (about 23 ms) earlier than in schema 6,

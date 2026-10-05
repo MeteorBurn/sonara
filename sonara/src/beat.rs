@@ -53,13 +53,17 @@ const STEADY_GRID_HARMONIC: f64 = 4.0;
 /// Largest distance (BPM) of the measured tempo from an integer to round it.
 const INTEGER_TEMPO_TOLERANCE: Float = 0.03;
 
-/// Fixed frame (BPM) in which the tempo level is chosen, whatever the caller's
-/// range: the caller's `bpm_min`/`bpm_max` only fold the reported tempo, so the
-/// level does not depend on the range.
-const LEVEL_FRAME_BPM: (Float, Float) = (79.0, 192.0);
-
 /// Further ACF peaks retracked as alternatives to the selected tempo level.
 const MAX_ALTERNATIVE_LEVELS: usize = 4;
+
+/// Shortest beat period (seconds) of an alternative tempo level; faster ACF
+/// peaks (above about 214 BPM) do not compete with the selected level. The
+/// level evidence (pair agreement plus local score) favours faster levels: with
+/// octave relatives competing, a third of the broken-rhythm bench went to double
+/// tempo, and without a bound the subdivisions of 120-145 BPM tracks (240-290)
+/// win. A beat this fast is a subdivision, not a pulse the evidence can judge.
+/// The selected level itself is not bounded.
+const MIN_LEVEL_BEAT_PERIOD_SEC: Float = 0.28;
 
 /// Weight of the mean local score at the beats in a level's evidence (the
 /// beats' pair agreement plus this times their mean local score).
@@ -172,18 +176,20 @@ pub fn beat_track_with_bpm_range(
 /// tempo and the strongest ACF tempo candidates for reporting.
 ///
 /// The autocorrelation (ACF) estimate sets the integer beat period of the
-/// dynamic-programming tracker. The tempo level is chosen in a fixed 79–192
-/// BPM frame: the metrically selected ACF lag and up to four further ACF
-/// peaks are each tracked, and another level replaces the selected one only
-/// when its beats agree better with each other and with the onsets (pair
-/// agreement plus 0.75 × mean local score, a margin of 0.25), never an octave
-/// relative. The reported tempo is then the period of the chosen level's
-/// beats: a hierarchical consensus of beat pairs 32, 64 and 128 beats apart
-/// (±1 frame), at the octave of its ACF lag, folded into the caller's range.
-/// The ACF estimate stays as the fallback when fewer than 17 beats are tracked
-/// or the beat period deviates from it by more than 5%. A steady track whose
-/// beats stay on one constant grid that also fits the nearest integer tempo
-/// reports that integer. The candidates do not depend on the level choice.
+/// dynamic-programming tracker. The tempo level is chosen among the ACF peaks,
+/// each tracked at its own lag's tempo: the metrically selected ACF lag and up
+/// to four further ACF peaks with a beat period of at least 0.28 s are each
+/// tracked, and another level replaces the selected one only when its beats
+/// agree better with each other and with the onsets (pair agreement plus
+/// 0.75 × mean local score, a margin of 0.25), never an octave relative. The
+/// caller's range plays no part in the choice. The reported tempo is then the
+/// period of the chosen level's beats: a hierarchical consensus of beat pairs
+/// 32, 64 and 128 beats apart (±1 frame) on their sub-frame positions, at the
+/// octave of its ACF lag, folded into the caller's range. The ACF estimate
+/// stays as the fallback when fewer than 17 beats are tracked or the beat
+/// period deviates from it by more than 5%. A steady track whose strong beats
+/// stay on one constant grid that also fits the nearest integer tempo reports
+/// that integer. The candidates do not depend on the level choice.
 ///
 /// The beats are tracked on the same broadband onset envelope; see
 /// [`beat_track_detailed_with_dp_envelope`] for a separate tracking envelope.
@@ -371,7 +377,7 @@ pub(crate) fn beat_track_with_range_free_beats(
     };
     let candidates = acf.ranked();
 
-    // Tempo levels in the fixed frame: the selected ACF lag first, then up to
+    // Tempo levels at their own ACF lags: the selected ACF lag first, then up to
     // MAX_ALTERNATIVE_LEVELS further ACF peaks, one level per beat period.
     let mut levels: Vec<TempoLevel> = Vec::with_capacity(MAX_ALTERNATIVE_LEVELS + 1);
     let mut seen_periods = Vec::with_capacity(MAX_ALTERNATIVE_LEVELS + 1);
@@ -380,14 +386,15 @@ pub(crate) fn beat_track_with_range_free_beats(
             break;
         }
         let refined = refine_tempo_from_acf_peak(acf.acf.view(), lag, frame_rate);
-        let folded =
-            align_tempo_to_bpm_range(refined, Some(LEVEL_FRAME_BPM.0), Some(LEVEL_FRAME_BPM.1))?
-                .clamp(30.0, 320.0);
+        let folded = refined.clamp(30.0, 320.0);
         let frames_per_beat = frames_per_beat_of(folded);
         if seen_periods.contains(&frames_per_beat) {
             continue;
         }
         seen_periods.push(frames_per_beat);
+        if !levels.is_empty() && 60.0 / folded < MIN_LEVEL_BEAT_PERIOD_SEC {
+            continue;
+        }
         if let Some(selected) = levels.first() {
             // Octave guard: an octave relative of the selected level never competes.
             let octaves = (folded / selected.folded).log2();
@@ -505,12 +512,12 @@ pub(crate) fn beat_track_with_range_free_beats(
     ))
 }
 
-/// One tempo level: an ACF lag, its tempo folded into [`LEVEL_FRAME_BPM`] and
-/// the beats the DP tracks at that period.
+/// One tempo level: an ACF lag, its tempo and the beats the DP tracks at that
+/// period.
 struct TempoLevel {
     /// Fractional-lag tempo of the ACF peak (BPM).
     refined: Float,
-    /// `refined` folded into the level frame and clamped to `[30, 320]`.
+    /// `refined` clamped to `[30, 320]`: the tempo the level is tracked at.
     folded: Float,
     /// Integer beat period of `folded`, in frames.
     frames_per_beat: usize,

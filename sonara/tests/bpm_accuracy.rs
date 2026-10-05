@@ -539,7 +539,8 @@ fn bpm_range_rescues_192_bpm() {
 // onset envelopes of real tracks (u16-quantized; no audio), written by
 // `dev-docs/bench/scripts/bpm-grid/make_fixtures.py`, and `manifest.tsv` with
 // each track's validator values (MIK, Rekordbox, Beat This!) and what the tempo
-// must be: an exact integer, or a fraction within a tolerance of the label.
+// must be: an exact integer, a fraction within a tolerance of the label, or the
+// label's tempo in its own octave.
 // ============================================================
 
 struct RhythmFixture {
@@ -597,9 +598,10 @@ fn fixture_tempo(fixture: &RhythmFixture) -> sonara::beat::TempoEstimate {
 
 /// Steady tracks at an integer tempo report exactly that integer; tracks at a
 /// fractional tempo, by the validators, report the fraction instead of the
-/// nearest integer.
+/// nearest integer; `tempo` fixtures report the validators' tempo in their
+/// octave (no range folds it).
 #[test]
-fn real_music_integer_and_fractional_tempos() {
+fn real_music_tempo_fixtures() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/rhythm");
     let manifest = std::fs::read_to_string(dir.join("manifest.tsv")).unwrap();
     let mut failures = Vec::new();
@@ -617,6 +619,7 @@ fn real_music_integer_and_fractional_tempos() {
             "integer" => is_integer && folded.round() == label.round(),
             "fractional" => !is_integer && (folded - label).abs() <= tolerance,
             "not-integer" => !is_integer,
+            "tempo" => (tempo - label).abs() <= tolerance,
             other => panic!("{name}: unknown kind {other}"),
         };
         println!("{name:>16} {kind:>11} label {label:>9.4} tempo {tempo:>10.4} {}", if ok { "ok" } else { "FAIL" });

@@ -14,7 +14,8 @@ u32 envelope count k, u32 frames n; per envelope u8 name length, name, f32 scale
 k x n u16 values. The manifest names the expectation the Rust test checks (kind
 `integer`: the tempo folded to label_bpm's octave is exactly round(label_bpm);
 `fractional`: it is not an integer and lies within tolerance of label_bpm; `not-integer`:
-it is not an integer).
+it is not an integer; `tempo`: unfolded, it lies within tolerance of label_bpm, so the
+octave counts too).
 """
 
 from __future__ import annotations
