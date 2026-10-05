@@ -9,6 +9,8 @@ publish = false
 
 [dependencies]
 sonara = { path = "../../../../../sonara" }
+# Same major version as Sonara's, so the replay passes Sonara its own array views.
+ndarray = "0.17"
 
 # Same Hound as the Sonara workspace (its [patch] does not apply to path deps).
 [patch.crates-io]
@@ -24,3 +26,5 @@ incremental = true
 [features]
 # The Python wheel always enables aggression; the cascade run needs its fields.
 aggression = ["sonara/aggression"]
+# `--dump-envelopes`: the fused pass's rhythm envelopes (implies aggression).
+bench-internals = ["sonara/bench-internals"]

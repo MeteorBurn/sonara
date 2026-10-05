@@ -6,9 +6,12 @@
 //! The playlist line number is the 1-based `idx`; `--idx` limits the run to the listed idx
 //! (one per line); `--no-range` passes no BPM range; `--regularity` adds the
 //! `rhythmic_regularity` score, label and confidence as three trailing columns; `--cascade`
-//! writes the BPM-dependent fields instead (build with `--features aggression`). Output: one
-//! TSV row per track with bpm, bpm_raw, confidence, the five candidates, beats and downbeats
-//! (frames, hop 512).
+//! writes the BPM-dependent fields instead (build with `--features aggression`);
+//! `--dump-envelopes <dir>` also writes each track's rhythm envelopes to `<dir>/<idx>.env`
+//! (build with `--features bench-internals`, format in `dump.rs`); `--replay-envelopes <dir>`
+//! reruns only the tempo and beat stage on such envelopes, without audio (`replay.rs`).
+//! Output: one TSV row per track with bpm, bpm_raw, confidence, the five candidates, beats
+//! and downbeats (frames, hop 512).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -17,11 +20,16 @@ use std::path::Path;
 use sonara::analyze;
 
 mod cascade;
+#[cfg(feature = "bench-internals")]
+mod dump;
+mod replay;
 
 fn main() {
     let mut pos = Vec::new();
     let (mut idx_file, mut lo, mut hi, mut sr) = (None, 79.0f32, 192.0f32, 22050u32);
     let (mut cascade_mode, mut no_range, mut regularity) = (false, false, false);
+    let mut dump_dir: Option<String> = None;
+    let mut replay_dir: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -32,6 +40,8 @@ fn main() {
             "--cascade" => cascade_mode = true,
             "--no-range" => no_range = true,
             "--regularity" => regularity = true,
+            "--dump-envelopes" => dump_dir = it.next(),
+            "--replay-envelopes" => replay_dir = it.next(),
             _ => pos.push(a),
         }
     }
@@ -46,6 +56,14 @@ fn main() {
         .map(|(i, l)| (i + 1, l.trim().to_string()))
         .filter(|(i, l)| !l.is_empty() && wanted.as_ref().map_or(true, |w| w.contains(i)))
         .collect();
+    if let Some(dir) = replay_dir {
+        let t0 = std::time::Instant::now();
+        let idxs: Vec<usize> = lines.iter().map(|(idx, _)| *idx).collect();
+        let tsv = replay::replay(&idxs, Path::new(&dir), (!no_range).then_some(lo), (!no_range).then_some(hi));
+        std::fs::write(out, tsv).unwrap();
+        eprintln!("{} tracks replayed in {:.1}s -> {out}", idxs.len(), t0.elapsed().as_secs_f64());
+        return;
+    }
     let paths: Vec<&Path> = lines.iter().map(|(_, l)| Path::new(l.as_str())).collect();
     let features: &[&str] = if cascade_mode {
         cascade::FEATURES
@@ -61,7 +79,17 @@ fn main() {
         ..Default::default()
     };
     let t0 = std::time::Instant::now();
-    let results = analyze::analyze_batch(&paths, sr, &config);
+    let results = match dump_dir {
+        #[cfg(feature = "bench-internals")]
+        Some(dir) => {
+            let tracks: Vec<(usize, &Path)> =
+                lines.iter().map(|(idx, _)| *idx).zip(paths.iter().copied()).collect();
+            dump::analyze_and_dump(&tracks, sr, &config, Path::new(&dir))
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        Some(_) => panic!("--dump-envelopes needs a build with --features bench-internals"),
+        None => analyze::analyze_batch(&paths, sr, &config),
+    };
     let mut tsv = String::from(if cascade_mode {
         cascade::HEADER
     } else if regularity {
