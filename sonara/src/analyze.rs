@@ -758,8 +758,8 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// nearest integer tempo reports that integer. The beats are tracked on the
 /// onset envelope of the mel bins below 3.2 kHz; the tempo estimate and
 /// `bpm_candidates` still come from the broadband envelope. The tempo level is
-/// re-checked against up to four other ACF levels by tracking each again, and
-/// is chosen within 79–192 BPM whatever the caller's range. Same meaning and
+/// re-checked against up to five other ACF levels by tracking each again at
+/// its own tempo, whatever the caller's range. Same meaning and
 /// units; stored `bpm`, `bpm_raw` and `beats`, and what derives from them,
 /// differ.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 7;
@@ -803,6 +803,23 @@ thread_local! {
     // rate and 22.05 kHz. Keep the established primary-cache hot path and one
     // feature-gated secondary entry so neither table is rebuilt per track.
     static SECONDARY_ANALYSIS_CACHE: RefCell<Option<AnalysisCache>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "bench-internals")]
+thread_local! {
+    // Armed by `analyze_file_with_rhythm_envelopes`: the fused pass on this
+    // thread leaves its rhythm envelopes here for the bench runner.
+    static RHYTHM_CAPTURE: RefCell<Option<Option<crate::onset::RhythmEnvelopes>>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(feature = "bench-internals")]
+fn capture_rhythm_envelopes(envelopes: &crate::onset::RhythmEnvelopes) {
+    RHYTHM_CAPTURE.with(|slot| {
+        if let Some(captured) = slot.borrow_mut().as_mut() {
+            *captured = Some(envelopes.clone());
+        }
+    });
 }
 
 /// Provenance metadata: how an analysis result was produced.
@@ -1241,6 +1258,23 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
     let mut result = analyze_signal(y.view(), actual_sr, config)?;
     result.tags = tags;
     Ok(result)
+}
+
+/// [`analyze_file`] that also returns the rhythm envelopes of its fused pass by
+/// name (`onset`, `beat`, `low`, `mid`; frame grid of the pass, hop
+/// [`HOP_LENGTH`]). Bench tooling only: `None` when no fused pass ran.
+#[doc(hidden)]
+#[cfg(feature = "bench-internals")]
+#[allow(clippy::type_complexity)]
+pub fn analyze_file_with_rhythm_envelopes(
+    path: &Path,
+    sr: u32,
+    config: &AnalysisConfig,
+) -> Result<(TrackAnalysis, Option<Vec<(&'static str, Array1<Float>)>>)> {
+    RHYTHM_CAPTURE.with(|slot| *slot.borrow_mut() = Some(None));
+    let result = analyze_file(path, sr, config);
+    let captured = RHYTHM_CAPTURE.with(|slot| slot.borrow_mut().take()).flatten();
+    result.map(|analysis| (analysis, captured.map(|envelopes| envelopes.named())))
 }
 
 /// Analyze a pre-loaded audio signal with the given configuration.
@@ -2049,53 +2083,18 @@ fn analyze_signal_inner(
     // ================================================================
 
     let s_db = spectrum::power_to_db(mel_spec.view(), 1.0, 1e-10, Some(80.0));
-    let lag = 1usize;
-    // The beat tracker follows the mel bins below 3.2 kHz (the leading bins);
-    // tempo and its candidates keep the broadband envelope.
-    let n_beat_mels =
-        crate::onset::mel_bins_below(sr, n_mels, crate::onset::BEAT_ENVELOPE_MAX_HZ).max(1);
-    // Downbeats weigh the kick (bins below 200 Hz) against the snare body
-    // (200-800 Hz); both are sums in the same loop, no onset bands needed.
-    let n_low_mels = crate::onset::mel_bins_below(sr, n_mels, 200.0).max(1);
-    let n_mid_end = crate::onset::mel_bins_below(sr, n_mels, 800.0).max(n_low_mels + 1);
-
-    let out_frames = if n_frames > lag { n_frames - lag } else { 0 };
-    let mut onset_env = Array1::<Float>::zeros(out_frames);
-    let mut beat_env = Array1::<Float>::zeros(out_frames);
-    let mut low_env = Array1::<Float>::zeros(out_frames);
-    let mut mid_env = Array1::<Float>::zeros(out_frames);
-    for t in 0..out_frames {
-        let (mut sum, mut beat_sum, mut low_sum, mut mid_sum) = (0.0, 0.0, 0.0, 0.0);
-        for m in 0..n_mels {
-            let flux = (s_db[(m, t + lag)] - s_db[(m, t)]).max(0.0);
-            sum += flux;
-            if m < n_beat_mels {
-                beat_sum += flux;
-            }
-            if m < n_low_mels {
-                low_sum += flux;
-            } else if m < n_mid_end {
-                mid_sum += flux;
-            }
-        }
-        onset_env[t] = sum / n_mels as Float;
-        beat_env[t] = beat_sum / n_beat_mels as Float;
-        low_env[t] = low_sum / n_low_mels as Float;
-        mid_env[t] = mid_sum / (n_mid_end - n_low_mels) as Float;
-    }
-
-    let pad_left = crate::onset::onset_envelope_pad_frames(lag, n_fft, hop_length);
-    let total_oenv_frames = out_frames + pad_left;
-    let mut oenv_padded = Array1::<Float>::zeros(total_oenv_frames);
-    let mut beat_env_padded = Array1::<Float>::zeros(total_oenv_frames);
-    let mut low_env_padded = Array1::<Float>::zeros(total_oenv_frames);
-    let mut mid_env_padded = Array1::<Float>::zeros(total_oenv_frames);
-    for t in 0..out_frames {
-        oenv_padded[pad_left + t] = onset_env[t];
-        beat_env_padded[pad_left + t] = beat_env[t];
-        low_env_padded[pad_left + t] = low_env[t];
-        mid_env_padded[pad_left + t] = mid_env[t];
-    }
+    // Tempo and its candidates follow the broadband envelope, the beat tracker
+    // the mel bins below 3.2 kHz, and downbeats weigh the kick (below 200 Hz)
+    // against the snare body (200-800 Hz): one loop, no onset bands needed.
+    let rhythm = crate::onset::rhythm_envelopes_from_log_mel(s_db.view(), sr, n_fft, hop_length);
+    #[cfg(feature = "bench-internals")]
+    capture_rhythm_envelopes(&rhythm);
+    let crate::onset::RhythmEnvelopes {
+        onset: oenv_padded,
+        beat: beat_env_padded,
+        low: low_env_padded,
+        mid: mid_env_padded,
+    } = rhythm;
 
     let onset_bands = if config.wants("onset_bands") {
         Some(crate::onset::onset_strength_bands_from_log_mel(

@@ -435,35 +435,15 @@ pub(super) fn analyze_signal(y: ArrayView1<'_, Float>) -> Result<AggressionAnaly
     }
 
     let spectrogram_db = spectrum::power_to_db(mel_spectrogram.view(), 1.0, 1.0e-10, Some(80.0));
-    // Beats follow the mel bins below 3.2 kHz, as in the main pass.
-    let beat_mels =
-        crate::onset::mel_bins_below(sample_rate, N_MELS, crate::onset::BEAT_ENVELOPE_MAX_HZ)
-            .max(1);
-    let onset_frame_count = frame_count.saturating_sub(1);
-    let mut onset_envelope = Array1::<Float>::zeros(onset_frame_count);
-    let mut beat_envelope = Array1::<Float>::zeros(onset_frame_count);
-    for frame_index in 0..onset_frame_count {
-        let mut sum = 0.0;
-        let mut beat_sum = 0.0;
-        for mel_index in 0..N_MELS {
-            let flux = (spectrogram_db[(mel_index, frame_index + 1)]
-                - spectrogram_db[(mel_index, frame_index)])
-                .max(0.0);
-            sum += flux;
-            if mel_index < beat_mels {
-                beat_sum += flux;
-            }
-        }
-        onset_envelope[frame_index] = sum / N_MELS as Float;
-        beat_envelope[frame_index] = beat_sum / beat_mels as Float;
-    }
-    let left_padding = crate::onset::onset_envelope_pad_frames(1, N_FFT, HOP_LENGTH);
-    let mut padded_onset = Array1::<Float>::zeros(onset_frame_count + left_padding);
-    let mut padded_beat_onset = Array1::<Float>::zeros(onset_frame_count + left_padding);
-    for frame_index in 0..onset_frame_count {
-        padded_onset[left_padding + frame_index] = onset_envelope[frame_index];
-        padded_beat_onset[left_padding + frame_index] = beat_envelope[frame_index];
-    }
+    // The main pass's envelopes: tempo on the broadband flux, beats on the mel
+    // bins below 3.2 kHz.
+    let rhythm = crate::onset::rhythm_envelopes_from_log_mel(
+        spectrogram_db.view(),
+        sample_rate,
+        N_FFT,
+        HOP_LENGTH,
+    );
+    let (padded_onset, padded_beat_onset) = (rhythm.onset, rhythm.beat);
 
     let (tempo, beats) = crate::beat::beat_track_detailed_with_dp_envelope(
         None,

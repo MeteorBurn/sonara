@@ -46,6 +46,85 @@ pub(crate) fn mel_bins_below(sr: u32, n_mels: usize, max_hz: Float) -> usize {
         .unwrap_or(n_mels)
 }
 
+/// Upper frequency of the low (kick) rhythm envelope.
+const LOW_ENVELOPE_MAX_HZ: Float = 200.0;
+
+/// Upper frequency of the mid (snare body) rhythm envelope.
+const MID_ENVELOPE_MAX_HZ: Float = 800.0;
+
+/// Spectral-flux envelopes of the analysis pass, one per rhythm role, all on
+/// the frame grid of [`onset_envelope_pad_frames`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RhythmEnvelopes {
+    /// All mel bins: the tempo and its candidates.
+    pub(crate) onset: Array1<Float>,
+    /// Mel bins below [`BEAT_ENVELOPE_MAX_HZ`]: the beat tracker.
+    pub(crate) beat: Array1<Float>,
+    /// Mel bins below 200 Hz: the kick, for downbeats.
+    pub(crate) low: Array1<Float>,
+    /// Mel bins from 200 to 800 Hz: the snare body, for downbeats.
+    pub(crate) mid: Array1<Float>,
+}
+
+impl RhythmEnvelopes {
+    /// The envelopes by name, in field order (bench tooling).
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn named(&self) -> Vec<(&'static str, Array1<Float>)> {
+        vec![
+            ("onset", self.onset.clone()),
+            ("beat", self.beat.clone()),
+            ("low", self.low.clone()),
+            ("mid", self.mid.clone()),
+        ]
+    }
+}
+
+/// [`RhythmEnvelopes`] of a log-mel spectrogram `(n_mels, n_frames)` in dB: the
+/// positive lag-1 difference of every mel bin, averaged over the bins of each
+/// role and left-padded with [`onset_envelope_pad_frames`] zeros. One loop
+/// feeds all four, so the fused pass and the aggression lane share them.
+pub(crate) fn rhythm_envelopes_from_log_mel(
+    s_db: ArrayView2<Float>,
+    sr: u32,
+    n_fft: usize,
+    hop_length: usize,
+) -> RhythmEnvelopes {
+    let lag = 1usize;
+    let (n_mels, n_frames) = s_db.dim();
+    let n_beat_mels = mel_bins_below(sr, n_mels, BEAT_ENVELOPE_MAX_HZ).max(1);
+    let n_low_mels = mel_bins_below(sr, n_mels, LOW_ENVELOPE_MAX_HZ).max(1);
+    let n_mid_end = mel_bins_below(sr, n_mels, MID_ENVELOPE_MAX_HZ).max(n_low_mels + 1);
+
+    let out_frames = n_frames.saturating_sub(lag);
+    let pad_left = onset_envelope_pad_frames(lag, n_fft, hop_length);
+    let mut envelopes = RhythmEnvelopes {
+        onset: Array1::zeros(out_frames + pad_left),
+        beat: Array1::zeros(out_frames + pad_left),
+        low: Array1::zeros(out_frames + pad_left),
+        mid: Array1::zeros(out_frames + pad_left),
+    };
+    for t in 0..out_frames {
+        let (mut sum, mut beat_sum, mut low_sum, mut mid_sum) = (0.0, 0.0, 0.0, 0.0);
+        for m in 0..n_mels {
+            let flux = (s_db[(m, t + lag)] - s_db[(m, t)]).max(0.0);
+            sum += flux;
+            if m < n_beat_mels {
+                beat_sum += flux;
+            }
+            if m < n_low_mels {
+                low_sum += flux;
+            } else if m < n_mid_end {
+                mid_sum += flux;
+            }
+        }
+        envelopes.onset[pad_left + t] = sum / n_mels as Float;
+        envelopes.beat[pad_left + t] = beat_sum / n_beat_mels as Float;
+        envelopes.low[pad_left + t] = low_sum / n_low_mels as Float;
+        envelopes.mid[pad_left + t] = mid_sum / (n_mid_end - n_low_mels) as Float;
+    }
+    envelopes
+}
+
 /// Frequency-banded onset envelopes and their Hz boundaries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnsetBands {

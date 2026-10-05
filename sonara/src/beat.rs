@@ -31,16 +31,19 @@ const MAX_BEAT_TEMPO_DEVIATION: Float = 0.05;
 /// Integer tempo of steady tracks. Tracks made in a DAW usually have an
 /// integer tempo; a constant grid over the whole track tells whether the
 /// tracked beats keep one tempo and whether the nearest integer fits them.
-/// The beats are split into this many consecutive segments, and each
-/// segment's grid phase is compared with the phase of the whole track.
+/// The stronger half of the beats (local score at or above its median) is
+/// split into this many consecutive segments, and each segment's grid phase
+/// is compared with the phase of all of them. Beats the tracker carries
+/// through breakdowns follow its own period rather than an onset, so they
+/// only add phase noise.
 const STEADY_GRID_SEGMENTS: usize = 4;
 
-/// Fewest beats per segment; shorter tracks are never rounded.
+/// Fewest strong beats per segment; shorter tracks are never rounded.
 const STEADY_GRID_MIN_SEGMENT_BEATS: usize = 16;
 
 /// Largest phase offset (seconds) of a segment from the whole-track grid for
 /// the tempo to count as constant, and for the integer grid to fit.
-const STEADY_GRID_MAX_OFFSET_SEC: f64 = 0.010;
+const STEADY_GRID_MAX_OFFSET_SEC: f64 = 0.0085;
 
 /// The grid phase is taken modulo a quarter beat (fourth harmonic of the beat
 /// period), so a tracker that sits half or a quarter of a beat off during one
@@ -50,13 +53,27 @@ const STEADY_GRID_HARMONIC: f64 = 4.0;
 /// Largest distance (BPM) of the measured tempo from an integer to round it.
 const INTEGER_TEMPO_TOLERANCE: Float = 0.03;
 
-/// Fixed frame (BPM) in which the tempo level is chosen, whatever the caller's
-/// range: the caller's `bpm_min`/`bpm_max` only fold the reported tempo, so the
-/// level does not depend on the range.
-const LEVEL_FRAME_BPM: (Float, Float) = (79.0, 192.0);
-
 /// Further ACF peaks retracked as alternatives to the selected tempo level.
-const MAX_ALTERNATIVE_LEVELS: usize = 4;
+/// Slow peaks (a bar or half a bar) are levels of their own and take places
+/// too: a drum and bass track at 164 BPM whose stronger peaks sit near 109, 82,
+/// 41, 131 and 66 reaches its 164 peak only as the fifth alternative.
+const MAX_ALTERNATIVE_LEVELS: usize = 5;
+
+/// Smallest autocorrelation of an alternative ACF peak, relative to the
+/// zero-lag value. Below it the peak is round-off of the FFT autocorrelation
+/// (about 1e-8) at a lag where no onset recurs, as between the onsets of an
+/// envelope with silent gaps, not a periodicity. Every peak tracked on the
+/// 2225 real tracks of the bench and off-bench sets lies at 0.026 or more.
+const MIN_PEAK_ACF_RATIO: Float = 1e-4;
+
+/// Shortest beat period (seconds) of an alternative tempo level; faster ACF
+/// peaks (above about 214 BPM) do not compete with the selected level. The
+/// level evidence (pair agreement plus local score) favours faster levels: with
+/// octave relatives competing, a third of the broken-rhythm bench went to double
+/// tempo, and without a bound the subdivisions of 120-145 BPM tracks (240-290)
+/// win. A beat this fast is a subdivision, not a pulse the evidence can judge.
+/// The selected level itself is not bounded.
+const MIN_LEVEL_BEAT_PERIOD_SEC: Float = 0.28;
 
 /// Weight of the mean local score at the beats in a level's evidence (the
 /// beats' pair agreement plus this times their mean local score).
@@ -69,6 +86,28 @@ const LEVEL_SWITCH_MARGIN: Float = 0.25;
 /// Octave guard: an alternative within this ratio of an octave multiple of the
 /// selected level (but not at its octave) is skipped.
 const LEVEL_OCTAVE_GUARD_RATIO: Float = 1.03;
+
+/// Integer resonance between polymetric relatives: when the chosen level's
+/// beat tempo lies more than [`RESONANCE_FRACTIONAL_BPM`] from an integer, a
+/// level at 4/3, 3/4, 3/2, 2/3, 5/4 or 4/5 of it (within
+/// [`POLYMETRIC_RATIO_TOLERANCE`]) whose beat tempo lies within
+/// [`RESONANCE_INTEGER_BPM`] of an integer, and whose evidence is at most this
+/// much lower, is reported instead. Tracks made in a DAW usually have an
+/// integer tempo, and a 3-against-4 or 4-against-5 reading of one rarely lands
+/// on another integer; tempos that do (120 and 160) are left to the evidence.
+const RESONANCE_EVIDENCE_MARGIN: Float = 0.15;
+
+/// Largest distance (BPM) of a beat tempo from an integer to count as integer
+/// for the resonance.
+const RESONANCE_INTEGER_BPM: Float = 0.06;
+
+/// Smallest distance (BPM) of the chosen level's beat tempo from an integer
+/// for the resonance to look for an integer relative.
+const RESONANCE_FRACTIONAL_BPM: Float = 0.15;
+
+/// Polymetric ratios between tempo levels, and their relative tolerance.
+const POLYMETRIC_RATIOS: [Float; 6] = [4.0 / 3.0, 0.75, 1.5, 2.0 / 3.0, 1.25, 0.8];
+const POLYMETRIC_RATIO_TOLERANCE: Float = 0.02;
 
 /// Result of tempo estimation, including diagnostic tempo candidates.
 ///
@@ -169,18 +208,23 @@ pub fn beat_track_with_bpm_range(
 /// tempo and the strongest ACF tempo candidates for reporting.
 ///
 /// The autocorrelation (ACF) estimate sets the integer beat period of the
-/// dynamic-programming tracker. The tempo level is chosen in a fixed 79–192
-/// BPM frame: the metrically selected ACF lag and up to four further ACF
-/// peaks are each tracked, and another level replaces the selected one only
-/// when its beats agree better with each other and with the onsets (pair
-/// agreement plus 0.75 × mean local score, a margin of 0.25), never an octave
-/// relative. The reported tempo is then the period of the chosen level's
-/// beats: a hierarchical consensus of beat pairs 32, 64 and 128 beats apart
-/// (±1 frame), at the octave of its ACF lag, folded into the caller's range.
-/// The ACF estimate stays as the fallback when fewer than 17 beats are tracked
-/// or the beat period deviates from it by more than 5%. A steady track whose
-/// beats stay on one constant grid that also fits the nearest integer tempo
-/// reports that integer. The candidates do not depend on the level choice.
+/// dynamic-programming tracker. The tempo level is chosen among the ACF peaks,
+/// each tracked at its own lag's tempo: the metrically selected ACF lag and up
+/// to five further ACF peaks with a beat period of at least 0.28 s are each
+/// tracked, and another level replaces the selected one only when its beats
+/// agree better with each other and with the onsets (pair agreement plus
+/// 0.75 × mean local score, a margin of 0.25), never an octave relative. When
+/// the chosen level's beats keep a fractional tempo and a polymetric relative
+/// (4/3, 3/2, 5/4 or their inverses) with nearly the same evidence keeps an
+/// integer one, the relative is chosen (integer resonance). The
+/// caller's range plays no part in the choice. The reported tempo is then the
+/// period of the chosen level's beats: a hierarchical consensus of beat pairs
+/// 32, 64 and 128 beats apart (±1 frame) on their sub-frame positions, at the
+/// octave of its ACF lag, folded into the caller's range. The ACF estimate
+/// stays as the fallback when fewer than 17 beats are tracked or the beat
+/// period deviates from it by more than 5%. A steady track whose strong beats
+/// stay on one constant grid that also fits the nearest integer tempo reports
+/// that integer. The candidates do not depend on the level choice.
 ///
 /// The beats are tracked on the same broadband onset envelope; see
 /// [`beat_track_detailed_with_dp_envelope`] for a separate tracking envelope.
@@ -354,9 +398,10 @@ pub(crate) fn beat_track_with_range_free_beats(
         if frames_per_beat == 0 {
             return Ok((estimate, vec![], range_free_beats.then(Vec::new)));
         }
-        let (beats, _) = track(frames_per_beat);
+        let (beats, local_score) = track(frames_per_beat);
+        let (times, strength) = refine_beats(&beats, local_score.view());
         if let Some((tempo, tempo_raw)) =
-            beat_period_tempo(&beats, start_bpm, 1.0, frame_rate, bpm_min, bpm_max)?
+            beat_period_tempo(&times, &strength, start_bpm, 1.0, frame_rate, bpm_min, bpm_max)?
         {
             estimate.tempo = tempo;
             estimate.tempo_raw = tempo_raw;
@@ -367,7 +412,7 @@ pub(crate) fn beat_track_with_range_free_beats(
     };
     let candidates = acf.ranked();
 
-    // Tempo levels in the fixed frame: the selected ACF lag first, then up to
+    // Tempo levels at their own ACF lags: the selected ACF lag first, then up to
     // MAX_ALTERNATIVE_LEVELS further ACF peaks, one level per beat period.
     let mut levels: Vec<TempoLevel> = Vec::with_capacity(MAX_ALTERNATIVE_LEVELS + 1);
     let mut seen_periods = Vec::with_capacity(MAX_ALTERNATIVE_LEVELS + 1);
@@ -376,14 +421,15 @@ pub(crate) fn beat_track_with_range_free_beats(
             break;
         }
         let refined = refine_tempo_from_acf_peak(acf.acf.view(), lag, frame_rate);
-        let folded =
-            align_tempo_to_bpm_range(refined, Some(LEVEL_FRAME_BPM.0), Some(LEVEL_FRAME_BPM.1))?
-                .clamp(30.0, 320.0);
+        let folded = refined.clamp(30.0, 320.0);
         let frames_per_beat = frames_per_beat_of(folded);
         if seen_periods.contains(&frames_per_beat) {
             continue;
         }
         seen_periods.push(frames_per_beat);
+        if !levels.is_empty() && 60.0 / folded < MIN_LEVEL_BEAT_PERIOD_SEC {
+            continue;
+        }
         if let Some(selected) = levels.first() {
             // Octave guard: an octave relative of the selected level never competes.
             let octaves = (folded / selected.folded).log2();
@@ -406,12 +452,14 @@ pub(crate) fn beat_track_with_range_free_beats(
             continue;
         }
         let (beats, local_score) = track(frames_per_beat);
-        let consensus = beat_period_consensus(&beats);
+        let frames: Vec<f64> = beats.iter().map(|&b| b as f64).collect();
+        let consensus = beat_period_consensus(&frames);
         let agreement = consensus.map_or(0.0, |(_, agreement)| agreement);
         // The evidence belongs to this level only when its beats keep its period:
         // a tracker pulled onto another level's pulse measures that level instead.
         let measured = consensus.is_some_and(|(period, _)| {
-            (60.0 * frame_rate / period / folded - 1.0).abs() <= MAX_BEAT_TEMPO_DEVIATION
+            (60.0 * frame_rate as f64 / period / folded as f64 - 1.0).abs()
+                <= MAX_BEAT_TEMPO_DEVIATION as f64
         });
         let mean_local =
             beats.iter().map(|&b| local_score[b] as f64).sum::<f64>() / beats.len() as f64;
@@ -420,6 +468,7 @@ pub(crate) fn beat_track_with_range_free_beats(
         } else {
             Float::NEG_INFINITY
         };
+        let (times, strength) = refine_beats(&beats, local_score.view());
         levels.push(TempoLevel {
             refined,
             folded,
@@ -427,6 +476,9 @@ pub(crate) fn beat_track_with_range_free_beats(
             measured,
             evidence: agreement + LEVEL_LOCAL_SCORE_WEIGHT * mean_local,
             beats,
+            times,
+            strength,
+            beat_tempo: consensus.map(|(period, _)| (60.0 * frame_rate as f64 / period) as Float),
         });
     }
 
@@ -443,6 +495,9 @@ pub(crate) fn beat_track_with_range_free_beats(
     if chosen != 0 && levels[chosen].evidence - levels[0].evidence < LEVEL_SWITCH_MARGIN {
         chosen = 0;
     }
+    if let Some(resonant) = integer_resonance(&levels, chosen) {
+        chosen = resonant;
+    }
     let level = levels.swap_remove(chosen);
 
     // Report the period of the tracked beats at the chosen level, folded into
@@ -451,7 +506,8 @@ pub(crate) fn beat_track_with_range_free_beats(
     let raw = level.refined.clamp(30.0, 320.0);
     let acf_tempo = align_tempo_to_bpm_range(level.refined, bpm_min, bpm_max)?.clamp(30.0, 320.0);
     let (tempo, tempo_raw) = beat_period_tempo(
-        &level.beats,
+        &level.times,
+        &level.strength,
         level.folded,
         raw / level.folded,
         frame_rate,
@@ -495,12 +551,12 @@ pub(crate) fn beat_track_with_range_free_beats(
     ))
 }
 
-/// One tempo level: an ACF lag, its tempo folded into [`LEVEL_FRAME_BPM`] and
-/// the beats the DP tracks at that period.
+/// One tempo level: an ACF lag, its tempo and the beats the DP tracks at that
+/// period.
 struct TempoLevel {
     /// Fractional-lag tempo of the ACF peak (BPM).
     refined: Float,
-    /// `refined` folded into the level frame and clamped to `[30, 320]`.
+    /// `refined` clamped to `[30, 320]`: the tempo the level is tracked at.
     folded: Float,
     /// Integer beat period of `folded`, in frames.
     frames_per_beat: usize,
@@ -510,32 +566,106 @@ struct TempoLevel {
     /// Pair agreement of the beats plus the weighted mean local score at them.
     evidence: Float,
     beats: Vec<usize>,
+    /// Sub-frame positions of `beats` (frames), from [`refine_beats`].
+    times: Vec<f64>,
+    /// Local score at each beat.
+    strength: Vec<Float>,
+    /// Tempo of the beats from the consensus of their frame positions, when
+    /// there are enough of them.
+    beat_tempo: Option<Float>,
 }
 
-/// Tempo of `beats` from their period, when the beat-period consensus applies:
-/// `Some((tempo, tempo_raw))`, with `tempo_raw = beat tempo × octave` and
-/// `tempo` its fold into the caller's range.
+/// The level to report instead of `chosen` by integer resonance (see
+/// [`RESONANCE_EVIDENCE_MARGIN`]), if any: the measured polymetric relative
+/// with the best evidence among those that qualify.
+fn integer_resonance(levels: &[TempoLevel], chosen: usize) -> Option<usize> {
+    let distance = |level: &TempoLevel| level.beat_tempo.map(|t| (t - t.round()).abs());
+    if !distance(&levels[chosen]).is_some_and(|d| d > RESONANCE_FRACTIONAL_BPM) {
+        return None;
+    }
+    let polymetric = |ratio: Float| {
+        POLYMETRIC_RATIOS
+            .iter()
+            .any(|&m| (ratio / m - 1.0).abs() <= POLYMETRIC_RATIO_TOLERANCE)
+    };
+    levels
+        .iter()
+        .enumerate()
+        .filter(|&(index, level)| {
+            index != chosen
+                && level.measured
+                && polymetric(level.folded / levels[chosen].folded)
+                && level.evidence >= levels[chosen].evidence - RESONANCE_EVIDENCE_MARGIN
+                && distance(level).is_some_and(|d| d <= RESONANCE_INTEGER_BPM)
+        })
+        .max_by(|a, b| a.1.evidence.total_cmp(&b.1.evidence))
+        .map(|(index, _)| index)
+}
+
+/// Sub-frame positions (frames) and local scores of the tracked beats.
 ///
-/// `level_tempo` is the ACF tempo the beats were tracked at; a beat period
-/// more than [`MAX_BEAT_TEMPO_DEVIATION`] away from it, or too few beats,
-/// gives `None`. A steady track whose beats fit the nearest integer tempo
-/// reports that integer.
+/// A beat at a strict local maximum of `local_score` moves to the vertex of
+/// the parabola through the score at its frame and both neighbours,
+/// `n + (s[n-1] - s[n+1]) / (2 (s[n-1] - 2 s[n] + s[n+1]))`, within half a
+/// frame; any other beat keeps its frame. The local score is the tracker's own
+/// smoothed onset strength, so the vertex is where the tracked onset peaks
+/// between two analysis frames.
+fn refine_beats(beats: &[usize], local_score: ArrayView1<Float>) -> (Vec<f64>, Vec<Float>) {
+    let n = local_score.len();
+    let times = beats
+        .iter()
+        .map(|&b| {
+            if b == 0 || b + 1 >= n {
+                return b as f64;
+            }
+            let (left, center, right) = (
+                local_score[b - 1] as f64,
+                local_score[b] as f64,
+                local_score[b + 1] as f64,
+            );
+            let curvature = left - 2.0 * center + right;
+            if center >= left && center >= right && curvature < 0.0 {
+                b as f64 + (0.5 * (left - right) / curvature).clamp(-0.5, 0.5)
+            } else {
+                b as f64
+            }
+        })
+        .collect();
+    let strength = beats
+        .iter()
+        .map(|&b| local_score.get(b).copied().unwrap_or(0.0))
+        .collect();
+    (times, strength)
+}
+
+/// Tempo of the tracked beats from their period, when the beat-period
+/// consensus applies: `Some((tempo, tempo_raw))`, with
+/// `tempo_raw = beat tempo × octave` and `tempo` its fold into the caller's
+/// range.
+///
+/// `times` are the beats' sub-frame positions and `strength` their local
+/// scores ([`refine_beats`]). `level_tempo` is the ACF tempo the beats were
+/// tracked at; a beat period more than [`MAX_BEAT_TEMPO_DEVIATION`] away from
+/// it, or too few beats, gives `None`. A steady track whose beats fit the
+/// nearest integer tempo reports that integer.
 fn beat_period_tempo(
-    beats: &[usize],
+    times: &[f64],
+    strength: &[Float],
     level_tempo: Float,
     octave: Float,
     frame_rate: Float,
     bpm_min: Option<Float>,
     bpm_max: Option<Float>,
 ) -> Result<Option<(Float, Float)>> {
-    let Some((period, _agreement)) = beat_period_consensus(beats) else {
+    let Some((period, _agreement)) = beat_period_consensus(times) else {
         return Ok(None);
     };
-    let beat_tempo = 60.0 * frame_rate / period;
+    let beat_tempo = (60.0 * frame_rate as f64 / period) as Float;
     if (beat_tempo / level_tempo - 1.0).abs() > MAX_BEAT_TEMPO_DEVIATION {
         return Ok(None);
     }
-    let beat_tempo = integer_grid_tempo(beats, beat_tempo, frame_rate).unwrap_or(beat_tempo);
+    let beat_tempo =
+        integer_grid_tempo(times, strength, beat_tempo, frame_rate).unwrap_or(beat_tempo);
     let tempo_raw = beat_tempo * octave;
     let tempo = align_tempo_to_bpm_range(tempo_raw, bpm_min, bpm_max)?.clamp(30.0, 320.0);
     Ok(Some((tempo, tempo_raw)))
@@ -550,33 +680,34 @@ fn beat_period_tempo(
 /// at `n/2`) start from the previous period times their separation instead of
 /// a fresh median, so a tracker slip by half a beat cannot capture them.
 ///
-/// `beats` are strictly increasing frame indices, as the DP backtrack yields.
-/// Returns `(period_frames, agreement)`, where `agreement` is the share of the
+/// `positions` are strictly increasing beat positions in frames: the DP's
+/// frame indices, or their sub-frame refinement. Returns
+/// `(period_frames, agreement)`, where `agreement` is the share of the
 /// first-stage pairs within the tolerance, or `None` below
 /// [`MIN_BEAT_PERIOD_BEATS`] beats.
-fn beat_period_consensus(beats: &[usize]) -> Option<(Float, Float)> {
-    let n = beats.len();
+fn beat_period_consensus(positions: &[f64]) -> Option<(f64, Float)> {
+    let n = positions.len();
     if n < MIN_BEAT_PERIOD_BEATS {
         return None;
     }
-    let pair_spans = |sep: usize| -> Vec<Float> {
+    let pair_spans = |sep: usize| -> Vec<f64> {
         (0..n - sep)
-            .map(|i| (beats[i + sep] - beats[i]) as Float)
+            .map(|i| positions[i + sep] - positions[i])
             .collect()
     };
 
     let sep = BEAT_PAIR_SEPARATIONS[0].min(n / 2);
     let spans = pair_spans(sep);
     let mut sorted = spans.clone();
-    sorted.sort_by(Float::total_cmp);
+    sorted.sort_by(f64::total_cmp);
     let (span, agreeing) = refine_pair_span(&spans, sorted[sorted.len() / 2])?;
-    let mut period = span / sep as Float;
+    let mut period = span / sep as f64;
     let agreement = agreeing as Float / spans.len() as Float;
 
     for &stage_sep in &BEAT_PAIR_SEPARATIONS[1..] {
         let sep = stage_sep.min(n / 2);
-        if let Some((span, _)) = refine_pair_span(&pair_spans(sep), period * sep as Float) {
-            period = span / sep as Float;
+        if let Some((span, _)) = refine_pair_span(&pair_spans(sep), period * sep as f64) {
+            period = span / sep as f64;
         }
     }
     Some((period, agreement))
@@ -587,41 +718,55 @@ fn beat_period_consensus(beats: &[usize]) -> Option<(Float, Float)> {
 ///
 /// Returns the refined span and the agreeing-pair count of the last pass, or
 /// `None` when no span lies within the tolerance of `span` on the first pass.
-fn refine_pair_span(spans: &[Float], mut span: Float) -> Option<(Float, usize)> {
+fn refine_pair_span(spans: &[f64], mut span: f64) -> Option<(f64, usize)> {
     let mut agreeing = None;
     for _ in 0..BEAT_PAIR_PASSES {
         let (mut sum, mut count) = (0.0f64, 0usize);
         for &x in spans {
-            if (x - span).abs() <= BEAT_PAIR_TOLERANCE_FRAMES {
-                sum += x as f64;
+            if (x - span).abs() <= BEAT_PAIR_TOLERANCE_FRAMES as f64 {
+                sum += x;
                 count += 1;
             }
         }
         if count == 0 {
             break;
         }
-        span = (sum / count as f64) as Float;
+        span = sum / count as f64;
         agreeing = Some(count);
     }
     agreeing.map(|count| (span, count))
 }
 
-/// The integer tempo nearest `tempo` (BPM, at the level of `beats`) when a
+/// The integer tempo nearest `tempo` (BPM, at the level of the beats) when a
 /// constant grid at that integer stays on the tracked beats over the whole
 /// track; `None` otherwise.
 ///
-/// The grid fits when no beat segment drifts more than
-/// [`STEADY_GRID_MAX_OFFSET_SEC`] off it. A grid that fits the whole track
+/// The grid fits when no segment of the stronger half of the beats drifts more
+/// than [`STEADY_GRID_MAX_OFFSET_SEC`] off it. A grid that fits the whole track
 /// means the tempo is both constant and that integer: a drifting tempo or a
 /// fractional one slides off a constant integer grid (0.02 BPM at 128 BPM moves
 /// it by about 47 ms in five minutes). The measured tempo itself is not tested,
 /// because its own small error would make its grid drift on a steady track.
-fn integer_grid_tempo(beats: &[usize], tempo: Float, frame_rate: Float) -> Option<Float> {
+fn integer_grid_tempo(
+    times: &[f64],
+    strength: &[Float],
+    tempo: Float,
+    frame_rate: Float,
+) -> Option<Float> {
     let integer = tempo.round();
     if integer <= 0.0 || (tempo - integer).abs() > INTEGER_TEMPO_TOLERANCE {
         return None;
     }
-    max_grid_offset_sec(beats, 60.0 * frame_rate as f64 / integer as f64, frame_rate as f64)
+    let mut sorted = strength.to_vec();
+    sorted.sort_by(Float::total_cmp);
+    let floor = *sorted.get(sorted.len().checked_sub(1)? / 2)?;
+    let strong: Vec<f64> = times
+        .iter()
+        .zip(strength)
+        .filter(|&(_, &s)| s >= floor)
+        .map(|(&t, _)| t)
+        .collect();
+    max_grid_offset_sec(&strong, 60.0 * frame_rate as f64 / integer as f64, frame_rate as f64)
         .is_some_and(|offset| offset <= STEADY_GRID_MAX_OFFSET_SEC)
         .then_some(integer)
 }
@@ -631,7 +776,7 @@ fn integer_grid_tempo(beats: &[usize], tempo: Float, frame_rate: Float) -> Optio
 /// all beats by a circular mean. Phases are taken at
 /// [`STEADY_GRID_HARMONIC`] times the beat rate. `None` with fewer than
 /// [`STEADY_GRID_MIN_SEGMENT_BEATS`] beats per segment.
-fn max_grid_offset_sec(beats: &[usize], period_frames: f64, frame_rate: f64) -> Option<f64> {
+fn max_grid_offset_sec(beats: &[f64], period_frames: f64, frame_rate: f64) -> Option<f64> {
     let segments = STEADY_GRID_SEGMENTS;
     if beats.len() < segments * STEADY_GRID_MIN_SEGMENT_BEATS
         || !period_frames.is_finite()
@@ -640,9 +785,9 @@ fn max_grid_offset_sec(beats: &[usize], period_frames: f64, frame_rate: f64) -> 
         return None;
     }
     let omega = STEADY_GRID_HARMONIC * std::f64::consts::TAU / period_frames;
-    let phase = |part: &[usize]| {
+    let phase = |part: &[f64]| {
         let (sin, cos) = part.iter().fold((0.0f64, 0.0f64), |(s, c), &b| {
-            let (bs, bc) = (omega * b as f64).sin_cos();
+            let (bs, bc) = (omega * b).sin_cos();
             (s + bs, c + bc)
         });
         sin.atan2(cos)
@@ -692,9 +837,11 @@ impl AcfCandidates {
         ranked
     }
 
-    /// Lags of the local score maxima, strongest first.
+    /// Lags of the local score maxima, strongest first, whose autocorrelation
+    /// clears [`MIN_PEAK_ACF_RATIO`] of the zero-lag value.
     fn peak_lags(&self) -> Vec<usize> {
         let c = &self.candidates;
+        let floor = MIN_PEAK_ACF_RATIO * self.acf[0];
         let score = |i: Option<usize>| {
             i.and_then(|i| c.get(i))
                 .map_or(Float::NEG_INFINITY, |c| c.2)
@@ -704,6 +851,7 @@ impl AcfCandidates {
                 c[i].2 >= score(i.checked_sub(1))
                     && c[i].2 >= score(Some(i + 1))
                     && c[i].2.is_finite()
+                    && self.acf[c[i].0] > floor
             })
             .map(|i| (c[i].0, c[i].2))
             .collect();
@@ -1421,6 +1569,20 @@ mod tests {
             estimate.tempo
         );
         assert_eq!(estimate.tempo.to_bits(), estimate.tempo_raw.to_bits());
+    }
+
+    #[test]
+    fn test_refine_beats_moves_peaks_to_the_parabola_vertex() {
+        // Frames 0..7: peaks at 2 (symmetric) and 6 (left neighbour higher).
+        let score = Array1::from(vec![0.0, 1.0, 4.0, 1.0, 0.0, 3.0, 4.0, 0.0]);
+        let (times, strength) = refine_beats(&[0, 2, 4, 6, 7], score.view());
+        assert_eq!(times[0], 0.0, "edge frame stays");
+        assert_eq!(times[1], 2.0, "symmetric peak stays");
+        assert_eq!(times[2], 4.0, "a frame that is not a peak stays");
+        // Vertex of (3, 4, 0) at frames 5, 6, 7: 6 + (3 - 0) / (2 (3 - 8 + 0)) = 5.7.
+        assert!((times[3] - 5.7).abs() < 1e-12, "{}", times[3]);
+        assert_eq!(times[4], 7.0, "last frame stays");
+        assert_eq!(strength, vec![0.0, 4.0, 0.0, 4.0, 0.0]);
     }
 
     #[test]
