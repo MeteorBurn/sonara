@@ -116,9 +116,12 @@ The tempo level is re-checked: the selected autocorrelation level and up to
 four other distinct levels with a beat period of at least 0.28 s are tracked
 again at their own tempo, and another level replaces the selected one only when
 its beats agree with the onsets clearly better (beat-pair consensus plus the
-tracker's local score). `bpm_min`/`bpm_max` play no part in the choice and only
-fold the reported value, so the tempo ignoring octave does not depend on the
-range. On a switched track, `bpm`, `bpm_raw` and `beats` follow the new level;
+tracker's local score). When the chosen level's beats keep a tempo more than
+0.15 BPM off an integer and a level at 4/3, 3/2 or 5/4 of it (or the inverse)
+with nearly the same evidence keeps an integer one, that level is reported
+instead. `bpm_min`/`bpm_max` play no part in the choice and only fold the
+reported value, so the tempo ignoring octave does not depend on the range. On a
+switched track, `bpm`, `bpm_raw` and `beats` follow the new level;
 `bpm_candidates` do not change.
 The onset envelope is padded one frame less than librosa's
 `lag + n_fft / (2 * hop_length)`, so `onset_frames`, `onset_strength_bands`,
