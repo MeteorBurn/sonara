@@ -1,0 +1,7 @@
+name	kind	label_bpm	tolerance	audio_sha256	note
+straight-0096	integer	125	0	faa954540512921f87c978256b391a2deb81bb6acf9a45e2f9559671564a99eb	bpm-grid straight #96: MIK 125.00, Rekordbox 125.00, Beat This! grid fit 1.0
+broken-0613	integer	125	0	0e112049e5b11f19628cfe1d55453b1b50ef6eafa20c6e830d48957501edc0d7	bpm-grid broken #613: MIK 125.00, Rekordbox 125.00, Beat This! grid fit 1.0
+broken-0010	fractional	127.745	0.005	b32ebb4b1b7034fc95735553c847a08f6e25aeb830b63466090819487c69bced	bpm-grid broken #10: MIK 127.745, Rekordbox 127.74, Beat This! grid 127.7452
+straight-0235	fractional	125.0066	0.003	6f82069f0c975a737d113fe59845a17618442131d4eab111adcef696d33d0747	bpm-grid straight #235: MIK 125.0066, Rekordbox 125.01, Beat This! grid 125.0054; 2a730d6 reported 125.0
+broken-0203	fractional	131.9935	0.003	551d006265c14e4770962101154dfc94d1bb6a64382735fab29a864dd0555ad8	bpm-grid broken #203: MIK 131.9935, Rekordbox 131.99, Beat This! grid 131.9932; 2a730d6 reported 132.0
+offbench-0202	fractional	112.499	0.005	7c07d6e34dabd503ea7bf33762c4b25d2dc8e3dbe67f6e9672dfb0df5adba578	off-bench #202 (disco edit): Beat This! grid 112.499, fit 1.0

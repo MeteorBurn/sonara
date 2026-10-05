@@ -1,4 +1,5 @@
-//! Synthetic BPM accuracy regression harness (Layer 1).
+//! BPM accuracy regression harness (Layer 1): synthetic signals and real-music
+//! envelope fixtures.
 //!
 //! This suite guards *correctness* of tempo detection against deterministic
 //! ground-truth signals — complementing the speed benches in `benches/`, which
@@ -530,6 +531,103 @@ fn bpm_range_rescues_192_bpm() {
 // period on other beats; there the octave-free values must agree within the
 // precision guard.
 // ============================================================
+
+// ============================================================
+// Real-music fixtures
+//
+// `tests/fixtures/rhythm/` holds the analysis pass's broadband and beat-tracker
+// onset envelopes of real tracks (u16-quantized; no audio), written by
+// `dev-docs/bench/scripts/bpm-grid/make_fixtures.py`, and `manifest.tsv` with
+// each track's validator values (MIK, Rekordbox, Beat This!) and what the tempo
+// must be: an exact integer, or a fraction within a tolerance of the label.
+// ============================================================
+
+struct RhythmFixture {
+    sr: u32,
+    hop: usize,
+    onset: Array1<Float>,
+    beat: Array1<Float>,
+}
+
+fn read_rhythm_fixture(path: &std::path::Path) -> RhythmFixture {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(&bytes[..8], b"SNRFIX01", "{}: not a rhythm fixture", path.display());
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let (sr, hop, count, frames) = (word(8), word(12) as usize, word(16) as usize, word(20) as usize);
+    let mut at = 24;
+    let mut heads = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = bytes[at] as usize;
+        let name = String::from_utf8(bytes[at + 1..at + 1 + len].to_vec()).unwrap();
+        let scale = f32::from_le_bytes(bytes[at + 1 + len..at + 5 + len].try_into().unwrap());
+        heads.push((name, scale));
+        at += 5 + len;
+    }
+    let envelope = |name: &str| -> Array1<Float> {
+        let index = heads.iter().position(|(n, _)| n == name).unwrap();
+        let start = at + index * 2 * frames;
+        bytes[start..start + 2 * frames]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]) as Float * heads[index].1)
+            .collect()
+    };
+    let (onset, beat) = (envelope("onset"), envelope("beat"));
+    at += count * 2 * frames;
+    assert_eq!(at, bytes.len(), "{}: trailing bytes", path.display());
+    RhythmFixture { sr, hop, onset, beat }
+}
+
+/// Tempo of a fixture as the analysis pass computes it (no BPM range).
+fn fixture_tempo(fixture: &RhythmFixture) -> sonara::beat::TempoEstimate {
+    sonara::beat::beat_track_detailed_with_dp_envelope(
+        None,
+        Some(fixture.onset.view()),
+        fixture.sr,
+        fixture.hop,
+        120.0,
+        100.0,
+        true,
+        None,
+        None,
+        Some(fixture.beat.view()),
+    )
+    .unwrap()
+    .0
+}
+
+/// Steady tracks at an integer tempo report exactly that integer; tracks at a
+/// fractional tempo, by the validators, report the fraction instead of the
+/// nearest integer.
+#[test]
+fn real_music_integer_and_fractional_tempos() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/rhythm");
+    let manifest = std::fs::read_to_string(dir.join("manifest.tsv")).unwrap();
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    println!("\n=== Real-music tempo fixtures ===");
+    for line in manifest.lines().skip(1).filter(|l| !l.trim().is_empty()) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let (name, kind) = (cols[0], cols[1]);
+        let label: Float = cols[2].parse().unwrap();
+        let tolerance: Float = cols[3].parse().unwrap();
+        let tempo = fixture_tempo(&read_rhythm_fixture(&dir.join(format!("{name}.env16")))).tempo;
+        let folded = fold_to_octave(tempo, label);
+        let is_integer = (folded - folded.round()).abs() < 1e-4;
+        let ok = match kind {
+            "integer" => is_integer && folded.round() == label.round(),
+            "fractional" => !is_integer && (folded - label).abs() <= tolerance,
+            "not-integer" => !is_integer,
+            other => panic!("{name}: unknown kind {other}"),
+        };
+        println!("{name:>16} {kind:>11} label {label:>9.4} tempo {tempo:>10.4} {}", if ok { "ok" } else { "FAIL" });
+        if !ok {
+            failures.push(format!("{name} ({kind}, label {label}): tempo {tempo}"));
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixtures in {}", dir.display());
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
 
 #[test]
 fn bpm_precision_from_beat_period() {
