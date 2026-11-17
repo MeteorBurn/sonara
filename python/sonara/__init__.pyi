@@ -380,6 +380,24 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 # between consecutive frames (base unit per hop); quantiles interpolate linearly
 # (NumPy default); _iqr = p75 - p25.
 
+# --- spectral shape --- features=["spectral_shape"] (also playlist/full modes)
+# Track means of per-frame spectral-shape descriptors (MIR_FEATURES group 3.1),
+# each averaged over only the frames where it is defined (silent frames are
+# skipped; 0.0 when no frame is). All float:
+#   spectral_skewness_mean             — magnitude-weighted skewness about the
+#                                        centroid, standardized by bandwidth
+#   spectral_kurtosis_excess_mean      — same moment, 4th order, minus 3
+#   spectral_slope_db_per_octave_mean  — dB/octave, least-squares slope of 8
+#                                        octave-band power levels (62.5..8000 Hz
+#                                        centres); pink noise ≈ -3, white ≈ 0,
+#                                        music with bass ≈ -3..-7; near-empty
+#                                        low octaves (no bass) bias it upward
+#   spectral_decrease_mean             — Peeters decrease, DC-bin reference: in
+#                                        practice 1/k-weighted low-frequency
+#                                        emphasis; at most 1, usually positive,
+#                                        negative when the DC bin is strong
+#                                        (DC offset or lowest-bass leakage)
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

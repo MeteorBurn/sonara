@@ -140,6 +140,12 @@ r['spectral_flatness_mean']    # Tonal (0) vs noise-like (1)
 r['spectral_contrast_mean']    # Peak-valley ratio per band (7 values)
 r['mfcc_mean']                 # Timbre fingerprint (13 coefficients)
 r['chroma_mean']               # Pitch class distribution (12 values)
+r['spectral_skewness_mean']    # Spectral shape (fork): skewness, also
+r['spectral_kurtosis_excess_mean']      # excess kurtosis,
+r['spectral_slope_db_per_octave_mean']  # octave-band tilt (pink ≈ -3 dB/oct),
+r['spectral_decrease_mean']             # low-frequency emphasis (<= 1; < 0 on
+                                        # a DC offset); means over
+                                        # non-silent frames
 
 # Frame statistics (fork): how the per-frame values behind the _mean fields move.
 # Same frames as the means; each key comes with its base feature.

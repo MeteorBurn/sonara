@@ -126,6 +126,91 @@ fn frame_zero_crossing_rates(
         .collect()
 }
 
+// ---- Spectral shape (MIR_FEATURES group 3.1), per-frame math in f64 ----
+
+/// Octave bands of `spectral_slope_db_per_octave`: `(log2 centre Hz, first
+/// bin, end bin)` for centres 62.5·2^b Hz (b = 0..7), taking bins with
+/// `centre/√2 <= f_k < min(centre·√2, sr/2)`, f_k = k·sr/n_fft. Empty bands
+/// are left out.
+fn spectral_shape_octave_bands(sr: u32, n_fft: usize, n_bins: usize) -> Vec<(f64, usize, usize)> {
+    let bin_hz = sr as f64 / n_fft as f64;
+    let nyquist = sr as f64 / 2.0;
+    (0..8)
+        .filter_map(|b| {
+            let centre = 62.5 * 2.0_f64.powi(b);
+            let lo = centre / std::f64::consts::SQRT_2;
+            let hi = (centre * std::f64::consts::SQRT_2).min(nyquist);
+            let first = (0..n_bins).find(|&k| k as f64 * bin_hz >= lo)?;
+            let end = (first..n_bins)
+                .find(|&k| k as f64 * bin_hz >= hi)
+                .unwrap_or(n_bins);
+            (end > first).then_some((centre.log2(), first, end))
+        })
+        .collect()
+}
+
+/// Spectral skewness and excess kurtosis about the centroid, weighted by
+/// magnitude and standardized by the bandwidth `bw`. `None` unless
+/// `cent_den` (Σ|X_k|) and `bw` are positive.
+fn spectral_shape_moments(
+    mag: &[Float],
+    freqs: &[Float],
+    centroid: Float,
+    cent_den: Float,
+    bw: Float,
+) -> Option<(f64, f64)> {
+    if !(cent_den > 0.0 && bw > 0.0) {
+        return None;
+    }
+    let (mut m3, mut m4) = (0.0_f64, 0.0_f64);
+    for (&m, &f) in mag.iter().zip(freqs) {
+        let d = f as f64 - centroid as f64;
+        let d2 = d * d;
+        m3 += m as f64 * d2 * d;
+        m4 += m as f64 * d2 * d2;
+    }
+    let (den, bw) = (cent_den as f64, bw as f64);
+    Some((m3 / den / bw.powi(3), m4 / den / bw.powi(4) - 3.0))
+}
+
+/// Least-squares slope (dB per octave) of the octave-band power levels
+/// against log2 of the band centres. `None` for a silent frame or fewer
+/// than two bands.
+fn spectral_shape_slope(power: &[Float], bands: &[(f64, usize, usize)]) -> Option<f64> {
+    let total: f64 = power.iter().map(|&p| p as f64).sum();
+    if !(total > 0.0) || bands.len() < 2 {
+        return None;
+    }
+    let points: Vec<(f64, f64)> = bands
+        .iter()
+        .map(|&(x, first, end)| {
+            let sum: f64 = power[first..end].iter().map(|&p| p as f64).sum();
+            (x, 10.0 * (sum / (end - first) as f64).max(1e-10).log10())
+        })
+        .collect();
+    let n = points.len() as f64;
+    let x_mean = points.iter().map(|p| p.0).sum::<f64>() / n;
+    let y_mean = points.iter().map(|p| p.1).sum::<f64>() / n;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for &(x, y) in &points {
+        sxy += (x - x_mean) * (y - y_mean);
+        sxx += (x - x_mean) * (x - x_mean);
+    }
+    Some(sxy / sxx)
+}
+
+/// Spectral decrease with the DC bin as reference:
+/// Σ_{k≥1} (|X_k| − |X_0|)/k / Σ_{k≥1} |X_k|. `None` when the denominator is 0.
+fn spectral_shape_decrease(mag: &[Float]) -> Option<f64> {
+    let m0 = *mag.first()? as f64;
+    let (mut num, mut den) = (0.0_f64, 0.0_f64);
+    for (k, &m) in mag.iter().enumerate().skip(1) {
+        num += (m as f64 - m0) / k as f64;
+        den += m as f64;
+    }
+    (den > 0.0).then(|| num / den)
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -321,6 +406,7 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("contrast", true, false, false, C, &[]),
     feature("mfcc", true, false, false, C, &[]),
     feature("chroma", true, false, false, C, &[]),
+    feature("spectral_shape", true, false, false, C, &[]),
     feature("chords", true, false, false, C, &[]),
     feature("dissonance", true, false, false, C, &[]),
     feature(
@@ -1096,6 +1182,40 @@ pub struct TrackAnalysis {
     pub chroma_delta_mean: Option<Vec<Float>>,
     // --- end frame statistics ---
 
+    // --- spectral shape ---
+    // Track means of per-frame spectral-shape descriptors (MIR_FEATURES group
+    // 3.1), computed with `spectral_shape` (playlist/full, or
+    // `features=["spectral_shape"]`). Unlike the `_mean` fields above, each is
+    // the mean over only the frames where that descriptor is defined: silent
+    // frames (and, for the moments, zero-bandwidth frames) are skipped; with
+    // no defined frame the value is 0.0. Frames are the main pass's
+    // (|X_k| magnitudes, f_k = k·sr/n_fft over every bin, DC included).
+    /// Dimensionless. Magnitude-weighted third standardized moment about the
+    /// spectral centroid c: Σ|X_k|(f_k−c)³ / Σ|X_k| / bw³, with bw the
+    /// per-frame spectral bandwidth.
+    pub spectral_skewness_mean: Option<Float>,
+    /// Dimensionless. Magnitude-weighted excess kurtosis:
+    /// Σ|X_k|(f_k−c)⁴ / Σ|X_k| / bw⁴ − 3.
+    pub spectral_kurtosis_excess_mean: Option<Float>,
+    /// dB per octave. Least-squares slope of the octave-band power level
+    /// 10·log10(mean |X_k|²) against log2 of the band centre, over 8 octave
+    /// bands centred at 62.5·2^b Hz (b = 0..7, edges centre/√2..centre·√2,
+    /// clipped at Nyquist; empty bands skipped, at least 2 needed). Pink
+    /// noise reads ≈ −3 dB/oct, white noise ≈ 0; mixed music with bass about
+    /// −3 to −7. Every band counts, so near-empty low octaves (a tonal sound
+    /// whose fundamental is above ~90 Hz, no bass) read their noise floor and
+    /// window leakage and push the slope up, to positive values.
+    pub spectral_slope_db_per_octave_mean: Option<Float>,
+    /// Dimensionless. Spectral decrease (Peeters, Timbre Toolbox) on the
+    /// magnitude spectrum with the DC bin as reference:
+    /// Σ_{k≥1} (|X_k| − |X_0|)/k / Σ_{k≥1} |X_k|. The DC bin is ≈0 for
+    /// zero-mean music, so in practice this measures 1/k-weighted
+    /// low-frequency emphasis. At most 1, usually positive; negative when the
+    /// DC bin is strong (a DC offset in the signal, or the lowest bass leaking
+    /// into it through the window).
+    pub spectral_decrease_mean: Option<Float>,
+    // --- end spectral shape ---
+
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
     /// the span between `beats[i]` and `beats[i+1]`
@@ -1303,6 +1423,8 @@ struct FrameResult {
     contrast_bands: [Float; N_CONTRAST_BANDS + 1],
     hpcp_col: [Float; 12],
     dissonance: Float,
+    /// Skewness, excess kurtosis, slope, decrease; `None` where undefined.
+    spectral_shape: [Option<f64>; 4],
     #[cfg(feature = "aggression")]
     aggression_crest_db: Float,
     #[cfg(feature = "aggression")]
@@ -1816,6 +1938,15 @@ fn analyze_signal_inner(
     #[cfg(feature = "aggression")]
     let mut aggression_peak_ratio = wants_aggression.then(|| vec![0.0; n_frames]);
 
+    let wants_spectral_shape = extended && config.wants("spectral_shape");
+    let shape_bands = if wants_spectral_shape {
+        spectral_shape_octave_bands(sr, n_fft, n_bins)
+    } else {
+        Vec::new()
+    };
+    let mut shape_sum = [0.0_f64; 4];
+    let mut shape_count = [0_usize; 4];
+
     let freqs_raw = freqs.as_slice().unwrap();
     let roll_percent: Float = 0.85;
     let contrast_quantile: Float = 0.02;
@@ -1987,6 +2118,19 @@ fn analyze_signal_inner(
             (0.0, 0.0, 0.0)
         };
 
+        let spectral_shape = if wants_spectral_shape {
+            let (skewness, kurtosis) =
+                spectral_shape_moments(&mag_col, freqs_raw, centroid, cent_den, bandwidth).unzip();
+            [
+                skewness,
+                kurtosis,
+                spectral_shape_slope(&power_col, &shape_bands),
+                spectral_shape_decrease(&mag_col),
+            ]
+        } else {
+            [None; 4]
+        };
+
         // Sparse mel projection
         let mel_col: Vec<Float> = sparse_mel
             .iter()
@@ -2137,6 +2281,7 @@ fn analyze_signal_inner(
             contrast_bands: contrast_bands_out,
             hpcp_col,
             dissonance: frame_diss,
+            spectral_shape,
             #[cfg(feature = "aggression")]
             aggression_crest_db,
             #[cfg(feature = "aggression")]
@@ -2174,6 +2319,12 @@ fn analyze_signal_inner(
                         hpcp_raw[(c, t)] = fr.hpcp_col[c];
                     }
                     d_acc += fr.dissonance;
+                }
+                for (i, v) in fr.spectral_shape.into_iter().enumerate() {
+                    if let Some(v) = v {
+                        shape_sum[i] += v;
+                        shape_count[i] += 1;
+                    }
                 }
                 #[cfg(feature = "aggression")]
                 if wants_aggression {
@@ -2466,6 +2617,18 @@ fn analyze_signal_inner(
     } else {
         None
     };
+
+    // Spectral shape (group 3.1): mean over the frames where each is defined.
+    // Order: skewness, excess kurtosis, slope, decrease.
+    let shape_means: [Option<Float>; 4] = std::array::from_fn(|i| {
+        wants_spectral_shape.then(|| {
+            if shape_count[i] > 0 {
+                (shape_sum[i] / shape_count[i] as f64) as Float
+            } else {
+                0.0
+            }
+        })
+    });
 
     // ================================================================
     // FRAME STATISTICS (MIR_FEATURES group 1.2): std / delta / quantiles
@@ -3097,6 +3260,10 @@ fn analyze_signal_inner(
         mfcc_delta_mean,
         chroma_std,
         chroma_delta_mean,
+        spectral_skewness_mean: shape_means[0],
+        spectral_kurtosis_excess_mean: shape_means[1],
+        spectral_slope_db_per_octave_mean: shape_means[2],
+        spectral_decrease_mean: shape_means[3],
         tempo_curve,
         tempo_variability,
         time_signature,
@@ -3291,6 +3458,12 @@ fn suppress_unrequested_spectral_summaries(result: &mut TrackAnalysis, config: &
         result.chroma_mean = None;
         result.chroma_std = None;
         result.chroma_delta_mean = None;
+    }
+    if !config.emits("spectral_shape") {
+        result.spectral_skewness_mean = None;
+        result.spectral_kurtosis_excess_mean = None;
+        result.spectral_slope_db_per_octave_mean = None;
+        result.spectral_decrease_mean = None;
     }
 }
 
@@ -4017,6 +4190,12 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.chroma_std = fresh.chroma_std.clone();
             out.chroma_delta_mean = fresh.chroma_delta_mean.clone();
         }
+        "spectral_shape" => {
+            out.spectral_skewness_mean = fresh.spectral_skewness_mean;
+            out.spectral_kurtosis_excess_mean = fresh.spectral_kurtosis_excess_mean;
+            out.spectral_slope_db_per_octave_mean = fresh.spectral_slope_db_per_octave_mean;
+            out.spectral_decrease_mean = fresh.spectral_decrease_mean;
+        }
         "chords" => {
             out.chord_sequence = fresh.chord_sequence.clone();
             out.chord_events = fresh.chord_events.clone();
@@ -4479,6 +4658,7 @@ mod tests {
             "contrast",
             "mfcc",
             "chroma",
+            "spectral_shape",
             "chords",
             "dissonance",
             "energy",
@@ -6813,5 +6993,102 @@ mod tests {
             out.spectral_bandwidth_delta_mean,
             fresh.spectral_bandwidth_delta_mean
         );
+    }
+
+    // ---- Spectral shape (MIR_FEATURES group 3.1) ----
+
+    #[test]
+    fn test_spectral_shape_moments_two_symmetric_lines() {
+        // Equal lines at 100 and 300 Hz: c = 200, bw = 100.
+        let freqs: Vec<Float> = (0..5).map(|k| k as Float * 100.0).collect();
+        let mag = [0.0, 1.0, 0.0, 1.0, 0.0];
+        let (skew, kurt) = spectral_shape_moments(&mag, &freqs, 200.0, 2.0, 100.0).unwrap();
+        assert!(skew.abs() < 1e-12, "skew {skew}");
+        assert!((kurt + 2.0).abs() < 1e-12, "kurt {kurt}");
+        assert!(spectral_shape_moments(&mag, &freqs, 200.0, 0.0, 100.0).is_none());
+        assert!(spectral_shape_moments(&mag, &freqs, 200.0, 2.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn test_spectral_shape_slope_white_and_pink() {
+        let (sr, n_fft) = (22050, 2048);
+        let n_bins = n_fft / 2 + 1;
+        let bands = spectral_shape_octave_bands(sr, n_fft, n_bins);
+        assert_eq!(bands.len(), 8);
+        // Lowest band 44.2..88.4 Hz → bins 5..=8; top band clipped below Nyquist.
+        assert_eq!((bands[0].1, bands[0].2), (5, 9));
+        assert_eq!(bands[7].2, n_bins - 1);
+        let white = vec![1.0; n_bins];
+        let s = spectral_shape_slope(&white, &bands).unwrap();
+        assert!(s.abs() < 1e-9, "white {s}");
+        let pink: Vec<Float> = (0..n_bins)
+            .map(|k| if k == 0 { 0.0 } else { 1.0 / k as Float })
+            .collect();
+        let s = spectral_shape_slope(&pink, &bands).unwrap();
+        assert!((s + 3.0103).abs() < 0.05, "pink {s}");
+        assert!(spectral_shape_slope(&vec![0.0; n_bins], &bands).is_none());
+        assert!(spectral_shape_slope(&white, &bands[..1]).is_none());
+        // A low rate drops the bands above Nyquist instead of leaving them empty.
+        assert_eq!(spectral_shape_octave_bands(8000, 2048, 1025).len(), 7);
+    }
+
+    #[test]
+    fn test_spectral_shape_decrease_hand_example() {
+        // ((2-1)/1 + (3-1)/2) / (2 + 3) = 0.4
+        let d = spectral_shape_decrease(&[1.0, 2.0, 3.0]).unwrap();
+        assert!((d - 0.4).abs() < 1e-12, "{d}");
+        assert!(spectral_shape_decrease(&[0.0; 8]).is_none());
+    }
+
+    #[test]
+    fn test_spectral_shape_silent_frame_and_signal() {
+        let n_bins = 1025;
+        let zeros = vec![0.0; n_bins];
+        let freqs: Vec<Float> = (0..n_bins).map(|k| k as Float * 22050.0 / 2048.0).collect();
+        let bands = spectral_shape_octave_bands(22050, 2048, n_bins);
+        assert!(spectral_shape_moments(&zeros, &freqs, 0.0, 0.0, 0.0).is_none());
+        assert!(spectral_shape_slope(&zeros, &bands).is_none());
+        assert!(spectral_shape_decrease(&zeros).is_none());
+
+        let y = Array1::<Float>::zeros(22050 * 2);
+        let r = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        assert_eq!(r.spectral_skewness_mean, Some(0.0));
+        assert_eq!(r.spectral_kurtosis_excess_mean, Some(0.0));
+        assert_eq!(r.spectral_slope_db_per_octave_mean, Some(0.0));
+        assert_eq!(r.spectral_decrease_mean, Some(0.0));
+    }
+
+    fn spectral_shape_fields(r: &TrackAnalysis) -> [Option<Float>; 4] {
+        [
+            r.spectral_skewness_mean,
+            r.spectral_kurtosis_excess_mean,
+            r.spectral_slope_db_per_octave_mean,
+            r.spectral_decrease_mean,
+        ]
+    }
+
+    #[test]
+    fn test_spectral_shape_presence_follows_requests() {
+        let y = sine(440.0, 22050, 2.0);
+        let c = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        assert_eq!(spectral_shape_fields(&c), [None; 4]);
+        let p = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        for v in spectral_shape_fields(&p) {
+            assert!(v.is_some_and(Float::is_finite), "{v:?}");
+        }
+        let m = analyze_signal(y.view(), 22050, &feature_config(&["mfcc"])).unwrap();
+        assert_eq!(spectral_shape_fields(&m), [None; 4]);
+        let s = analyze_signal(y.view(), 22050, &feature_config(&["spectral_shape"])).unwrap();
+        assert_eq!(spectral_shape_fields(&s), spectral_shape_fields(&p));
+    }
+
+    #[test]
+    fn test_spectral_shape_augment_merge_moves_fields() {
+        let y = sine(440.0, 22050, 2.0);
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        merge_feature_fields(&mut out, &fresh, "spectral_shape");
+        assert_eq!(spectral_shape_fields(&out), spectral_shape_fields(&fresh));
+        assert!(out.spectral_decrease_mean.is_some());
     }
 }

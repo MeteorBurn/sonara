@@ -184,6 +184,16 @@ as its `_mean`: `rms_{std,delta_mean,iqr,p10,p90}`, `zero_crossing_rate_std`,
 with it. They need the audio (class `C`/`A`), are not embedding evidence, and
 leave `embedding` and every model input unchanged.
 
+Spectral shape (2026-11-17, MeteorBurn fork, no schema bump: additive keys,
+existing values unchanged). The `spectral_shape` group (playlist/full, or
+`features=["spectral_shape"]`) adds `spectral_skewness_mean`,
+`spectral_kurtosis_excess_mean`, `spectral_slope_db_per_octave_mean` (dB/octave)
+and `spectral_decrease_mean`. Unlike the other `_mean` fields, each averages only
+the frames where it is defined (silent frames skipped; 0.0 when none is). The four
+keys travel with `spectral_shape`: present exactly when it is, refilled by
+`augment_analysis` with it. They need the audio (class `C`) and are not embedding
+evidence.
+
 `mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
 schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`
 term even when `dissonance` was not requested, and emits it only when it was.

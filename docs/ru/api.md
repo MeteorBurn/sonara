@@ -178,6 +178,7 @@ result = sonara.analyze_file("track.mp3", features=features)
 | `contrast` | `spectral_contrast_mean`, `spectral_contrast_std` | Playlist | C |
 | `mfcc` | `mfcc_mean`, `mfcc_std`, `mfcc_delta_mean` | Playlist | C |
 | `chroma` | `chroma_mean`, `chroma_std`, `chroma_delta_mean` | Playlist | C |
+| `spectral_shape` | `spectral_skewness_mean`, `spectral_kurtosis_excess_mean`, `spectral_slope_db_per_octave_mean`, `spectral_decrease_mean` | Playlist | C |
 | `chords` | `chord_sequence`, `chord_events`, `predominant_chord`, `chord_change_rate` | Playlist | C |
 | `dissonance` | `dissonance` | Playlist | C |
 | `energy` | `energy` | Playlist | S |
@@ -252,6 +253,8 @@ onset envelope, алгоритм темпа и DP-трекер находят у
 | `loudness_range_lu` | LU |
 | `mfcc_mean`, `chroma_mean`, `spectral_contrast_mean` | Списки длиной 13, 12 и 7 в общем анализаторе |
 | `*_std`, `*_delta_mean`, `*_p10`, `*_p90`, `*_iqr` | Статистика по тем же кадрам, что и `_mean` (все кадры основного прохода, тишина включена), в единицах базового признака. `_std` — стандартное отклонение генеральной совокупности; `_delta_mean` — среднее модуля разности соседних кадров (за один шаг); квантили с линейной интерполяцией, `_iqr` = p75 − p25. Векторы — по коэффициентам и полосам `_mean`. `zero_crossing_rate_std` считается по кадрам 2048 отсчётов, тогда как сам `zero_crossing_rate` — по всему сигналу |
+| `spectral_skewness_mean`, `spectral_kurtosis_excess_mean`, `spectral_decrease_mean` | Безразмерные. Среднее только по кадрам, где величина определена: тихие кадры пропускаются, без таких кадров — 0.0. Асимметрия и эксцесс (минус 3) — моменты спектра модуля вокруг центроида, нормированные на bandwidth. Decrease (Peeters) отсчитывается от DC-бина, который для музыки ≈ 0, поэтому на деле измеряет взвешенный 1/k перевес низких частот. Не больше 1, обычно положителен; отрицателен, когда DC-бин силён (постоянное смещение сигнала или утечка самого низкого баса через окно) |
+| `spectral_slope_db_per_octave_mean` | dB на октаву: наклон МНК уровней мощности 8 октавных полос (центры 62,5…8000 Гц) по log2 центра; розовый шум ≈ −3, белый ≈ 0, музыка с басом обычно от −3 до −7. Учитываются все полосы, поэтому почти пустые нижние октавы (тональный звук с основным тоном выше ~90 Гц, без баса) дают уровень шума и утечки окна и сдвигают наклон вверх, вплоть до положительных значений. Тихие кадры пропускаются |
 | `embedding` | 48 чисел; обязательно хранить `embedding_version` |
 | `onset_strength_bands` | Список полос, внутри каждой список кадров |
 | `fingerprint` | Python: base64-строка; Rust: `Vec<u32>` |

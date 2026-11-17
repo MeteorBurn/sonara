@@ -96,6 +96,21 @@ def _frame_stats_keys():
 
 test("frame statistics ship with their base features", _frame_stats_keys)
 
+SPECTRAL_SHAPE = {
+    "spectral_skewness_mean", "spectral_kurtosis_excess_mean",
+    "spectral_slope_db_per_octave_mean", "spectral_decrease_mean",
+}
+
+
+def _spectral_shape_keys():
+    assert SPECTRAL_SHAPE <= set(REC_PLAYLIST), sorted(SPECTRAL_SHAPE - set(REC_PLAYLIST))
+    assert not SPECTRAL_SHAPE & set(REC_COMPACT), sorted(SPECTRAL_SHAPE & set(REC_COMPACT))
+    only = sonara.analyze_signal(_y, sr=SR, features=["spectral_shape"])
+    assert {k: only[k] for k in SPECTRAL_SHAPE} == {k: REC_PLAYLIST[k] for k in SPECTRAL_SHAPE}
+
+
+test("spectral_shape ships in playlist mode and on request", _spectral_shape_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(
