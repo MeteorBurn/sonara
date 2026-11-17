@@ -211,6 +211,76 @@ fn spectral_shape_decrease(mag: &[Float]) -> Option<f64> {
     (den > 0.0).then(|| num / den)
 }
 
+// ---- Spectral texture (MIR_FEATURES group 3.2), per-frame math in f64 ----
+
+/// Frames computed (in parallel) and scattered per batch in the fused pass;
+/// bounds the per-frame results, incl. `spectral_texture`'s normalized
+/// spectra, held at once.
+const FRAME_CHUNK: usize = 512;
+
+/// One frame of `spectral_texture` from its magnitudes and their sum
+/// `sum` = Σ|X_k| (the fused pass's `cent_den`): the normalized spectrum
+/// p_k = |X_k| / sum kept for the next frame's flux, the crest
+/// max|X_k| / mean|X_k| and the entropy −Σ_{p_k>0} p_k ln p_k / ln(n_bins),
+/// all in one pass. `None` for a silent frame (sum = 0).
+struct TextureFrame {
+    p: Vec<Float>,
+    crest: f64,
+    entropy: f64,
+}
+
+fn spectral_texture_frame(mag: &[Float], sum: Float) -> Option<TextureFrame> {
+    if !(sum > 0.0) {
+        return None;
+    }
+    let inv = 1.0 / sum;
+    let (mut max, mut h) = (0.0_f32, 0.0_f64);
+    let p: Vec<Float> = mag
+        .iter()
+        .map(|&m| {
+            max = max.max(m);
+            let v = m * inv;
+            if v > 0.0 {
+                h -= (v * v.ln()) as f64;
+            }
+            v
+        })
+        .collect();
+    let n = mag.len() as f64;
+    Some(TextureFrame {
+        p,
+        crest: max as f64 * n / sum as f64,
+        entropy: h / n.ln(),
+    })
+}
+
+/// Half-wave rectified L2 distance of two normalized spectra:
+/// sqrt(Σ max(0, cur_k − prev_k)²).
+fn spectral_texture_flux(prev: &[Float], cur: &[Float]) -> f64 {
+    prev.iter()
+        .zip(cur)
+        .map(|(&a, &b)| ((b - a).max(0.0) as f64).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Jensen irregularity Σ(a_{i+1} − a_i)² / Σa_i² over peaks sorted by
+/// frequency. `None` with fewer than 2 peaks or zero energy.
+fn spectral_texture_irregularity(freqs: &[Float], mags: &[Float]) -> Option<f64> {
+    let mut peaks: Vec<(Float, f64)> = freqs
+        .iter()
+        .zip(mags)
+        .map(|(&f, &a)| (f, a as f64))
+        .collect();
+    peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let energy: f64 = peaks.iter().map(|p| p.1 * p.1).sum();
+    if peaks.len() < 2 || !(energy > 0.0) {
+        return None;
+    }
+    let diff: f64 = peaks.windows(2).map(|w| (w[1].1 - w[0].1).powi(2)).sum();
+    Some(diff / energy)
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -407,6 +477,7 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("mfcc", true, false, false, C, &[]),
     feature("chroma", true, false, false, C, &[]),
     feature("spectral_shape", true, false, false, C, &[]),
+    feature("spectral_texture", true, false, false, C, &[]),
     feature("chords", true, false, false, C, &[]),
     feature("dissonance", true, false, false, C, &[]),
     feature(
@@ -1216,6 +1287,32 @@ pub struct TrackAnalysis {
     pub spectral_decrease_mean: Option<Float>,
     // --- end spectral shape ---
 
+    // --- spectral texture ---
+    // Per-frame spectral-texture descriptors (MIR_FEATURES group 3.2),
+    // computed with `spectral_texture` (playlist/full, or
+    // `features=["spectral_texture"]`) on the main pass's magnitudes |X_k|
+    // (every bin, DC and Nyquist included). Each averages only the frames
+    // where it is defined (silent frames skipped; 0.0 when none is).
+    /// Mean of the per-frame spectral flux: the half-wave rectified L2
+    /// distance sqrt(Σ max(0, p_t[k] − p_{t−1}[k])²) between consecutive
+    /// L1-normalized magnitude spectra p = |X| / Σ|X| (Essentia
+    /// Flux(halfRectify, L2) on a sum-normalized spectrum). Range 0..1,
+    /// loudness-invariant; defined for frame pairs where neither is silent.
+    pub spectral_flux_mean: Option<Float>,
+    /// Population standard deviation (ddof 0) over the same flux values.
+    pub spectral_flux_std: Option<Float>,
+    /// Spectral crest on magnitude: max|X_k| / mean|X_k|, ≥ 1.
+    pub spectral_crest_mean: Option<Float>,
+    /// Spectral entropy of p = |X| / Σ|X|: −Σ p_k ln p_k / ln(n_bins), 0..1
+    /// (MIRtoolbox mirentropy normalization).
+    pub spectral_entropy_mean: Option<Float>,
+    /// Jensen irregularity Σ(a_{i+1} − a_i)² / Σa_i² over the fused pass's
+    /// spectral peaks (local maxima in 40–5000 Hz, parabolic interpolation,
+    /// top 50 by magnitude) sorted by frequency; depends on that peak
+    /// picking. Defined for frames with ≥ 2 peaks.
+    pub spectral_irregularity_mean: Option<Float>,
+    // --- end spectral texture ---
+
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
     /// the span between `beats[i]` and `beats[i+1]`
@@ -1425,6 +1522,10 @@ struct FrameResult {
     dissonance: Float,
     /// Skewness, excess kurtosis, slope, decrease; `None` where undefined.
     spectral_shape: [Option<f64>; 4],
+    /// Crest, entropy, irregularity; `None` where undefined.
+    spectral_texture: [Option<f64>; 3],
+    /// Normalized spectrum for the flux; `None` when silent or unwanted.
+    texture_norm: Option<Vec<Float>>,
     #[cfg(feature = "aggression")]
     aggression_crest_db: Float,
     #[cfg(feature = "aggression")]
@@ -1547,7 +1648,7 @@ pub fn analyze_signal(
 
     let zero_crossing_rate = validated_zero_crossing_rate(y)?;
     let extended = config.needs_extended();
-    analyze_signal_inner(y, sr, extended, zero_crossing_rate, config)
+    analyze_signal_inner(y, sr, extended, zero_crossing_rate, config, FRAME_CHUNK)
 }
 
 #[cfg(feature = "aggression")]
@@ -1603,6 +1704,7 @@ fn analyze_signal_with_precomputed_aggression(
         native_config.needs_extended(),
         native_zcr,
         &native_config,
+        FRAME_CHUNK,
     )?;
 
     let aggression = analyze_canonical_aggression(canonical)?;
@@ -1682,6 +1784,7 @@ fn analyze_signal_inner(
     extended: bool,
     zero_crossing_rate: Float,
     config: &AnalysisConfig,
+    frame_chunk: usize,
 ) -> Result<TrackAnalysis> {
     #[cfg(feature = "aggression")]
     let wants_aggression = config.needs_aggression();
@@ -1923,8 +2026,6 @@ fn analyze_signal_inner(
         Array2::zeros((0, 0))
     };
     // Fused contrast + dissonance accumulators
-    let contrast_acc;
-    let dissonance_acc;
     #[cfg(feature = "aggression")]
     let mut aggression_crest_db = wants_aggression.then(|| vec![0.0; n_frames]);
     #[cfg(feature = "aggression")]
@@ -1946,6 +2047,14 @@ fn analyze_signal_inner(
     };
     let mut shape_sum = [0.0_f64; 4];
     let mut shape_count = [0_usize; 4];
+
+    let wants_spectral_texture = extended && config.wants("spectral_texture");
+    // Flux, crest, entropy, irregularity: sum and count of defined frames.
+    let mut texture_sum = [0.0_f64; 4];
+    let mut texture_count = [0_usize; 4];
+    let mut flux_sq_sum = 0.0_f64;
+    // Previous frame's normalized spectrum, carried across chunks.
+    let mut texture_prev: Option<Vec<Float>> = None;
 
     let freqs_raw = freqs.as_slice().unwrap();
     let roll_percent: Float = 0.85;
@@ -2131,6 +2240,17 @@ fn analyze_signal_inner(
             [None; 4]
         };
 
+        let mut spectral_texture = [None; 3];
+        let texture_norm = if wants_spectral_texture {
+            spectral_texture_frame(&mag_col, cent_den).map(|f| {
+                spectral_texture[0] = Some(f.crest);
+                spectral_texture[1] = Some(f.entropy);
+                f.p
+            })
+        } else {
+            None
+        };
+
         // Sparse mel projection
         let mel_col: Vec<Float> = sparse_mel
             .iter()
@@ -2229,6 +2349,10 @@ fn analyze_signal_inner(
             let peaks_freq: Vec<Float> = indices.iter().map(|&i| all_peaks_freq[i]).collect();
             let peaks_mag: Vec<Float> = indices.iter().map(|&i| all_peaks_mag[i]).collect();
 
+            if wants_spectral_texture {
+                spectral_texture[2] = spectral_texture_irregularity(&peaks_freq, &peaks_mag);
+            }
+
             // HPCP from peaks
             for p in 0..n_peaks {
                 let pmag_sq = peaks_mag[p] * peaks_mag[p];
@@ -2282,6 +2406,8 @@ fn analyze_signal_inner(
             hpcp_col,
             dissonance: frame_diss,
             spectral_shape,
+            spectral_texture,
+            texture_norm,
             #[cfg(feature = "aggression")]
             aggression_crest_db,
             #[cfg(feature = "aggression")]
@@ -2295,67 +2421,112 @@ fn analyze_signal_inner(
         }
     };
 
-    // Scatter frame results into arrays
-    let mut scatter_results =
-        |frame_results: Vec<FrameResult>| -> ([Float; N_CONTRAST_BANDS + 1], Float) {
-            let mut c_acc = [0.0_f32; N_CONTRAST_BANDS + 1];
-            let mut d_acc = 0.0_f32;
+    // Scatter frame results into arrays, in frame order. Accumulators run
+    // across chunks so every sum adds in the same order as one pass.
+    let mut contrast_acc = [0.0_f32; N_CONTRAST_BANDS + 1];
+    let mut dissonance_acc = 0.0_f32;
+    let mut scatter_results = |base: usize,
+                               frame_results: Vec<FrameResult>,
+                               fluxes: Vec<Option<f64>>| {
+        let c_acc = &mut contrast_acc;
+        let d_acc = &mut dissonance_acc;
 
-            for (t, fr) in frame_results.into_iter().enumerate() {
-                centroids[t] = fr.centroid;
-                rms_frames[t] = fr.rms;
-                if extended {
-                    bandwidths[t] = fr.bandwidth;
-                    rolloffs[t] = fr.rolloff;
-                    flatnesses[t] = fr.flatness;
-                    for c in 0..12 {
-                        chroma_raw[(c, t)] = fr.chroma_col[c];
-                    }
-                    for b in 0..N_CONTRAST_BANDS + 1 {
-                        c_acc[b] += fr.contrast_bands[b];
-                        contrast_frames[(b, t)] = fr.contrast_bands[b];
-                    }
-                    for c in 0..12 {
-                        hpcp_raw[(c, t)] = fr.hpcp_col[c];
-                    }
-                    d_acc += fr.dissonance;
+        for (i, fr) in frame_results.into_iter().enumerate() {
+            let t = base + i;
+            centroids[t] = fr.centroid;
+            rms_frames[t] = fr.rms;
+            if extended {
+                bandwidths[t] = fr.bandwidth;
+                rolloffs[t] = fr.rolloff;
+                flatnesses[t] = fr.flatness;
+                for c in 0..12 {
+                    chroma_raw[(c, t)] = fr.chroma_col[c];
                 }
-                for (i, v) in fr.spectral_shape.into_iter().enumerate() {
-                    if let Some(v) = v {
-                        shape_sum[i] += v;
-                        shape_count[i] += 1;
-                    }
+                for b in 0..N_CONTRAST_BANDS + 1 {
+                    c_acc[b] += fr.contrast_bands[b];
+                    contrast_frames[(b, t)] = fr.contrast_bands[b];
                 }
-                #[cfg(feature = "aggression")]
-                if wants_aggression {
-                    aggression_crest_db.as_mut().unwrap()[t] = fr.aggression_crest_db;
-                    aggression_dissonance.as_mut().unwrap()[t] = fr.dissonance;
-                    aggression_high_energy_ratio.as_mut().unwrap()[t] =
-                        fr.aggression_high_energy_ratio;
-                    aggression_high_flatness.as_mut().unwrap()[t] = fr.aggression_high_flatness;
-                    aggression_high_total.as_mut().unwrap()[t] = fr.aggression_high_total;
-                    aggression_peak_ratio.as_mut().unwrap()[t] = fr.aggression_peak_ratio;
+                for c in 0..12 {
+                    hpcp_raw[(c, t)] = fr.hpcp_col[c];
                 }
-                for (m, val) in fr.mel_col.into_iter().enumerate() {
-                    mel_spec[(m, t)] = val;
+                *d_acc += fr.dissonance;
+            }
+            for (i, v) in fr.spectral_shape.into_iter().enumerate() {
+                if let Some(v) = v {
+                    shape_sum[i] += v;
+                    shape_count[i] += 1;
                 }
             }
-            (c_acc, d_acc)
-        };
+            if wants_spectral_texture {
+                if let Some(flux) = fluxes[i] {
+                    texture_sum[0] += flux;
+                    flux_sq_sum += flux * flux;
+                    texture_count[0] += 1;
+                }
+                for (i, v) in fr.spectral_texture.into_iter().enumerate() {
+                    if let Some(v) = v {
+                        texture_sum[i + 1] += v;
+                        texture_count[i + 1] += 1;
+                    }
+                }
+            }
+            #[cfg(feature = "aggression")]
+            if wants_aggression {
+                aggression_crest_db.as_mut().unwrap()[t] = fr.aggression_crest_db;
+                aggression_dissonance.as_mut().unwrap()[t] = fr.dissonance;
+                aggression_high_energy_ratio.as_mut().unwrap()[t] = fr.aggression_high_energy_ratio;
+                aggression_high_flatness.as_mut().unwrap()[t] = fr.aggression_high_flatness;
+                aggression_high_total.as_mut().unwrap()[t] = fr.aggression_high_total;
+                aggression_peak_ratio.as_mut().unwrap()[t] = fr.aggression_peak_ratio;
+            }
+            for (m, val) in fr.mel_col.into_iter().enumerate() {
+                mel_spec[(m, t)] = val;
+            }
+        }
+    };
 
-    if n_frames >= PARALLEL_THRESHOLD {
-        let frame_results: Vec<FrameResult> = (0..n_frames)
-            .into_par_iter()
-            .map(|t| compute_frame(t))
-            .collect();
-        let (ca, da) = scatter_results(frame_results);
-        contrast_acc = ca;
-        dissonance_acc = da;
-    } else {
-        let frame_results: Vec<FrameResult> = (0..n_frames).map(|t| compute_frame(t)).collect();
-        let (ca, da) = scatter_results(frame_results);
-        contrast_acc = ca;
-        dissonance_acc = da;
+    // Bounded chunks keep at most `frame_chunk` frame results (and their
+    // normalized spectra) alive at once.
+    let frame_chunk = frame_chunk.max(1);
+    let mut base = 0;
+    while base < n_frames {
+        let end = base.saturating_add(frame_chunk).min(n_frames);
+        let frame_results: Vec<FrameResult> = if n_frames >= PARALLEL_THRESHOLD {
+            (base..end)
+                .into_par_iter()
+                .map(|t| compute_frame(t))
+                .collect()
+        } else {
+            (base..end).map(|t| compute_frame(t)).collect()
+        };
+        // Flux pairs each frame with its predecessor (the previous chunk's last
+        // frame for the first one); computed in parallel, summed in frame order.
+        let fluxes: Vec<Option<f64>> = if wants_spectral_texture {
+            let flux_at = |i: usize| {
+                let prev = match i {
+                    0 => texture_prev.as_deref(),
+                    _ => frame_results[i - 1].texture_norm.as_deref(),
+                };
+                Some(spectral_texture_flux(
+                    prev?,
+                    frame_results[i].texture_norm.as_deref()?,
+                ))
+            };
+            let fluxes = if n_frames >= PARALLEL_THRESHOLD {
+                (0..frame_results.len())
+                    .into_par_iter()
+                    .map(flux_at)
+                    .collect()
+            } else {
+                (0..frame_results.len()).map(flux_at).collect()
+            };
+            texture_prev = frame_results.last().and_then(|f| f.texture_norm.clone());
+            fluxes
+        } else {
+            Vec::new()
+        };
+        scatter_results(base, frame_results, fluxes);
+        base = end;
     }
 
     // ================================================================
@@ -2628,6 +2799,27 @@ fn analyze_signal_inner(
                 0.0
             }
         })
+    });
+
+    // Spectral texture (group 3.2): flux mean, crest, entropy, irregularity
+    // means over defined frames, plus the population std of the flux.
+    let texture_means: [Option<Float>; 4] = std::array::from_fn(|i| {
+        wants_spectral_texture.then(|| {
+            if texture_count[i] > 0 {
+                (texture_sum[i] / texture_count[i] as f64) as Float
+            } else {
+                0.0
+            }
+        })
+    });
+    let spectral_flux_std = wants_spectral_texture.then(|| {
+        let n = texture_count[0] as f64;
+        if n > 0.0 {
+            let mean = texture_sum[0] / n;
+            (flux_sq_sum / n - mean * mean).max(0.0).sqrt() as Float
+        } else {
+            0.0
+        }
     });
 
     // ================================================================
@@ -3264,6 +3456,11 @@ fn analyze_signal_inner(
         spectral_kurtosis_excess_mean: shape_means[1],
         spectral_slope_db_per_octave_mean: shape_means[2],
         spectral_decrease_mean: shape_means[3],
+        spectral_flux_mean: texture_means[0],
+        spectral_flux_std,
+        spectral_crest_mean: texture_means[1],
+        spectral_entropy_mean: texture_means[2],
+        spectral_irregularity_mean: texture_means[3],
         tempo_curve,
         tempo_variability,
         time_signature,
@@ -3464,6 +3661,13 @@ fn suppress_unrequested_spectral_summaries(result: &mut TrackAnalysis, config: &
         result.spectral_kurtosis_excess_mean = None;
         result.spectral_slope_db_per_octave_mean = None;
         result.spectral_decrease_mean = None;
+    }
+    if !config.emits("spectral_texture") {
+        result.spectral_flux_mean = None;
+        result.spectral_flux_std = None;
+        result.spectral_crest_mean = None;
+        result.spectral_entropy_mean = None;
+        result.spectral_irregularity_mean = None;
     }
 }
 
@@ -4196,6 +4400,13 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.spectral_slope_db_per_octave_mean = fresh.spectral_slope_db_per_octave_mean;
             out.spectral_decrease_mean = fresh.spectral_decrease_mean;
         }
+        "spectral_texture" => {
+            out.spectral_flux_mean = fresh.spectral_flux_mean;
+            out.spectral_flux_std = fresh.spectral_flux_std;
+            out.spectral_crest_mean = fresh.spectral_crest_mean;
+            out.spectral_entropy_mean = fresh.spectral_entropy_mean;
+            out.spectral_irregularity_mean = fresh.spectral_irregularity_mean;
+        }
         "chords" => {
             out.chord_sequence = fresh.chord_sequence.clone();
             out.chord_events = fresh.chord_events.clone();
@@ -4659,6 +4870,7 @@ mod tests {
             "mfcc",
             "chroma",
             "spectral_shape",
+            "spectral_texture",
             "chords",
             "dissonance",
             "energy",
@@ -7090,5 +7302,139 @@ mod tests {
         merge_feature_fields(&mut out, &fresh, "spectral_shape");
         assert_eq!(spectral_shape_fields(&out), spectral_shape_fields(&fresh));
         assert!(out.spectral_decrease_mean.is_some());
+    }
+
+    // ---- Spectral texture (MIR_FEATURES group 3.2) ----
+
+    fn spectral_texture_flux_of(prev: &[Float], cur: &[Float]) -> Option<f64> {
+        let frame = |m: &[Float]| spectral_texture_frame(m, m.iter().sum());
+        Some(spectral_texture_flux(&frame(prev)?.p, &frame(cur)?.p))
+    }
+
+    #[test]
+    fn test_spectral_texture_flux() {
+        let a = [0.0, 3.0, 1.0, 0.5];
+        assert_eq!(spectral_texture_flux_of(&a, &a), Some(0.0));
+        // All energy moves from bin 1 to bin 2: p_t[2] = 1, p_{t-1}[2] = 0.
+        let f = spectral_texture_flux_of(&[0.0, 2.0, 0.0], &[0.0, 0.0, 5.0]).unwrap();
+        assert!((f - 1.0).abs() < 1e-12, "{f}");
+        // Loudness-invariant.
+        let b = [1.0, 0.2, 4.0, 0.5];
+        let b10: Vec<Float> = b.iter().map(|v| v * 10.0).collect();
+        let (f1, f2) = (
+            spectral_texture_flux_of(&a, &b).unwrap(),
+            spectral_texture_flux_of(&a, &b10).unwrap(),
+        );
+        assert!((f1 - f2).abs() < 1e-7 && f1 > 0.0, "{f1} {f2}");
+        assert_eq!(spectral_texture_flux_of(&[0.0; 4], &b), None);
+        assert_eq!(spectral_texture_flux_of(&b, &[0.0; 4]), None);
+    }
+
+    #[test]
+    fn test_spectral_texture_crest() {
+        let crest = |m: &[Float]| spectral_texture_frame(m, m.iter().sum()).map(|f| f.crest);
+        assert!((crest(&[2.0; 8]).unwrap() - 1.0).abs() < 1e-6);
+        let mut one = [0.0; 16];
+        one[5] = 3.0;
+        assert!((crest(&one).unwrap() - 16.0).abs() < 1e-6);
+        assert_eq!(crest(&[0.0; 8]), None);
+    }
+
+    #[test]
+    fn test_spectral_texture_entropy() {
+        let entropy = |m: &[Float]| spectral_texture_frame(m, m.iter().sum()).map(|f| f.entropy);
+        assert!((entropy(&[0.7; 1025]).unwrap() - 1.0).abs() < 1e-5);
+        let mut one = [0.0; 1025];
+        one[9] = 2.0;
+        assert_eq!(entropy(&one), Some(0.0));
+        assert!(entropy(&[0.0; 1025]).is_none());
+    }
+
+    #[test]
+    fn test_spectral_texture_irregularity() {
+        let f = [100.0, 200.0, 300.0, 400.0];
+        assert_eq!(spectral_texture_irregularity(&f, &[2.0; 4]), Some(0.0));
+        // [1, 0, 1, 0]: 3 squared steps of 1 over energy 2.
+        let r = spectral_texture_irregularity(&f, &[1.0, 0.0, 1.0, 0.0]).unwrap();
+        assert!((r - 1.5).abs() < 1e-12, "{r}");
+        // Unsorted input (magnitude order) is sorted by frequency first:
+        // by frequency the amplitudes are [1, 2, 3] → (1 + 1) / 14.
+        let r = spectral_texture_irregularity(&[300.0, 200.0, 100.0], &[3.0, 2.0, 1.0]).unwrap();
+        assert!((r - 2.0 / 14.0).abs() < 1e-12, "{r}");
+        assert_eq!(spectral_texture_irregularity(&[100.0], &[1.0]), None);
+        assert_eq!(spectral_texture_irregularity(&[], &[]), None);
+        assert_eq!(spectral_texture_irregularity(&f, &[0.0; 4]), None);
+    }
+
+    fn spectral_texture_fields(r: &TrackAnalysis) -> [Option<Float>; 5] {
+        [
+            r.spectral_flux_mean,
+            r.spectral_flux_std,
+            r.spectral_crest_mean,
+            r.spectral_entropy_mean,
+            r.spectral_irregularity_mean,
+        ]
+    }
+
+    #[test]
+    fn test_spectral_texture_presence_follows_requests() {
+        let y = sine(440.0, 22050, 2.0);
+        let c = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        assert_eq!(spectral_texture_fields(&c), [None; 5]);
+        let p = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        for v in spectral_texture_fields(&p) {
+            assert!(v.is_some_and(Float::is_finite), "{v:?}");
+        }
+        let m = analyze_signal(y.view(), 22050, &feature_config(&["mfcc"])).unwrap();
+        assert_eq!(spectral_texture_fields(&m), [None; 5]);
+        let s = analyze_signal(y.view(), 22050, &feature_config(&["spectral_texture"])).unwrap();
+        assert_eq!(spectral_texture_fields(&s), spectral_texture_fields(&p));
+        // Silence: nothing defined, all 0.0.
+        let z = Array1::<Float>::zeros(22050 * 2);
+        let r = analyze_signal(z.view(), 22050, &playlist()).unwrap();
+        assert_eq!(spectral_texture_fields(&r), [Some(0.0); 5]);
+    }
+
+    #[test]
+    fn test_spectral_texture_chunking_is_bit_identical() {
+        // ~6 s of a gliding, tremolo tone with a silent gap: ~260 frames.
+        let sr = 22050;
+        let y = Array1::from_shape_fn(sr as usize * 6, |i| {
+            let t = i as Float / sr as Float;
+            if (2.0..2.5).contains(&t) {
+                return 0.0;
+            }
+            let f = 220.0 + 150.0 * t;
+            (0.6 + 0.4 * (2.0 * PI * 3.0 * t).sin()) * (2.0 * PI * f * t).sin()
+                + 0.3 * (2.0 * PI * 1250.0 * t).sin() * (t % 0.5)
+        });
+        let zcr = validated_zero_crossing_rate(y.view()).unwrap();
+        let run = |config: &AnalysisConfig, chunk| {
+            analyze_signal_inner(y.view(), sr, config.needs_extended(), zcr, config, chunk).unwrap()
+        };
+        let config = playlist();
+        let whole = run(&config, usize::MAX);
+        assert!(whole.spectral_flux_mean.is_some_and(|f| f > 0.0));
+        // Every output, not just the texture fields, matches across chunkings.
+        assert_eq!(run(&config, 7), whole);
+        assert_eq!(run(&config, FRAME_CHUNK), whole);
+        let only = feature_config(&["spectral_texture"]);
+        assert_eq!(
+            spectral_texture_fields(&run(&only, 1)),
+            spectral_texture_fields(&whole)
+        );
+    }
+
+    #[test]
+    fn test_spectral_texture_augment_merge_moves_fields() {
+        let y = sine(440.0, 22050, 2.0);
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        merge_feature_fields(&mut out, &fresh, "spectral_texture");
+        assert_eq!(
+            spectral_texture_fields(&out),
+            spectral_texture_fields(&fresh)
+        );
+        assert!(out.spectral_crest_mean.is_some());
     }
 }

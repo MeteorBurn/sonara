@@ -179,6 +179,7 @@ result = sonara.analyze_file("track.mp3", features=features)
 | `mfcc` | `mfcc_mean`, `mfcc_std`, `mfcc_delta_mean` | Playlist | C |
 | `chroma` | `chroma_mean`, `chroma_std`, `chroma_delta_mean` | Playlist | C |
 | `spectral_shape` | `spectral_skewness_mean`, `spectral_kurtosis_excess_mean`, `spectral_slope_db_per_octave_mean`, `spectral_decrease_mean` | Playlist | C |
+| `spectral_texture` | `spectral_flux_mean`, `spectral_flux_std`, `spectral_crest_mean`, `spectral_entropy_mean`, `spectral_irregularity_mean` | Playlist | C |
 | `chords` | `chord_sequence`, `chord_events`, `predominant_chord`, `chord_change_rate` | Playlist | C |
 | `dissonance` | `dissonance` | Playlist | C |
 | `energy` | `energy` | Playlist | S |
@@ -255,6 +256,9 @@ onset envelope, алгоритм темпа и DP-трекер находят у
 | `*_std`, `*_delta_mean`, `*_p10`, `*_p90`, `*_iqr` | Статистика по тем же кадрам, что и `_mean` (все кадры основного прохода, тишина включена), в единицах базового признака. `_std` — стандартное отклонение генеральной совокупности; `_delta_mean` — среднее модуля разности соседних кадров (за один шаг); квантили с линейной интерполяцией, `_iqr` = p75 − p25. Векторы — по коэффициентам и полосам `_mean`. `zero_crossing_rate_std` считается по кадрам 2048 отсчётов, тогда как сам `zero_crossing_rate` — по всему сигналу |
 | `spectral_skewness_mean`, `spectral_kurtosis_excess_mean`, `spectral_decrease_mean` | Безразмерные. Среднее только по кадрам, где величина определена: тихие кадры пропускаются, без таких кадров — 0.0. Асимметрия и эксцесс (минус 3) — моменты спектра модуля вокруг центроида, нормированные на bandwidth. Decrease (Peeters) отсчитывается от DC-бина, который для музыки ≈ 0, поэтому на деле измеряет взвешенный 1/k перевес низких частот. Не больше 1, обычно положителен; отрицателен, когда DC-бин силён (постоянное смещение сигнала или утечка самого низкого баса через окно) |
 | `spectral_slope_db_per_octave_mean` | dB на октаву: наклон МНК уровней мощности 8 октавных полос (центры 62,5…8000 Гц) по log2 центра; розовый шум ≈ −3, белый ≈ 0, музыка с басом обычно от −3 до −7. Учитываются все полосы, поэтому почти пустые нижние октавы (тональный звук с основным тоном выше ~90 Гц, без баса) дают уровень шума и утечки окна и сдвигают наклон вверх, вплоть до положительных значений. Тихие кадры пропускаются |
+| `spectral_flux_mean`, `spectral_flux_std` | Безразмерные, 0…1. Поток — L2-норма положительной части разности соседних спектров модуля, нормированных на сумму (Essentia Flux(halfRectify=true, L2) по нормированному спектру), поэтому не зависит от громкости. Пары с тихим кадром пропускаются; `_std` — стандартное отклонение генеральной совокупности по тем же значениям |
+| `spectral_crest_mean`, `spectral_entropy_mean` | Безразмерные. Crest — max/mean модуля спектра, ≥ 1. Энтропия — энтропия Шеннона нормированного модуля, делённая на ln(число бинов), как в MIRtoolbox mirentropy: 0 (один тон) … 1 (плоский спектр). Тихие кадры пропускаются, без определённых кадров — 0.0 |
+| `spectral_irregularity_mean` | Безразмерная. Нерегулярность по Йенсену Σ(a_{i+1} − a_i)² / Σa_i² по спектральным пикам общего прохода (40–5000 Гц, 50 сильнейших, по возрастанию частоты), поэтому зависит от их выбора. Кадры с менее чем двумя пиками пропускаются |
 | `embedding` | 48 чисел; обязательно хранить `embedding_version` |
 | `onset_strength_bands` | Список полос, внутри каждой список кадров |
 | `fingerprint` | Python: base64-строка; Rust: `Vec<u32>` |

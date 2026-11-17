@@ -111,6 +111,21 @@ def _spectral_shape_keys():
 
 test("spectral_shape ships in playlist mode and on request", _spectral_shape_keys)
 
+SPECTRAL_TEXTURE = {
+    "spectral_flux_mean", "spectral_flux_std", "spectral_crest_mean",
+    "spectral_entropy_mean", "spectral_irregularity_mean",
+}
+
+
+def _spectral_texture_keys():
+    assert SPECTRAL_TEXTURE <= set(REC_PLAYLIST), sorted(SPECTRAL_TEXTURE - set(REC_PLAYLIST))
+    assert not SPECTRAL_TEXTURE & set(REC_COMPACT), sorted(SPECTRAL_TEXTURE & set(REC_COMPACT))
+    only = sonara.analyze_signal(_y, sr=SR, features=["spectral_texture"])
+    assert {k: only[k] for k in SPECTRAL_TEXTURE} == {k: REC_PLAYLIST[k] for k in SPECTRAL_TEXTURE}
+
+
+test("spectral_texture ships in playlist mode and on request", _spectral_texture_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(

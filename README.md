@@ -146,6 +146,11 @@ r['spectral_slope_db_per_octave_mean']  # octave-band tilt (pink ≈ -3 dB/oct),
 r['spectral_decrease_mean']             # low-frequency emphasis (<= 1; < 0 on
                                         # a DC offset); means over
                                         # non-silent frames
+r['spectral_flux_mean']        # Spectral texture (fork): frame-to-frame change
+r['spectral_flux_std']         # of the normalized spectrum (0..1) and its std,
+r['spectral_crest_mean']       # peakiness max/mean |X| (>= 1),
+r['spectral_entropy_mean']     # spectral entropy (0 tonal .. 1 flat),
+r['spectral_irregularity_mean']  # Jensen irregularity of the spectral peaks
 
 # Frame statistics (fork): how the per-frame values behind the _mean fields move.
 # Same frames as the means; each key comes with its base feature.

@@ -398,6 +398,24 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                                        negative when the DC bin is strong
 #                                        (DC offset or lowest-bass leakage)
 
+# --- spectral texture --- features=["spectral_texture"] (also playlist/full modes)
+# Per-frame spectral-texture descriptors (MIR_FEATURES group 3.2) on the
+# magnitude spectrum |X_k| (all bins), each over only the frames where it is
+# defined (silent frames are skipped; 0.0 when no frame is). All float:
+#   spectral_flux_mean / _std   — half-wave rectified L2 distance between
+#                                 consecutive L1-normalized magnitude spectra
+#                                 (Essentia Flux(halfRectify, L2) on a
+#                                 sum-normalized spectrum); 0..1,
+#                                 loudness-invariant; pairs with a silent frame
+#                                 skipped; _std is the population std (ddof 0)
+#   spectral_crest_mean         — max|X| / mean|X|, >= 1
+#   spectral_entropy_mean       — -sum p ln p / ln(n_bins), p = |X| / sum|X|;
+#                                 0..1 (MIRtoolbox mirentropy normalization)
+#   spectral_irregularity_mean  — Jensen: sum (a[i+1]-a[i])^2 / sum a[i]^2 over
+#                                 the fused pass's spectral peaks (40..5000 Hz,
+#                                 top 50, sorted by frequency); depends on that
+#                                 peak picking; frames with < 2 peaks skipped
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

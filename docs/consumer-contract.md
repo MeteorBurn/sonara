@@ -194,6 +194,25 @@ keys travel with `spectral_shape`: present exactly when it is, refilled by
 `augment_analysis` with it. They need the audio (class `C`) and are not embedding
 evidence.
 
+Spectral texture (2026-11-18, MeteorBurn fork, no schema bump: additive keys,
+existing values unchanged). The `spectral_texture` group (playlist/full, or
+`features=["spectral_texture"]`) adds `spectral_flux_mean`, `spectral_flux_std`,
+`spectral_crest_mean`, `spectral_entropy_mean` and `spectral_irregularity_mean`,
+all on the main pass's magnitude spectrum. Flux is the half-wave rectified L2
+distance between consecutive L1-normalized magnitude spectra (Essentia
+`Flux(halfRectify=true, norm="L2")` on a sum-normalized spectrum): range 0..1,
+loudness-invariant; `_std` is the population std of the same values. Crest is
+max/mean magnitude (≥ 1). Entropy is the Shannon entropy of the normalized
+magnitudes divided by ln(n_bins), as MIRtoolbox `mirentropy` (0..1).
+Irregularity is Jensen's Σ(a_{i+1} − a_i)² / Σa_i² over the fused pass's
+spectral peaks (40–5000 Hz, top 50 by magnitude, sorted by frequency), so it
+depends on that peak picking. Each value averages only the frames where it is
+defined: silent frames are skipped (for flux, any pair with a silent frame),
+irregularity needs at least two peaks; 0.0 when none is. The five keys travel
+with `spectral_texture`: present exactly when it is, refilled by
+`augment_analysis` with it. They need the audio (class `C`) and are not embedding
+evidence.
+
 `mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
 schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`
 term even when `dissonance` was not requested, and emits it only when it was.

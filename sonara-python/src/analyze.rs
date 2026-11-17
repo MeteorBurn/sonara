@@ -141,6 +141,12 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
             r.spectral_slope_db_per_octave_mean,
         ),
         ("spectral_decrease_mean", r.spectral_decrease_mean),
+        // Spectral texture (MIR_FEATURES group 3.2): travel with `spectral_texture`.
+        ("spectral_flux_mean", r.spectral_flux_mean),
+        ("spectral_flux_std", r.spectral_flux_std),
+        ("spectral_crest_mean", r.spectral_crest_mean),
+        ("spectral_entropy_mean", r.spectral_entropy_mean),
+        ("spectral_irregularity_mean", r.spectral_irregularity_mean),
     ] {
         if let Some(v) = value {
             d.set_item(key, v)?;
@@ -1055,6 +1061,16 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
             "a float"
         ),
         spectral_decrease_mean: opt_field!(cached, "spectral_decrease_mean", f32, "a float"),
+        spectral_flux_mean: opt_field!(cached, "spectral_flux_mean", f32, "a float"),
+        spectral_flux_std: opt_field!(cached, "spectral_flux_std", f32, "a float"),
+        spectral_crest_mean: opt_field!(cached, "spectral_crest_mean", f32, "a float"),
+        spectral_entropy_mean: opt_field!(cached, "spectral_entropy_mean", f32, "a float"),
+        spectral_irregularity_mean: opt_field!(
+            cached,
+            "spectral_irregularity_mean",
+            f32,
+            "a float"
+        ),
         tempo_curve: opt_field!(cached, "tempo_curve", Vec<f32>, "a list of floats"),
         tempo_variability: opt_field!(cached, "tempo_variability", f32, "a float"),
         time_signature: opt_field!(cached, "time_signature", String, "a string"),
