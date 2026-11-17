@@ -140,6 +140,14 @@ r['spectral_flatness_mean']    # Tonal (0) vs noise-like (1)
 r['spectral_contrast_mean']    # Peak-valley ratio per band (7 values)
 r['mfcc_mean']                 # Timbre fingerprint (13 coefficients)
 r['chroma_mean']               # Pitch class distribution (12 values)
+
+# Frame statistics (fork): how the per-frame values behind the _mean fields move.
+# Same frames as the means; each key comes with its base feature.
+r['spectral_centroid_std']     # Spread over time (also rms_std, mfcc_std, ...)
+r['mfcc_delta_mean']           # Mean |frame-to-frame change| (also rms, centroid,
+                               # bandwidth, chroma)
+r['spectral_rolloff_p10']      # Quantiles: rms p10/p90/iqr, centroid iqr,
+                               # rolloff p10/p90, flatness p10/p90/iqr
 ```
 
 ### Full mode

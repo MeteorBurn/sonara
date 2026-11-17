@@ -167,17 +167,17 @@ result = sonara.analyze_file("track.mp3", features=features)
 | `bpm` | `bpm`, `bpm_raw`, `bpm_confidence`, `bpm_candidates` | База | C |
 | `beats` | `beats`; в Python также `n_beats` | База | C |
 | `onsets` | `onset_frames` | База | C |
-| `rms` | `rms_mean`, `rms_max` | База | C |
+| `rms` | `rms_mean`, `rms_max`, `rms_std`, `rms_delta_mean`, `rms_iqr`, `rms_p10`, `rms_p90` | База | C |
 | `dynamic_range` | `dynamic_range_db` | База | C |
-| `centroid` | `spectral_centroid_mean` | База | C |
-| `zcr` | `zero_crossing_rate` | База | A |
+| `centroid` | `spectral_centroid_mean`, `spectral_centroid_std`, `spectral_centroid_delta_mean`, `spectral_centroid_iqr` | База | C |
+| `zcr` | `zero_crossing_rate`, `zero_crossing_rate_std` | База | A |
 | `onset_density` | `onset_density` | База | S |
-| `bandwidth` | `spectral_bandwidth_mean` | Playlist | C |
-| `rolloff` | `spectral_rolloff_mean` | Playlist | C |
-| `flatness` | `spectral_flatness_mean` | Playlist | C |
-| `contrast` | `spectral_contrast_mean` | Playlist | C |
-| `mfcc` | `mfcc_mean` | Playlist | C |
-| `chroma` | `chroma_mean` | Playlist | C |
+| `bandwidth` | `spectral_bandwidth_mean`, `spectral_bandwidth_std`, `spectral_bandwidth_delta_mean` | Playlist | C |
+| `rolloff` | `spectral_rolloff_mean`, `spectral_rolloff_std`, `spectral_rolloff_p10`, `spectral_rolloff_p90` | Playlist | C |
+| `flatness` | `spectral_flatness_mean`, `spectral_flatness_std`, `spectral_flatness_iqr`, `spectral_flatness_p10`, `spectral_flatness_p90` | Playlist | C |
+| `contrast` | `spectral_contrast_mean`, `spectral_contrast_std` | Playlist | C |
+| `mfcc` | `mfcc_mean`, `mfcc_std`, `mfcc_delta_mean` | Playlist | C |
+| `chroma` | `chroma_mean`, `chroma_std`, `chroma_delta_mean` | Playlist | C |
 | `chords` | `chord_sequence`, `chord_events`, `predominant_chord`, `chord_change_rate` | Playlist | C |
 | `dissonance` | `dissonance` | Playlist | C |
 | `energy` | `energy` | Playlist | S |
@@ -251,6 +251,7 @@ onset envelope, алгоритм темпа и DP-трекер находят у
 | `replaygain_db`, `dynamic_range_db` | dB; разные физические величины |
 | `loudness_range_lu` | LU |
 | `mfcc_mean`, `chroma_mean`, `spectral_contrast_mean` | Списки длиной 13, 12 и 7 в общем анализаторе |
+| `*_std`, `*_delta_mean`, `*_p10`, `*_p90`, `*_iqr` | Статистика по тем же кадрам, что и `_mean` (все кадры основного прохода, тишина включена), в единицах базового признака. `_std` — стандартное отклонение генеральной совокупности; `_delta_mean` — среднее модуля разности соседних кадров (за один шаг); квантили с линейной интерполяцией, `_iqr` = p75 − p25. Векторы — по коэффициентам и полосам `_mean`. `zero_crossing_rate_std` считается по кадрам 2048 отсчётов, тогда как сам `zero_crossing_rate` — по всему сигналу |
 | `embedding` | 48 чисел; обязательно хранить `embedding_version` |
 | `onset_strength_bands` | Список полос, внутри каждой список кадров |
 | `fingerprint` | Python: base64-строка; Rust: `Vec<u32>` |

@@ -361,6 +361,25 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   "loudness_momentary_max_db"   — max momentary (400 ms) loudness, dB
 #   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU
 
+# --- frame statistics ---
+# Spread, frame-to-frame change and quantiles of the per-frame values behind the
+# `_mean` fields, over the same frames (all main-pass frames, silence included).
+# Each key is present exactly when its base feature is:
+#   rms      → rms_std, rms_delta_mean, rms_iqr, rms_p10, rms_p90          (float)
+#   zcr      → zero_crossing_rate_std                                      (float)
+#   centroid → spectral_centroid_std, spectral_centroid_delta_mean,
+#              spectral_centroid_iqr                                       (float, Hz)
+#   bandwidth → spectral_bandwidth_std, spectral_bandwidth_delta_mean      (float, Hz)
+#   rolloff  → spectral_rolloff_std, spectral_rolloff_p10, spectral_rolloff_p90 (float, Hz)
+#   flatness → spectral_flatness_std, spectral_flatness_iqr,
+#              spectral_flatness_p10, spectral_flatness_p90                (float)
+#   contrast → spectral_contrast_std                       List[float] (7)
+#   mfcc     → mfcc_std, mfcc_delta_mean                   List[float] (13)
+#   chroma   → chroma_std, chroma_delta_mean               List[float] (12)
+# _std = population standard deviation; _delta_mean = mean absolute difference
+# between consecutive frames (base unit per hop); quantiles interpolate linearly
+# (NumPy default); _iqr = p75 - p25.
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

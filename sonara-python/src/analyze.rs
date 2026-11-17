@@ -104,6 +104,49 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         d.set_item("chroma_mean", v.clone())?;
     }
 
+    // Frame statistics (MIR_FEATURES group 1.2): emitted with their base feature.
+    for (key, value) in [
+        ("rms_std", r.rms_std),
+        ("rms_delta_mean", r.rms_delta_mean),
+        ("rms_iqr", r.rms_iqr),
+        ("rms_p10", r.rms_p10),
+        ("rms_p90", r.rms_p90),
+        ("zero_crossing_rate_std", r.zero_crossing_rate_std),
+        ("spectral_centroid_std", r.spectral_centroid_std),
+        (
+            "spectral_centroid_delta_mean",
+            r.spectral_centroid_delta_mean,
+        ),
+        ("spectral_centroid_iqr", r.spectral_centroid_iqr),
+        ("spectral_bandwidth_std", r.spectral_bandwidth_std),
+        (
+            "spectral_bandwidth_delta_mean",
+            r.spectral_bandwidth_delta_mean,
+        ),
+        ("spectral_rolloff_std", r.spectral_rolloff_std),
+        ("spectral_rolloff_p10", r.spectral_rolloff_p10),
+        ("spectral_rolloff_p90", r.spectral_rolloff_p90),
+        ("spectral_flatness_std", r.spectral_flatness_std),
+        ("spectral_flatness_iqr", r.spectral_flatness_iqr),
+        ("spectral_flatness_p10", r.spectral_flatness_p10),
+        ("spectral_flatness_p90", r.spectral_flatness_p90),
+    ] {
+        if let Some(v) = value {
+            d.set_item(key, v)?;
+        }
+    }
+    for (key, value) in [
+        ("spectral_contrast_std", &r.spectral_contrast_std),
+        ("mfcc_std", &r.mfcc_std),
+        ("mfcc_delta_mean", &r.mfcc_delta_mean),
+        ("chroma_std", &r.chroma_std),
+        ("chroma_delta_mean", &r.chroma_delta_mean),
+    ] {
+        if let Some(v) = value {
+            d.set_item(key, v.clone())?;
+        }
+    }
+
     // Rhythm (playlist/full modes)
     if let Some(ref v) = r.tempo_curve {
         d.set_item("tempo_curve", v.clone())?;
@@ -949,6 +992,44 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         ),
         mfcc_mean: opt_field!(cached, "mfcc_mean", Vec<f32>, "a list of floats"),
         chroma_mean: opt_field!(cached, "chroma_mean", Vec<f32>, "a list of floats"),
+        rms_std: opt_field!(cached, "rms_std", f32, "a float"),
+        rms_delta_mean: opt_field!(cached, "rms_delta_mean", f32, "a float"),
+        rms_iqr: opt_field!(cached, "rms_iqr", f32, "a float"),
+        rms_p10: opt_field!(cached, "rms_p10", f32, "a float"),
+        rms_p90: opt_field!(cached, "rms_p90", f32, "a float"),
+        zero_crossing_rate_std: opt_field!(cached, "zero_crossing_rate_std", f32, "a float"),
+        spectral_centroid_std: opt_field!(cached, "spectral_centroid_std", f32, "a float"),
+        spectral_centroid_delta_mean: opt_field!(
+            cached,
+            "spectral_centroid_delta_mean",
+            f32,
+            "a float"
+        ),
+        spectral_centroid_iqr: opt_field!(cached, "spectral_centroid_iqr", f32, "a float"),
+        spectral_bandwidth_std: opt_field!(cached, "spectral_bandwidth_std", f32, "a float"),
+        spectral_bandwidth_delta_mean: opt_field!(
+            cached,
+            "spectral_bandwidth_delta_mean",
+            f32,
+            "a float"
+        ),
+        spectral_rolloff_std: opt_field!(cached, "spectral_rolloff_std", f32, "a float"),
+        spectral_rolloff_p10: opt_field!(cached, "spectral_rolloff_p10", f32, "a float"),
+        spectral_rolloff_p90: opt_field!(cached, "spectral_rolloff_p90", f32, "a float"),
+        spectral_flatness_std: opt_field!(cached, "spectral_flatness_std", f32, "a float"),
+        spectral_flatness_iqr: opt_field!(cached, "spectral_flatness_iqr", f32, "a float"),
+        spectral_flatness_p10: opt_field!(cached, "spectral_flatness_p10", f32, "a float"),
+        spectral_flatness_p90: opt_field!(cached, "spectral_flatness_p90", f32, "a float"),
+        spectral_contrast_std: opt_field!(
+            cached,
+            "spectral_contrast_std",
+            Vec<f32>,
+            "a list of floats"
+        ),
+        mfcc_std: opt_field!(cached, "mfcc_std", Vec<f32>, "a list of floats"),
+        mfcc_delta_mean: opt_field!(cached, "mfcc_delta_mean", Vec<f32>, "a list of floats"),
+        chroma_std: opt_field!(cached, "chroma_std", Vec<f32>, "a list of floats"),
+        chroma_delta_mean: opt_field!(cached, "chroma_delta_mean", Vec<f32>, "a list of floats"),
         tempo_curve: opt_field!(cached, "tempo_curve", Vec<f32>, "a list of floats"),
         tempo_variability: opt_field!(cached, "tempo_variability", f32, "a float"),
         time_signature: opt_field!(cached, "time_signature", String, "a string"),

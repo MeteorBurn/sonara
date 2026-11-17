@@ -172,6 +172,18 @@ returns the key it is derived from (`key`, `key_confidence`, `key_camelot`).
 Since 2026-10-03 `augment_analysis` writes those key fields when it fills
 `valence` too, as a fresh run does; before, it set only `valence`.
 
+Frame statistics (2026-11-17, MeteorBurn fork, no schema bump: additive keys,
+existing values unchanged). Each base feature now also returns the spread,
+frame-to-frame change and quantiles of its per-frame values, over the same frames
+as its `_mean`: `rms_{std,delta_mean,iqr,p10,p90}`, `zero_crossing_rate_std`,
+`spectral_centroid_{std,delta_mean,iqr}`, `spectral_bandwidth_{std,delta_mean}`,
+`spectral_rolloff_{std,p10,p90}`, `spectral_flatness_{std,iqr,p10,p90}`,
+`spectral_contrast_std` (7), `mfcc_{std,delta_mean}` (13) and
+`chroma_{std,delta_mean}` (12). They travel with their feature name (`rms`,
+`mfcc`, ...): present exactly when it is, and `augment_analysis` refills them
+with it. They need the audio (class `C`/`A`), are not embedding evidence, and
+leave `embedding` and every model input unchanged.
+
 `mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
 schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`
 term even when `dissonance` was not requested, and emits it only when it was.

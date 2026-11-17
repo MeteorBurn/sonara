@@ -44,6 +44,88 @@ mod aggression_dsp;
 /// Minimum number of frames to justify rayon thread overhead.
 const PARALLEL_THRESHOLD: usize = 32;
 
+// ---- Frame statistics (MIR_FEATURES group 1.2) ----
+// Aggregates over every main-pass frame, the same frames the `_mean` fields use.
+// Accumulated in f64 so long tracks do not lose precision in f32 sums.
+
+/// Population standard deviation (ddof = 0); 0 for an empty series.
+fn series_std(x: &[Float]) -> Float {
+    if x.is_empty() {
+        return 0.0;
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let var = x
+        .iter()
+        .map(|&v| {
+            let d = v as f64 - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
+    var.sqrt() as Float
+}
+
+/// Mean absolute difference between consecutive frames; 0 for under two frames.
+fn series_delta_mean(x: &[Float]) -> Float {
+    if x.len() < 2 {
+        return 0.0;
+    }
+    let sum: f64 = x
+        .windows(2)
+        .map(|w| (w[1] as f64 - w[0] as f64).abs())
+        .sum();
+    (sum / (x.len() - 1) as f64) as Float
+}
+
+/// Ascending copy for [`sorted_quantile`].
+fn sorted_series(x: &[Float]) -> Vec<Float> {
+    let mut v = x.to_vec();
+    v.sort_by(Float::total_cmp);
+    v
+}
+
+/// Quantile `q` in `[0, 1]` of an ascending series, interpolating linearly
+/// between order statistics (NumPy's default method); 0 for an empty series.
+fn sorted_quantile(sorted: &[Float], q: f64) -> Float {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let pos = q * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    let lo_v = sorted[lo] as f64;
+    (lo_v + (sorted[hi] as f64 - lo_v) * (pos - lo as f64)) as Float
+}
+
+/// Interquartile range (p75 - p25) of an ascending series.
+fn sorted_iqr(sorted: &[Float]) -> Float {
+    sorted_quantile(sorted, 0.75) - sorted_quantile(sorted, 0.25)
+}
+
+/// Zero-crossing rate of every main-pass frame: crossings among the frame's
+/// `frame_length` samples of the centered (zero-padded) signal, divided by
+/// `frame_length`. Same sign rule as [`validated_zero_crossing_rate`].
+fn frame_zero_crossing_rates(
+    padded: &[Float],
+    frame_length: usize,
+    hop_length: usize,
+    n_frames: usize,
+) -> Vec<Float> {
+    // Counted per frame (each sample read frame_length / hop_length times):
+    // no signal-length buffer next to the already padded signal.
+    (0..n_frames)
+        .map(|t| {
+            let start = t * hop_length;
+            let crossings = padded[start..start + frame_length]
+                .windows(2)
+                .filter(|p| (p[0] > 0.0) != (p[1] > 0.0))
+                .count();
+            crossings as Float / frame_length as Float
+        })
+        .collect()
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -974,6 +1056,46 @@ pub struct TrackAnalysis {
     pub mfcc_mean: Option<Vec<Float>>,
     pub chroma_mean: Option<Vec<Float>>,
 
+    // --- frame statistics ---
+    // Spread, frame-to-frame change and quantiles of the per-frame values behind
+    // the `_mean` fields, over the same frames (all main-pass frames, silence
+    // included). Each is computed with its base feature: `Some` exactly when
+    // that feature is (`rms`, `centroid`, `zcr` in every mode; the rest with
+    // their playlist/full feature). `_std` is the population standard
+    // deviation; `_delta_mean` the mean absolute difference between consecutive
+    // frames, in the base unit per hop; quantiles interpolate linearly between
+    // order statistics and `_iqr` is p75 - p25. Vectors are per coefficient /
+    // pitch class / contrast band, in the order of their `_mean`.
+    pub rms_std: Option<Float>,
+    pub rms_delta_mean: Option<Float>,
+    pub rms_iqr: Option<Float>,
+    pub rms_p10: Option<Float>,
+    pub rms_p90: Option<Float>,
+    /// Standard deviation of the per-frame zero-crossing rate (2048-sample
+    /// frames on the main hop). `zero_crossing_rate` itself is whole-signal.
+    pub zero_crossing_rate_std: Option<Float>,
+    pub spectral_centroid_std: Option<Float>,
+    pub spectral_centroid_delta_mean: Option<Float>,
+    pub spectral_centroid_iqr: Option<Float>,
+    pub spectral_bandwidth_std: Option<Float>,
+    pub spectral_bandwidth_delta_mean: Option<Float>,
+    pub spectral_rolloff_std: Option<Float>,
+    pub spectral_rolloff_p10: Option<Float>,
+    pub spectral_rolloff_p90: Option<Float>,
+    pub spectral_flatness_std: Option<Float>,
+    pub spectral_flatness_iqr: Option<Float>,
+    pub spectral_flatness_p10: Option<Float>,
+    pub spectral_flatness_p90: Option<Float>,
+    /// 7 values, aligned with `spectral_contrast_mean`.
+    pub spectral_contrast_std: Option<Vec<Float>>,
+    /// 13 values each, aligned with `mfcc_mean`.
+    pub mfcc_std: Option<Vec<Float>>,
+    pub mfcc_delta_mean: Option<Vec<Float>>,
+    /// 12 values each, aligned with `chroma_mean` (per-frame L-inf normalized chroma).
+    pub chroma_std: Option<Vec<Float>>,
+    pub chroma_delta_mean: Option<Vec<Float>>,
+    // --- end frame statistics ---
+
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
     /// the span between `beats[i]` and `beats[i+1]`
@@ -1666,6 +1788,12 @@ fn analyze_signal_inner(
     } else {
         Array2::zeros((0, 0))
     };
+    // Per-frame contrast, kept for `spectral_contrast_std` (the mean uses `contrast_acc`).
+    let mut contrast_frames = if extended {
+        Array2::<Float>::zeros((N_CONTRAST_BANDS + 1, n_frames))
+    } else {
+        Array2::zeros((0, 0))
+    };
     // Fused HPCP (accumulated per-frame, normalized+averaged post-loop)
     let mut hpcp_raw = if extended {
         Array2::<Float>::zeros((12, n_frames))
@@ -2040,6 +2168,7 @@ fn analyze_signal_inner(
                     }
                     for b in 0..N_CONTRAST_BANDS + 1 {
                         c_acc[b] += fr.contrast_bands[b];
+                        contrast_frames[(b, t)] = fr.contrast_bands[b];
                     }
                     for c in 0..12 {
                         hpcp_raw[(c, t)] = fr.hpcp_col[c];
@@ -2196,10 +2325,13 @@ fn analyze_signal_inner(
     // EXTENDED: MFCCs via pre-computed DCT matrix (no per-frame cos())
     // ================================================================
 
+    // Per-coefficient MFCC series (N_MFCC x n_frames) for the frame statistics.
+    let mut mfcc_frames: Vec<Vec<Float>> = Vec::new();
     let mfcc_mean = if extended {
         // dct_matrix is (N_MFCC, n_mels), s_db is (n_mels, n_frames)
         // Compute MFCC mean = mean over frames of (dct_matrix @ s_db[:, t])
         let mut mfcc_avg = vec![0.0_f32; N_MFCC];
+        mfcc_frames = vec![Vec::with_capacity(n_frames); N_MFCC];
         let dct_raw = dct_matrix.as_slice().unwrap();
         for t in 0..n_frames {
             for k in 0..N_MFCC {
@@ -2209,6 +2341,7 @@ fn analyze_signal_inner(
                     sum += dct_raw[row_start + m] * s_db[(m, t)];
                 }
                 mfcc_avg[k] += sum;
+                mfcc_frames[k].push(sum);
             }
         }
         for v in mfcc_avg.iter_mut() {
@@ -2224,8 +2357,11 @@ fn analyze_signal_inner(
     // L-inf normalize per frame, then average across frames.
     // ================================================================
 
+    // Per-class normalized chroma series (12 x n_frames) for the frame statistics.
+    let mut chroma_frames: Vec<Vec<Float>> = Vec::new();
     let chroma_mean = if extended && n_frames > 0 {
         let mut chroma_avg = vec![0.0_f32; 12];
+        chroma_frames = vec![Vec::with_capacity(n_frames); 12];
         for t in 0..n_frames {
             let mut frame_chroma = [0.0_f32; 12];
             for c in 0..12 {
@@ -2240,6 +2376,7 @@ fn analyze_signal_inner(
             }
             for (i, &v) in frame_chroma.iter().enumerate() {
                 chroma_avg[i] += v;
+                chroma_frames[i].push(v);
             }
         }
         for v in chroma_avg.iter_mut() {
@@ -2329,6 +2466,79 @@ fn analyze_signal_inner(
     } else {
         None
     };
+
+    // ================================================================
+    // FRAME STATISTICS (MIR_FEATURES group 1.2): std / delta / quantiles
+    // over the same frames as the `_mean` fields. Which statistic each
+    // feature gets follows the spec, not a uniform set.
+    // ================================================================
+
+    let rms_slice = rms_frames.as_slice().unwrap();
+    let rms_sorted = sorted_series(rms_slice);
+    let rms_std = Some(series_std(rms_slice));
+    let rms_delta_mean = Some(series_delta_mean(rms_slice));
+    let rms_iqr = Some(sorted_iqr(&rms_sorted));
+    let rms_p10 = Some(sorted_quantile(&rms_sorted, 0.10));
+    let rms_p90 = Some(sorted_quantile(&rms_sorted, 0.90));
+
+    let centroid_slice = centroids.as_slice().unwrap();
+    let spectral_centroid_std = Some(series_std(centroid_slice));
+    let spectral_centroid_delta_mean = Some(series_delta_mean(centroid_slice));
+    let spectral_centroid_iqr = Some(sorted_iqr(&sorted_series(centroid_slice)));
+
+    let zero_crossing_rate_std = Some(series_std(&frame_zero_crossing_rates(
+        y_raw, n_fft, hop_length, n_frames,
+    )));
+
+    let bandwidth_slice = bandwidths.as_slice().unwrap();
+    let spectral_bandwidth_std = extended.then(|| series_std(bandwidth_slice));
+    let spectral_bandwidth_delta_mean = extended.then(|| series_delta_mean(bandwidth_slice));
+
+    let rolloff_slice = rolloffs.as_slice().unwrap();
+    let rolloff_sorted = sorted_series(rolloff_slice);
+    let spectral_rolloff_std = extended.then(|| series_std(rolloff_slice));
+    let spectral_rolloff_p10 = extended.then(|| sorted_quantile(&rolloff_sorted, 0.10));
+    let spectral_rolloff_p90 = extended.then(|| sorted_quantile(&rolloff_sorted, 0.90));
+
+    let flatness_slice = flatnesses.as_slice().unwrap();
+    let flatness_sorted = sorted_series(flatness_slice);
+    let spectral_flatness_std = extended.then(|| series_std(flatness_slice));
+    let spectral_flatness_iqr = extended.then(|| sorted_iqr(&flatness_sorted));
+    let spectral_flatness_p10 = extended.then(|| sorted_quantile(&flatness_sorted, 0.10));
+    let spectral_flatness_p90 = extended.then(|| sorted_quantile(&flatness_sorted, 0.90));
+
+    // Vector features follow their `_mean` (`None` exactly when it is).
+    let spectral_contrast_std = spectral_contrast_mean.as_ref().map(|_| {
+        contrast_frames
+            .rows()
+            .into_iter()
+            .map(|row| series_std(row.as_slice().unwrap()))
+            .collect::<Vec<Float>>()
+    });
+    let mfcc_std = mfcc_mean.as_ref().map(|_| {
+        mfcc_frames
+            .iter()
+            .map(|s| series_std(s))
+            .collect::<Vec<Float>>()
+    });
+    let mfcc_delta_mean = mfcc_mean.as_ref().map(|_| {
+        mfcc_frames
+            .iter()
+            .map(|s| series_delta_mean(s))
+            .collect::<Vec<Float>>()
+    });
+    let chroma_std = chroma_mean.as_ref().map(|_| {
+        chroma_frames
+            .iter()
+            .map(|s| series_std(s))
+            .collect::<Vec<Float>>()
+    });
+    let chroma_delta_mean = chroma_mean.as_ref().map(|_| {
+        chroma_frames
+            .iter()
+            .map(|s| series_delta_mean(s))
+            .collect::<Vec<Float>>()
+    });
 
     // ================================================================
     // RHYTHM: Tempo curve & time signature
@@ -2864,6 +3074,29 @@ fn analyze_signal_inner(
         spectral_contrast_mean,
         mfcc_mean,
         chroma_mean,
+        rms_std,
+        rms_delta_mean,
+        rms_iqr,
+        rms_p10,
+        rms_p90,
+        zero_crossing_rate_std,
+        spectral_centroid_std,
+        spectral_centroid_delta_mean,
+        spectral_centroid_iqr,
+        spectral_bandwidth_std,
+        spectral_bandwidth_delta_mean,
+        spectral_rolloff_std,
+        spectral_rolloff_p10,
+        spectral_rolloff_p90,
+        spectral_flatness_std,
+        spectral_flatness_iqr,
+        spectral_flatness_p10,
+        spectral_flatness_p90,
+        spectral_contrast_std,
+        mfcc_std,
+        mfcc_delta_mean,
+        chroma_std,
+        chroma_delta_mean,
         tempo_curve,
         tempo_variability,
         time_signature,
@@ -3029,21 +3262,35 @@ fn suppress_internal_rhythm_components(result: &mut TrackAnalysis, config: &Anal
 fn suppress_unrequested_spectral_summaries(result: &mut TrackAnalysis, config: &AnalysisConfig) {
     if !config.emits("bandwidth") {
         result.spectral_bandwidth_mean = None;
+        result.spectral_bandwidth_std = None;
+        result.spectral_bandwidth_delta_mean = None;
     }
     if !config.emits("rolloff") {
         result.spectral_rolloff_mean = None;
+        result.spectral_rolloff_std = None;
+        result.spectral_rolloff_p10 = None;
+        result.spectral_rolloff_p90 = None;
     }
     if !config.emits("flatness") {
         result.spectral_flatness_mean = None;
+        result.spectral_flatness_std = None;
+        result.spectral_flatness_iqr = None;
+        result.spectral_flatness_p10 = None;
+        result.spectral_flatness_p90 = None;
     }
     if !config.emits("contrast") {
         result.spectral_contrast_mean = None;
+        result.spectral_contrast_std = None;
     }
     if !config.emits("mfcc") {
         result.mfcc_mean = None;
+        result.mfcc_std = None;
+        result.mfcc_delta_mean = None;
     }
     if !config.emits("chroma") {
         result.chroma_mean = None;
+        result.chroma_std = None;
+        result.chroma_delta_mean = None;
     }
 }
 
@@ -3720,17 +3967,56 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
         "rms" => {
             out.rms_mean = fresh.rms_mean;
             out.rms_max = fresh.rms_max;
+            out.rms_std = fresh.rms_std;
+            out.rms_delta_mean = fresh.rms_delta_mean;
+            out.rms_iqr = fresh.rms_iqr;
+            out.rms_p10 = fresh.rms_p10;
+            out.rms_p90 = fresh.rms_p90;
         }
         "dynamic_range" => out.dynamic_range_db = fresh.dynamic_range_db,
-        "centroid" => out.spectral_centroid_mean = fresh.spectral_centroid_mean,
-        "zcr" => out.zero_crossing_rate = fresh.zero_crossing_rate,
+        "centroid" => {
+            out.spectral_centroid_mean = fresh.spectral_centroid_mean;
+            out.spectral_centroid_std = fresh.spectral_centroid_std;
+            out.spectral_centroid_delta_mean = fresh.spectral_centroid_delta_mean;
+            out.spectral_centroid_iqr = fresh.spectral_centroid_iqr;
+        }
+        "zcr" => {
+            out.zero_crossing_rate = fresh.zero_crossing_rate;
+            out.zero_crossing_rate_std = fresh.zero_crossing_rate_std;
+        }
         "onset_density" => out.onset_density = fresh.onset_density,
-        "bandwidth" => out.spectral_bandwidth_mean = fresh.spectral_bandwidth_mean,
-        "rolloff" => out.spectral_rolloff_mean = fresh.spectral_rolloff_mean,
-        "flatness" => out.spectral_flatness_mean = fresh.spectral_flatness_mean,
-        "contrast" => out.spectral_contrast_mean = fresh.spectral_contrast_mean.clone(),
-        "mfcc" => out.mfcc_mean = fresh.mfcc_mean.clone(),
-        "chroma" => out.chroma_mean = fresh.chroma_mean.clone(),
+        "bandwidth" => {
+            out.spectral_bandwidth_mean = fresh.spectral_bandwidth_mean;
+            out.spectral_bandwidth_std = fresh.spectral_bandwidth_std;
+            out.spectral_bandwidth_delta_mean = fresh.spectral_bandwidth_delta_mean;
+        }
+        "rolloff" => {
+            out.spectral_rolloff_mean = fresh.spectral_rolloff_mean;
+            out.spectral_rolloff_std = fresh.spectral_rolloff_std;
+            out.spectral_rolloff_p10 = fresh.spectral_rolloff_p10;
+            out.spectral_rolloff_p90 = fresh.spectral_rolloff_p90;
+        }
+        "flatness" => {
+            out.spectral_flatness_mean = fresh.spectral_flatness_mean;
+            out.spectral_flatness_std = fresh.spectral_flatness_std;
+            out.spectral_flatness_iqr = fresh.spectral_flatness_iqr;
+            out.spectral_flatness_p10 = fresh.spectral_flatness_p10;
+            out.spectral_flatness_p90 = fresh.spectral_flatness_p90;
+        }
+        "contrast" => {
+            out.spectral_contrast_mean = fresh.spectral_contrast_mean.clone();
+            out.spectral_contrast_std = fresh.spectral_contrast_std.clone();
+        }
+        "mfcc" => {
+            out.mfcc_mean = fresh.mfcc_mean.clone();
+            out.mfcc_std = fresh.mfcc_std.clone();
+            out.mfcc_delta_mean = fresh.mfcc_delta_mean.clone();
+        }
+        "chroma" => {
+            out.chroma_mean = fresh.chroma_mean.clone();
+            out.chroma_std = fresh.chroma_std.clone();
+            out.chroma_delta_mean = fresh.chroma_delta_mean.clone();
+        }
         "chords" => {
             out.chord_sequence = fresh.chord_sequence.clone();
             out.chord_events = fresh.chord_events.clone();
@@ -6382,5 +6668,150 @@ mod tests {
         assert_eq!(aug.bpm, record.bpm);
         assert_eq!(aug.rms_mean, record.rms_mean);
         std::fs::remove_file(path).unwrap();
+    }
+
+    // ---- Frame statistics (MIR_FEATURES group 1.2) ----
+
+    #[test]
+    fn test_frame_stat_helpers_match_numpy_definitions() {
+        let x = [1.0, 2.0, 3.0, 4.0];
+        assert!((series_std(&x) - 1.25_f32.sqrt()).abs() < 1e-6); // np.std, ddof=0
+        assert!((series_delta_mean(&[1.0, 3.0, 2.0]) - 1.5).abs() < 1e-6);
+        assert!((sorted_quantile(&x, 0.10) - 1.3).abs() < 1e-6); // np.quantile default
+        assert!((sorted_quantile(&x, 0.90) - 3.7).abs() < 1e-6);
+        assert!((sorted_iqr(&x) - 1.5).abs() < 1e-6);
+        let ramp: Vec<Float> = (0..=10).map(|v| v as Float).collect();
+        assert_eq!(sorted_quantile(&ramp, 0.10), 1.0);
+        assert_eq!(sorted_quantile(&ramp, 0.90), 9.0);
+        assert_eq!(sorted_series(&[3.0, 1.0, 2.0]), vec![1.0, 2.0, 3.0]);
+        // Degenerate series stay finite.
+        assert_eq!(series_std(&[]), 0.0);
+        assert_eq!(series_std(&[5.0]), 0.0);
+        assert_eq!(series_delta_mean(&[5.0]), 0.0);
+        assert_eq!(sorted_quantile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn test_frame_zero_crossing_rates() {
+        // Alternating sign: every adjacent pair crosses; 3 pairs in a 4-sample frame.
+        let alt = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
+        assert_eq!(frame_zero_crossing_rates(&alt, 4, 2, 3), vec![0.75; 3]);
+        assert_eq!(frame_zero_crossing_rates(&[0.5; 8], 4, 2, 3), vec![0.0; 3]);
+        // Crossings are counted per frame, not shared across frames.
+        let one = [1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0];
+        assert_eq!(
+            frame_zero_crossing_rates(&one, 4, 2, 3),
+            vec![0.0, 0.25, 0.25]
+        );
+    }
+
+    #[test]
+    fn test_frame_stats_follow_their_base_features() {
+        let y = sine(440.0, 22050, 3.0);
+        let c = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        for v in [c.rms_std, c.rms_delta_mean, c.rms_iqr, c.rms_p10, c.rms_p90] {
+            assert!(v.is_some_and(Float::is_finite));
+        }
+        assert!(c.zero_crossing_rate_std.is_some());
+        assert!(c.spectral_centroid_std.is_some() && c.spectral_centroid_iqr.is_some());
+        assert!(c.spectral_bandwidth_std.is_none() && c.spectral_flatness_p10.is_none());
+        assert!(c.mfcc_std.is_none() && c.chroma_delta_mean.is_none());
+        assert!(c.spectral_contrast_std.is_none());
+
+        let p = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        assert_eq!(p.mfcc_std.as_ref().unwrap().len(), N_MFCC);
+        assert_eq!(p.mfcc_delta_mean.as_ref().unwrap().len(), N_MFCC);
+        assert_eq!(p.chroma_std.as_ref().unwrap().len(), 12);
+        assert_eq!(p.chroma_delta_mean.as_ref().unwrap().len(), 12);
+        assert_eq!(
+            p.spectral_contrast_std.as_ref().unwrap().len(),
+            N_CONTRAST_BANDS + 1
+        );
+        for v in [
+            p.spectral_bandwidth_std,
+            p.spectral_bandwidth_delta_mean,
+            p.spectral_rolloff_std,
+            p.spectral_flatness_std,
+            p.spectral_flatness_iqr,
+        ] {
+            assert!(v.is_some_and(|v| v.is_finite() && v >= 0.0));
+        }
+        assert!(p.spectral_rolloff_p10.unwrap() <= p.spectral_rolloff_p90.unwrap());
+        assert!(p.spectral_flatness_p10.unwrap() <= p.spectral_flatness_p90.unwrap());
+
+        // A narrow request keeps only the named group's statistics.
+        let narrow = AnalysisConfig {
+            features: Some(["mfcc".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        let n = analyze_signal(y.view(), 22050, &narrow).unwrap();
+        assert!(n.mfcc_std.is_some() && n.mfcc_delta_mean.is_some());
+        assert!(n.chroma_std.is_none() && n.spectral_contrast_std.is_none());
+        assert!(n.spectral_rolloff_p90.is_none() && n.spectral_flatness_iqr.is_none());
+    }
+
+    #[test]
+    fn test_frame_stats_values_on_an_amplitude_step() {
+        // 2 s at amplitude 0.1, then 2 s at 0.9: per-frame RMS takes two levels.
+        let sr = 22050;
+        let mut y = sine(440.0, sr, 4.0);
+        let half = y.len() / 2;
+        y.iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v *= if i < half { 0.1 } else { 0.9 });
+        let r = analyze_signal(y.view(), sr, &compact()).unwrap();
+        let (lo, hi) = (0.1 / 2.0_f32.sqrt(), 0.9 / 2.0_f32.sqrt());
+        // Two equal groups: population std is half their gap.
+        let std = r.rms_std.unwrap();
+        assert!((std - (hi - lo) / 2.0).abs() < 0.03 * hi, "rms_std {std}");
+        assert!(
+            (r.rms_p10.unwrap() - lo).abs() < 0.05 * lo,
+            "p10 {:?}",
+            r.rms_p10
+        );
+        assert!(
+            (r.rms_p90.unwrap() - hi).abs() < 0.05 * hi,
+            "p90 {:?}",
+            r.rms_p90
+        );
+        // One jump over ~170 frames: the mean change per hop stays small.
+        assert!(
+            r.rms_delta_mean.unwrap() < 0.02,
+            "delta {:?}",
+            r.rms_delta_mean
+        );
+        // The pitch never moves, so the centroid's core spread stays tight.
+        assert!(
+            r.spectral_centroid_iqr.unwrap() < 20.0,
+            "{:?}",
+            r.spectral_centroid_iqr
+        );
+    }
+
+    #[test]
+    fn test_augment_merge_moves_frame_stats_with_their_feature() {
+        let y = sine(440.0, 22050, 2.0);
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        for name in [
+            "mfcc",
+            "chroma",
+            "contrast",
+            "rolloff",
+            "flatness",
+            "bandwidth",
+        ] {
+            merge_feature_fields(&mut out, &fresh, name);
+        }
+        assert_eq!(out.mfcc_std, fresh.mfcc_std);
+        assert_eq!(out.mfcc_delta_mean, fresh.mfcc_delta_mean);
+        assert_eq!(out.chroma_delta_mean, fresh.chroma_delta_mean);
+        assert_eq!(out.spectral_contrast_std, fresh.spectral_contrast_std);
+        assert_eq!(out.spectral_rolloff_p90, fresh.spectral_rolloff_p90);
+        assert_eq!(out.spectral_flatness_iqr, fresh.spectral_flatness_iqr);
+        assert_eq!(
+            out.spectral_bandwidth_delta_mean,
+            fresh.spectral_bandwidth_delta_mean
+        );
     }
 }

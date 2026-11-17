@@ -68,6 +68,34 @@ def _roundtrip_playlist():
 
 test("empty augment round-trips a playlist record exactly", _roundtrip_playlist)
 
+FRAME_STATS_COMPACT = {
+    "rms_std", "rms_delta_mean", "rms_iqr", "rms_p10", "rms_p90",
+    "zero_crossing_rate_std",
+    "spectral_centroid_std", "spectral_centroid_delta_mean", "spectral_centroid_iqr",
+}
+FRAME_STATS_PLAYLIST = {
+    "spectral_bandwidth_std", "spectral_bandwidth_delta_mean",
+    "spectral_rolloff_std", "spectral_rolloff_p10", "spectral_rolloff_p90",
+    "spectral_flatness_std", "spectral_flatness_iqr",
+    "spectral_flatness_p10", "spectral_flatness_p90",
+}
+FRAME_STATS_VECTORS = {
+    "spectral_contrast_std": 7, "mfcc_std": 13, "mfcc_delta_mean": 13,
+    "chroma_std": 12, "chroma_delta_mean": 12,
+}
+
+
+def _frame_stats_keys():
+    every = FRAME_STATS_COMPACT | FRAME_STATS_PLAYLIST | set(FRAME_STATS_VECTORS)
+    assert every <= set(REC_PLAYLIST), sorted(every - set(REC_PLAYLIST))
+    for key, n in FRAME_STATS_VECTORS.items():
+        assert len(REC_PLAYLIST[key]) == n, key
+    present = every & set(REC_COMPACT)
+    assert present == FRAME_STATS_COMPACT, sorted(present ^ FRAME_STATS_COMPACT)
+
+
+test("frame statistics ship with their base features", _frame_stats_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(
