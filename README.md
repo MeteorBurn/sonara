@@ -255,6 +255,32 @@ r['loudness_range_lu']           # EBU R128 loudness range (LRA), LU
   of the short-term distribution (with the -20 LU relative gate). This is the
   standardized counterpart to the approximate `dynamic_range_db`.
 
+**Standard loudness and dynamics of the file (fork)** — three more opt-in
+features measure the file itself: every channel at the file's own sample rate,
+not the mono mix at the analysis rate. Only `analyze_file` / `analyze_batch`
+compute them (`analyze_signal` has no file), and a key is absent when its value
+is undefined (digital silence, a file shorter than the window). `loudness_lufs`
+and the `loudness` group above keep their values.
+
+```python
+r = sonara.analyze_file(
+    "track.flac", features=["ebur128", "native_dynamics", "amplitude_envelope"]
+)
+
+r['ebur128_integrated_lufs']       # ITU-R BS.1770-5 / EBU Tech 3341, gated (LUFS)
+r['ebur128_momentary_max_lufs']    # max momentary (400 ms) loudness (LUFS)
+r['ebur128_short_term_max_lufs']   # max short-term (3 s) loudness (LUFS)
+r['ebur128_range_lu']              # loudness range, EBU Tech 3342 (LU)
+r['ebur128_true_peak_dbtp']        # true peak over the channels (dBTP)
+r['native_sample_rate']            # sample rate of the file (Hz); set by any of the three
+r['sample_peak_dbfs']              # max |x| over the channels (dBFS)
+r['crest_factor_db']               # track peak / overall RMS (dB)
+r['crest_factor_frame_mean_db']    # mean per-frame crest factor, RMS > -70 dBFS
+r['amplitude_envelope']            # max |x| per frame; frame k is centred at
+r['amplitude_envelope_hop_sec']    # k * hop: 512/22050 s hop and 2048/22050 s
+r['amplitude_envelope_frame_sec']  # frames at any file sample rate
+```
+
 **Gain staging example** — normalize levels and guard against clipping:
 
 ```python

@@ -534,6 +534,11 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("aggression", true, true, false, A, &[]),
     feature("fingerprint", false, true, false, A, &[]),
     feature("loudness", false, true, false, A, &[]),
+    // File-only (analyze_file / analyze_batch): measured on the file's own
+    // channels and sample rate, see `crate::native_dynamics`.
+    feature("ebur128", false, true, false, A, &[]),
+    feature("native_dynamics", false, true, false, A, &[]),
+    feature("amplitude_envelope", false, true, false, A, &[]),
     feature("silence", false, true, false, C, &[]),
     feature("key_candidates", true, true, false, S, &["chroma_mean"]),
     feature(
@@ -1193,6 +1198,51 @@ pub struct TrackAnalysis {
     /// approximate `dynamic_range_db` (which is a raw p95-p5 of RMS).
     pub loudness_range_lu: Option<Float>,
     // --- end loudness ---
+    // --- ebur128 / native_dynamics / amplitude_envelope ---
+    // File-only, opt-in via `features=[...]`: measured by `analyze_file` /
+    // `analyze_batch` on the file's own channels at its own sample rate
+    // (see `crate::native_dynamics`). `None` when the feature was not
+    // requested, when the analysis ran through `analyze_signal`, or when the
+    // value is undefined (digital silence, file shorter than the window).
+    // Unlike `loudness_lufs` / `true_peak_db` (mono mix at the analysis rate,
+    // ungated), these follow the standards on the original channels.
+    /// `ebur128`: integrated (programme) loudness in LUFS, ITU-R BS.1770-5 /
+    /// EBU Tech 3341 with absolute (-70 LUFS) and relative (-10 LU) gating.
+    /// Channels in WAV order (L R C LFE Ls Rs, LFE excluded); the loudness
+    /// fields are `None` past six channels, where the layout is unknown.
+    pub ebur128_integrated_lufs: Option<Float>,
+    /// `ebur128`: maximum momentary (400 ms) loudness in LUFS, EBU Tech 3341.
+    pub ebur128_momentary_max_lufs: Option<Float>,
+    /// `ebur128`: maximum short-term (3 s) loudness in LUFS, EBU Tech 3341.
+    pub ebur128_short_term_max_lufs: Option<Float>,
+    /// `ebur128`: loudness range (LRA) in LU, EBU Tech 3342.
+    pub ebur128_range_lu: Option<Float>,
+    /// `ebur128`: true peak in dBTP (4x oversampled, BS.1770-5 Annex 2), the
+    /// maximum over the file's channels. Accurate to the EBU Tech 3341
+    /// tolerance (+0.2 / -0.4 dB): it can read up to 0.4 dB low.
+    pub ebur128_true_peak_dbtp: Option<Float>,
+    /// Sample rate of the file in Hz, the rate the file-only features are
+    /// measured at. `Some` whenever any of `ebur128`, `native_dynamics` or
+    /// `amplitude_envelope` was measured from a file, so it tells "measured,
+    /// value undefined" (a level is `None`) from "never measured" (a signal).
+    pub native_sample_rate: Option<u32>,
+    /// `native_dynamics`: sample peak in dBFS, max |x| over the file's channels
+    /// (not the mono mix).
+    pub sample_peak_dbfs: Option<Float>,
+    /// `native_dynamics`: crest factor in dB, track peak over the RMS of all
+    /// samples of all channels.
+    pub crest_factor_db: Option<Float>,
+    /// `native_dynamics`: mean of the per-frame crest factor in dB over frames
+    /// whose RMS is above -70 dBFS (frames of `amplitude_envelope`).
+    pub crest_factor_frame_mean_db: Option<Float>,
+    /// `amplitude_envelope`: peak envelope, max |x| over the file's channels in
+    /// each frame. The grid is in seconds, not samples: frame 2048/22050 s, hop
+    /// 512/22050 s, frame `k` centred at `k * amplitude_envelope_hop_sec`.
+    pub amplitude_envelope: Option<Vec<Float>>,
+    /// `amplitude_envelope`: hop between envelope frames in seconds.
+    pub amplitude_envelope_hop_sec: Option<Float>,
+    /// `amplitude_envelope`: envelope frame length in seconds.
+    pub amplitude_envelope_frame_sec: Option<Float>,
     pub spectral_centroid_mean: Float,
     pub zero_crossing_rate: Float,
     pub onset_density: Float,
@@ -1549,13 +1599,79 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
     // requested, then post-fill the result. When not requested, `load_with_tags`
     // does zero extra work — identical to the plain `load` fast path.
     let want_tags = config.wants("tags");
+    // File-only loudness/dynamics need the file's own channels and rate: decode
+    // once without downmixing, measure, then continue on the same mono mix
+    // `load_with_tags` would have produced.
+    let want_ebur128 = config.wants("ebur128");
+    let want_dynamics = config.wants("native_dynamics");
+    let want_envelope = config.wants("amplitude_envelope");
+    if want_ebur128 || want_dynamics || want_envelope {
+        let (channels, native_sr, tags) = audio::load_channels_with_tags(path, want_tags)?;
+        let ebu = want_ebur128.then(|| crate::native_dynamics::ebur128(channels.view(), native_sr));
+        let dynamics = (want_dynamics || want_envelope)
+            .then(|| crate::native_dynamics::native_dynamics(channels.view(), native_sr));
+        let native = if channels.nrows() == 1 {
+            channels.row(0).to_owned()
+        } else {
+            audio::to_mono(channels.view())
+        };
+        drop(channels);
+        let mut result = analyze_native_mono(native, native_sr, sr, config)?;
+        result.tags = tags;
+        // Marks the record as measured from a file: a missing level then
+        // means "undefined", not "never measured".
+        result.native_sample_rate = Some(native_sr);
+        if let Some(ebu) = ebu {
+            result.ebur128_integrated_lufs = ebu.integrated_lufs;
+            result.ebur128_momentary_max_lufs = ebu.momentary_max_lufs;
+            result.ebur128_short_term_max_lufs = ebu.short_term_max_lufs;
+            result.ebur128_range_lu = ebu.range_lu;
+            result.ebur128_true_peak_dbtp = ebu.true_peak_dbtp;
+        }
+        if let Some(dynamics) = dynamics {
+            if want_dynamics {
+                result.sample_peak_dbfs = dynamics.sample_peak_dbfs;
+                result.crest_factor_db = dynamics.crest_factor_db;
+                result.crest_factor_frame_mean_db = dynamics.crest_factor_frame_mean_db;
+            }
+            if want_envelope {
+                result.amplitude_envelope = Some(dynamics.envelope);
+                result.amplitude_envelope_hop_sec =
+                    Some(crate::native_dynamics::ENVELOPE_HOP_SEC as Float);
+                result.amplitude_envelope_frame_sec =
+                    Some(crate::native_dynamics::ENVELOPE_FRAME_SEC as Float);
+            }
+        }
+        return Ok(result);
+    }
+    #[cfg(feature = "aggression")]
+    if config.needs_aggression() {
+        let (native, native_sr, tags) = audio::load_with_tags(path, 0, true, 0.0, 0.0, want_tags)?;
+        let mut result = analyze_native_mono(native, native_sr, sr, config)?;
+        result.tags = tags;
+        return Ok(result);
+    }
+
+    let (y, actual_sr, tags) = audio::load_with_tags(path, sr, true, 0.0, 0.0, want_tags)?;
+    let mut result = analyze_signal(y.view(), actual_sr, config)?;
+    result.tags = tags;
+    Ok(result)
+}
+
+/// Analyze the mono mix of a file decoded at its own rate `native_sr`; `sr` is
+/// the caller's rate (0 = native). File-only fields are left to the caller.
+fn analyze_native_mono(
+    native: Array1<Float>,
+    native_sr: u32,
+    sr: u32,
+    config: &AnalysisConfig,
+) -> Result<TrackAnalysis> {
+    let caller_sr = if sr == 0 { native_sr } else { sr };
     #[cfg(feature = "aggression")]
     if config.needs_aggression() {
         // Decode once at the source rate, then derive the caller and model
         // lanes independently. This prevents a lossy caller-rate roundtrip,
         // preserves generic field semantics, and avoids a second file decode.
-        let (native, native_sr, tags) = audio::load_with_tags(path, 0, true, 0.0, 0.0, want_tags)?;
-        let caller_sr = if sr == 0 { native_sr } else { sr };
         if caller_sr == crate::aggression::AGGRESSION_SAMPLE_RATE {
             let canonical = (native_sr != caller_sr)
                 .then(|| audio::resample(native.view(), native_sr, caller_sr))
@@ -1564,9 +1680,7 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
                 .as_ref()
                 .map(|audio| audio.view())
                 .unwrap_or_else(|| native.view());
-            let mut result = analyze_signal(canonical_view, caller_sr, config)?;
-            result.tags = tags;
-            return Ok(result);
+            return analyze_signal(canonical_view, caller_sr, config);
         }
         let caller = (caller_sr != native_sr)
             .then(|| audio::resample(native.view(), native_sr, caller_sr))
@@ -1588,21 +1702,20 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
             .as_ref()
             .map(|audio| audio.view())
             .unwrap_or_else(|| native.view());
-        let mut result = analyze_signal_with_precomputed_aggression(
+        return analyze_signal_with_precomputed_aggression(
             caller_view,
             caller_sr,
             canonical_view,
             crate::aggression::AGGRESSION_SAMPLE_RATE,
             config,
-        )?;
-        result.tags = tags;
-        return Ok(result);
+        );
     }
-
-    let (y, actual_sr, tags) = audio::load_with_tags(path, sr, true, 0.0, 0.0, want_tags)?;
-    let mut result = analyze_signal(y.view(), actual_sr, config)?;
-    result.tags = tags;
-    Ok(result)
+    let y = if caller_sr != native_sr {
+        audio::resample(native.view(), native_sr, caller_sr)?
+    } else {
+        native
+    };
+    analyze_signal(y.view(), caller_sr, config)
 }
 
 /// [`analyze_file`] that also returns the rhythm envelopes of its fused pass by
@@ -3418,6 +3531,20 @@ fn analyze_signal_inner(
         loudness_momentary_max_db,
         loudness_range_lu,
         // --- end loudness ---
+        // File-only: filled by analyze_file when requested; a bare signal has
+        // no file channels or native rate.
+        ebur128_integrated_lufs: None,
+        ebur128_momentary_max_lufs: None,
+        ebur128_short_term_max_lufs: None,
+        ebur128_range_lu: None,
+        ebur128_true_peak_dbtp: None,
+        native_sample_rate: None,
+        sample_peak_dbfs: None,
+        crest_factor_db: None,
+        crest_factor_frame_mean_db: None,
+        amplitude_envelope: None,
+        amplitude_envelope_hop_sec: None,
+        amplitude_envelope_frame_sec: None,
         spectral_centroid_mean: centroid_mean,
         zero_crossing_rate: zcr,
         onset_density,
@@ -4482,6 +4609,26 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.loudness_momentary_max_db = fresh.loudness_momentary_max_db;
             out.loudness_range_lu = fresh.loudness_range_lu;
         }
+        "ebur128" => {
+            out.native_sample_rate = fresh.native_sample_rate;
+            out.ebur128_integrated_lufs = fresh.ebur128_integrated_lufs;
+            out.ebur128_momentary_max_lufs = fresh.ebur128_momentary_max_lufs;
+            out.ebur128_short_term_max_lufs = fresh.ebur128_short_term_max_lufs;
+            out.ebur128_range_lu = fresh.ebur128_range_lu;
+            out.ebur128_true_peak_dbtp = fresh.ebur128_true_peak_dbtp;
+        }
+        "native_dynamics" => {
+            out.native_sample_rate = fresh.native_sample_rate;
+            out.sample_peak_dbfs = fresh.sample_peak_dbfs;
+            out.crest_factor_db = fresh.crest_factor_db;
+            out.crest_factor_frame_mean_db = fresh.crest_factor_frame_mean_db;
+        }
+        "amplitude_envelope" => {
+            out.native_sample_rate = fresh.native_sample_rate;
+            out.amplitude_envelope = fresh.amplitude_envelope.clone();
+            out.amplitude_envelope_hop_sec = fresh.amplitude_envelope_hop_sec;
+            out.amplitude_envelope_frame_sec = fresh.amplitude_envelope_frame_sec;
+        }
         "silence" => {
             out.leading_silence_sec = fresh.leading_silence_sec;
             out.trailing_silence_sec = fresh.trailing_silence_sec;
@@ -4887,6 +5034,9 @@ mod tests {
             "embedding",
             "fingerprint",
             "loudness",
+            "ebur128",
+            "native_dynamics",
+            "amplitude_envelope",
             "silence",
             "key_candidates",
             "vocalness",
@@ -4953,6 +5103,9 @@ mod tests {
         assert_eq!(class_of("zcr"), DependencyClass::Audio);
         assert_eq!(class_of("fingerprint"), DependencyClass::Audio);
         assert_eq!(class_of("loudness"), DependencyClass::Audio);
+        assert_eq!(class_of("ebur128"), DependencyClass::Audio);
+        assert_eq!(class_of("native_dynamics"), DependencyClass::Audio);
+        assert_eq!(class_of("amplitude_envelope"), DependencyClass::Audio);
         assert_eq!(class_of("tags"), DependencyClass::Audio);
         assert_eq!(class_of("bpm"), DependencyClass::FrameCurves);
         assert_eq!(class_of("chroma"), DependencyClass::FrameCurves);
@@ -7436,5 +7589,226 @@ mod tests {
             spectral_texture_fields(&fresh)
         );
         assert!(out.spectral_crest_mean.is_some());
+    }
+
+    // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---
+
+    const NATIVE_FEATURES: [&str; 3] = ["ebur128", "native_dynamics", "amplitude_envelope"];
+
+    /// Stereo 16-bit 48 kHz WAV: 1 kHz sine at `peak_dbfs` (silence if `None`),
+    /// in phase on both channels.
+    fn write_native_dynamics_wav(
+        tag: &str,
+        peak_dbfs: Option<f64>,
+        secs: usize,
+    ) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sonara-native-dynamics-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let amp = peak_dbfs.map_or(0.0, |db| 10f64.powf(db / 20.0));
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..48_000 * secs {
+            let phase = 2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0;
+            let sample = (amp * phase.sin() * 32768.0).round() as i16;
+            writer.write_sample(sample).unwrap();
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        path
+    }
+
+    fn ebur128_fields(r: &TrackAnalysis) -> [Option<Float>; 5] {
+        [
+            r.ebur128_integrated_lufs,
+            r.ebur128_momentary_max_lufs,
+            r.ebur128_short_term_max_lufs,
+            r.ebur128_range_lu,
+            r.ebur128_true_peak_dbtp,
+        ]
+    }
+
+    fn native_dynamics_fields(r: &TrackAnalysis) -> [Option<Float>; 3] {
+        [
+            r.sample_peak_dbfs,
+            r.crest_factor_db,
+            r.crest_factor_frame_mean_db,
+        ]
+    }
+
+    fn amplitude_envelope_fields(r: &TrackAnalysis) -> (Option<Vec<Float>>, [Option<Float>; 2]) {
+        (
+            r.amplitude_envelope.clone(),
+            [r.amplitude_envelope_hop_sec, r.amplitude_envelope_frame_sec],
+        )
+    }
+
+    /// `r` with the 12 file-only fields and the recorded request cleared.
+    fn without_native_fields(mut r: TrackAnalysis) -> TrackAnalysis {
+        let blank = analyze_signal(sine(440.0, 22050, 0.5).view(), 22050, &compact()).unwrap();
+        for name in NATIVE_FEATURES {
+            merge_feature_fields(&mut r, &blank, name);
+        }
+        r.provenance.requested_features = None;
+        r
+    }
+
+    #[test]
+    fn test_native_dynamics_reference_tone() {
+        let path = write_native_dynamics_wav("tone", Some(-23.0), 5);
+        let r = analyze_file(&path, 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        // EBU Tech 3341 case: a -23 dBFS 1 kHz stereo sine reads -23.0 LUFS.
+        let lufs = r.ebur128_integrated_lufs.unwrap();
+        assert!((lufs + 23.0).abs() < 0.1, "{lufs}");
+        for v in ebur128_fields(&r) {
+            assert!(v.is_some_and(Float::is_finite), "{v:?}");
+        }
+        assert_eq!(r.native_sample_rate, Some(48_000));
+        let peak = r.sample_peak_dbfs.unwrap();
+        assert!((peak + 23.0).abs() < 0.05, "{peak}");
+        let crest = r.crest_factor_db.unwrap();
+        assert!((crest - 3.01).abs() < 0.05, "{crest}");
+        let frame_crest = r.crest_factor_frame_mean_db.unwrap();
+        assert!((frame_crest - 3.01).abs() < 0.1, "{frame_crest}");
+
+        let n = 48_000 * 5;
+        let envelope = r.amplitude_envelope.as_ref().unwrap();
+        assert_eq!(envelope.len(), 1 + (n * 22050) / (512 * 48_000));
+        let amp = 10f32.powf(-23.0 / 20.0);
+        assert!(envelope.iter().all(|&v| (v - amp).abs() < 1e-3));
+        let hop = crate::native_dynamics::ENVELOPE_HOP_SEC as Float;
+        let frame = crate::native_dynamics::ENVELOPE_FRAME_SEC as Float;
+        assert_eq!(r.amplitude_envelope_hop_sec, Some(hop));
+        assert_eq!(r.amplitude_envelope_frame_sec, Some(frame));
+        assert!((hop - 0.02322).abs() < 1e-5 && (frame - 0.09288).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_native_dynamics_presence_follows_requests() {
+        let path = write_native_dynamics_wav("presence", Some(-23.0), 5);
+        let run = |names: &[&str]| analyze_file(&path, 22050, &feature_config(names)).unwrap();
+        let none = run(&["rms"]);
+        let all = run(&NATIVE_FEATURES);
+        // Each feature fills its own group only.
+        let groups = |r: &TrackAnalysis| {
+            [
+                ebur128_fields(r) != ebur128_fields(&none),
+                native_dynamics_fields(r) != native_dynamics_fields(&none),
+                amplitude_envelope_fields(r) != amplitude_envelope_fields(&none),
+            ]
+        };
+        assert_eq!(ebur128_fields(&none), [None; 5]);
+        assert_eq!(native_dynamics_fields(&none), [None; 3]);
+        assert_eq!(none.native_sample_rate, None);
+        assert_eq!(amplitude_envelope_fields(&none), (None, [None; 2]));
+        assert_eq!(groups(&all), [true; 3]);
+        for (i, name) in NATIVE_FEATURES.iter().enumerate() {
+            let one = run(&[*name]);
+            let mut expected = [false; 3];
+            expected[i] = true;
+            assert_eq!(groups(&one), expected, "{name}");
+            // Any of the three marks the record as measured from a file.
+            assert_eq!(one.native_sample_rate, Some(48_000), "{name}");
+            // The envelope run shares the dynamics pass but emits the same values.
+            assert_eq!(
+                [
+                    ebur128_fields(&one) == ebur128_fields(&all),
+                    native_dynamics_fields(&one) == native_dynamics_fields(&all),
+                    amplitude_envelope_fields(&one) == amplitude_envelope_fields(&all),
+                ],
+                expected,
+                "{name}"
+            );
+        }
+
+        // A bare signal has no file: requested or not, the fields stay None.
+        let y = sine(440.0, 22050, 2.0);
+        let signal = analyze_signal(y.view(), 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
+        assert_eq!(groups(&signal), [false; 3]);
+        assert_eq!(signal.native_sample_rate, None);
+        std::fs::remove_file(&path).unwrap();
+
+        // Digital silence: levels are undefined, the envelope is all zeros.
+        let silent = write_native_dynamics_wav("silence", None, 1);
+        let z = analyze_file(&silent, 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
+        std::fs::remove_file(&silent).unwrap();
+        assert_eq!(ebur128_fields(&z), [None; 5]);
+        assert_eq!(z.native_sample_rate, Some(48_000));
+        assert_eq!(native_dynamics_fields(&z), [None; 3]);
+        assert!(z
+            .amplitude_envelope
+            .is_some_and(|e| !e.is_empty() && e.iter().all(|&v| v == 0.0)));
+    }
+
+    #[test]
+    fn test_native_dynamics_leave_other_fields_bit_identical() {
+        let wav = write_native_dynamics_wav("identical", Some(-6.0), 3);
+        let mut bases = vec![vec!["rms", "loudness"], vec!["rms", "loudness", "tags"]];
+        if cfg!(feature = "aggression") {
+            bases.push(vec!["rms", "loudness", "aggression"]);
+        }
+        for path in [wav.clone(), fixture("tagged.flac")] {
+            for base in &bases {
+                // 0 = native rate; 22050 and 16000 resample (and split the
+                // aggression lanes).
+                for sr in [0, 22050, 16000] {
+                    let mut names = base.clone();
+                    names.extend(NATIVE_FEATURES);
+                    let with = analyze_file(&path, sr, &feature_config(&names)).unwrap();
+                    let plain = analyze_file(&path, sr, &feature_config(base)).unwrap();
+                    assert!(with.native_sample_rate.is_some());
+                    assert!(
+                        without_native_fields(with) == without_native_fields(plain),
+                        "{} sr={sr} {base:?}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        std::fs::remove_file(&wav).unwrap();
+    }
+
+    #[test]
+    fn test_native_dynamics_augment_merge_moves_fields() {
+        let path = write_native_dynamics_wav("merge", Some(-23.0), 5);
+        let fresh = analyze_file(&path, 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
+        let cached = analyze_file(&path, 22050, &feature_config(&["rms"])).unwrap();
+
+        let mut out = cached.clone();
+        merge_feature_fields(&mut out, &fresh, "ebur128");
+        assert_eq!(ebur128_fields(&out), ebur128_fields(&fresh));
+        assert_eq!(native_dynamics_fields(&out), [None; 3]);
+        assert_eq!(out.native_sample_rate, Some(48_000));
+        merge_feature_fields(&mut out, &fresh, "native_dynamics");
+        assert_eq!(native_dynamics_fields(&out), native_dynamics_fields(&fresh));
+        assert_eq!(amplitude_envelope_fields(&out), (None, [None; 2]));
+        merge_feature_fields(&mut out, &fresh, "amplitude_envelope");
+        assert_eq!(
+            amplitude_envelope_fields(&out),
+            amplitude_envelope_fields(&fresh)
+        );
+
+        // End to end: the audio fallback of augment fills the same values.
+        let augmented =
+            augment_analysis(&cached, &NATIVE_FEATURES, Some(&path), &compact()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(without_native_fields(augmented.clone()) == without_native_fields(cached));
+        assert_eq!(ebur128_fields(&augmented), ebur128_fields(&fresh));
+        assert_eq!(
+            native_dynamics_fields(&augmented),
+            native_dynamics_fields(&fresh)
+        );
+        assert_eq!(
+            amplitude_envelope_fields(&augmented),
+            amplitude_envelope_fields(&fresh)
+        );
     }
 }

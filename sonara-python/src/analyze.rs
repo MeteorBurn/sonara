@@ -74,6 +74,33 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         d.set_item("loudness_range_lu", v)?;
     }
     // --- end loudness ---
+    // File-only (analyze_file / analyze_batch): ebur128, native_dynamics,
+    // amplitude_envelope. A key is present only when its value is defined.
+    for (key, value) in [
+        ("ebur128_integrated_lufs", r.ebur128_integrated_lufs),
+        ("ebur128_momentary_max_lufs", r.ebur128_momentary_max_lufs),
+        ("ebur128_short_term_max_lufs", r.ebur128_short_term_max_lufs),
+        ("ebur128_range_lu", r.ebur128_range_lu),
+        ("ebur128_true_peak_dbtp", r.ebur128_true_peak_dbtp),
+        ("sample_peak_dbfs", r.sample_peak_dbfs),
+        ("crest_factor_db", r.crest_factor_db),
+        ("crest_factor_frame_mean_db", r.crest_factor_frame_mean_db),
+        ("amplitude_envelope_hop_sec", r.amplitude_envelope_hop_sec),
+        (
+            "amplitude_envelope_frame_sec",
+            r.amplitude_envelope_frame_sec,
+        ),
+    ] {
+        if let Some(v) = value {
+            d.set_item(key, v)?;
+        }
+    }
+    if let Some(v) = r.native_sample_rate {
+        d.set_item("native_sample_rate", v)?;
+    }
+    if let Some(ref v) = r.amplitude_envelope {
+        d.set_item("amplitude_envelope", v.clone())?;
+    }
     d.set_item("spectral_centroid_mean", r.spectral_centroid_mean)?;
     d.set_item("zero_crossing_rate", r.zero_crossing_rate)?;
     d.set_item("onset_density", r.onset_density)?;
@@ -983,6 +1010,43 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         loudness_curve: opt_field!(cached, "loudness_curve", Vec<f32>, "a list of floats"),
         loudness_momentary_max_db: opt_field!(cached, "loudness_momentary_max_db", f32, "a float"),
         loudness_range_lu: opt_field!(cached, "loudness_range_lu", f32, "a float"),
+        ebur128_integrated_lufs: opt_field!(cached, "ebur128_integrated_lufs", f32, "a float"),
+        ebur128_momentary_max_lufs: opt_field!(
+            cached,
+            "ebur128_momentary_max_lufs",
+            f32,
+            "a float"
+        ),
+        ebur128_short_term_max_lufs: opt_field!(
+            cached,
+            "ebur128_short_term_max_lufs",
+            f32,
+            "a float"
+        ),
+        ebur128_range_lu: opt_field!(cached, "ebur128_range_lu", f32, "a float"),
+        ebur128_true_peak_dbtp: opt_field!(cached, "ebur128_true_peak_dbtp", f32, "a float"),
+        native_sample_rate: opt_field!(cached, "native_sample_rate", u32, "an int"),
+        sample_peak_dbfs: opt_field!(cached, "sample_peak_dbfs", f32, "a float"),
+        crest_factor_db: opt_field!(cached, "crest_factor_db", f32, "a float"),
+        crest_factor_frame_mean_db: opt_field!(
+            cached,
+            "crest_factor_frame_mean_db",
+            f32,
+            "a float"
+        ),
+        amplitude_envelope: opt_field!(cached, "amplitude_envelope", Vec<f32>, "a list of floats"),
+        amplitude_envelope_hop_sec: opt_field!(
+            cached,
+            "amplitude_envelope_hop_sec",
+            f32,
+            "a float"
+        ),
+        amplitude_envelope_frame_sec: opt_field!(
+            cached,
+            "amplitude_envelope_frame_sec",
+            f32,
+            "a float"
+        ),
         spectral_centroid_mean: core_field!(cached, "spectral_centroid_mean", f32, "a float", 0.0),
         zero_crossing_rate: core_field!(cached, "zero_crossing_rate", f32, "a float", 0.0),
         onset_density: core_field!(cached, "onset_density", f32, "a float", 0.0),

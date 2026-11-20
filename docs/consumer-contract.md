@@ -213,6 +213,38 @@ with `spectral_texture`: present exactly when it is, refilled by
 `augment_analysis` with it. They need the audio (class `C`) and are not embedding
 evidence.
 
+File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
+additive keys, existing values unchanged). Three opt-in features, never computed
+by a mode, measure the file's own channels at its own sample rate instead of the
+mono mix at the analysis rate, so only `analyze_file` / `analyze_batch` emit
+them; `analyze_signal` never does, even when they are requested.
+`features=["ebur128"]` adds `ebur128_integrated_lufs`,
+`ebur128_momentary_max_lufs`, `ebur128_short_term_max_lufs` (LUFS),
+`ebur128_range_lu` (LU) and `ebur128_true_peak_dbtp` (dBTP): ITU-R BS.1770-5 /
+EBU Tech 3341 and 3342, with K-weighting for the file's rate, channel weights
+and both gates (the true peak has the EBU Tech 3341 accuracy, +0.2 / −0.4 dB).
+`features=["native_dynamics"]` adds `sample_peak_dbfs`, `crest_factor_db`
+(track peak over the RMS of all samples of all channels) and
+`crest_factor_frame_mean_db` (mean per-frame crest
+factor over frames with RMS above −70 dBFS). `features=["amplitude_envelope"]`
+adds `amplitude_envelope` (max |x| over the channels per frame, linear) with
+`amplitude_envelope_hop_sec` (512/22050 s) and `amplitude_envelope_frame_sec`
+(2048/22050 s): the grid is fixed in seconds, so it is the same at every file
+rate, and frame `k` is centred at `k · hop`. A key is absent (`None` in Rust)
+when its value is undefined — digital silence, a file shorter than the
+400 ms / 3 s window, or (loudness only; the true peak is still reported) a file
+with more than six channels, whose layout the channel count does not determine
+(up to six are read in WAV order L R C LFE Ls Rs, LFE excluded) — so with the
+feature listed in `provenance.requested_features` and `native_sample_rate`
+present, a missing key means "measured, undefined", not "pending". Any of the
+three features sets `native_sample_rate` (Hz, int) when it measured a file, so
+a record without it (an `analyze_signal` result) was never measured. The
+envelope is always present for a measured file. The always-on `loudness_lufs` and the `loudness` group
+(`true_peak_db`, ...) are a different measurement (mono mix, analysis rate,
+ungated) and keep their values. The keys travel with their feature name and
+`augment_analysis` refills them from the audio path (class `A`); they are not
+embedding evidence.
+
 `mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
 schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`
 term even when `dissonance` was not requested, and emits it only when it was.

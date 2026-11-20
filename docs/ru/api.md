@@ -197,6 +197,9 @@ result = sonara.analyze_file("track.mp3", features=features)
 | `aggression` | `aggression_score`, `aggression_confidence`, `aggression_forcefulness`, `aggression_harshness`, `aggression_tension`, `aggression_rhythm` | Opt-in, Cargo feature | A |
 | `fingerprint` | `fingerprint`; Python добавляет `fingerprint_version` | Opt-in | A |
 | `loudness` | `true_peak_db`, `replaygain_db`, `loudness_curve`, `loudness_momentary_max_db`, `loudness_range_lu` | Opt-in | A |
+| `ebur128` | `ebur128_integrated_lufs`, `ebur128_momentary_max_lufs`, `ebur128_short_term_max_lufs`, `ebur128_range_lu`, `ebur128_true_peak_dbtp` | Opt-in, файловый вход | A |
+| `native_dynamics` | `sample_peak_dbfs`, `crest_factor_db`, `crest_factor_frame_mean_db` | Opt-in, файловый вход | A |
+| `amplitude_envelope` | `amplitude_envelope`, `amplitude_envelope_hop_sec`, `amplitude_envelope_frame_sec` | Opt-in, файловый вход | A |
 | `silence` | `leading_silence_sec`, `trailing_silence_sec` | Opt-in | C |
 | `key_candidates` | `key_candidates` | Opt-in | S |
 | `vocalness` | `vocalness` | Opt-in или модель | S* |
@@ -252,6 +255,14 @@ onset envelope, алгоритм темпа и DP-трекер находят у
 | `true_peak_db` | dBTP |
 | `replaygain_db`, `dynamic_range_db` | dB; разные физические величины |
 | `loudness_range_lu` | LU |
+| `ebur128_integrated_lufs`, `ebur128_momentary_max_lufs`, `ebur128_short_term_max_lufs` | LUFS по ITU-R BS.1770-5 / EBU Tech 3341: по каналам файла на его исходной частоте, со стробированием (−70 LUFS и −10 LU). В отличие от `loudness_lufs` (моно-сумма на частоте анализа, без стробирования). Окна 400 мс и 3 с. Каналы читаются в порядке WAV (L R C LFE Ls Rs, LFE не учитывается). Ключа нет при цифровой тишине, файле короче окна или более чем шести каналах (раскладка по числу каналов не определяется; true peak при этом остаётся) |
+| `ebur128_range_lu` | LU, диапазон громкости по EBU Tech 3342 |
+| `ebur128_true_peak_dbtp` | dBTP, максимум по каналам файла (4-кратная передискретизация); точность по допуску EBU Tech 3341, +0,2 / −0,4 дБ |
+| `native_sample_rate` | Гц, целое: исходная частота файла, на которой измерены эти три группы. Появляется при любом из трёх признаков, если файл измерен; есть ключ — отсутствующий уровень означает «величина не определена», нет ключа (результат `analyze_signal`) — измерения не было |
+| `sample_peak_dbfs` | dBFS: максимум модуля отсчёта по каналам файла, не по моно-сумме |
+| `crest_factor_db`, `crest_factor_frame_mean_db` | дБ. Первый — пик трека к RMS всех отсчётов всех каналов; второй — среднее покадрового пик-фактора по кадрам огибающей с RMS выше −70 dBFS |
+| `amplitude_envelope` | Список значений линейной амплитуды (выше 1 у float-файлов с перегрузкой): максимум модуля отсчёта по каналам в кадре. Сетка задана длительностью, а не числом отсчётов, поэтому одинакова для любой частоты файла; центр кадра `k` — в момент `k · amplitude_envelope_hop_sec` |
+| `amplitude_envelope_hop_sec`, `amplitude_envelope_frame_sec` | Секунды: шаг 512/22050 и длина кадра 2048/22050 |
 | `mfcc_mean`, `chroma_mean`, `spectral_contrast_mean` | Списки длиной 13, 12 и 7 в общем анализаторе |
 | `*_std`, `*_delta_mean`, `*_p10`, `*_p90`, `*_iqr` | Статистика по тем же кадрам, что и `_mean` (все кадры основного прохода, тишина включена), в единицах базового признака. `_std` — стандартное отклонение генеральной совокупности; `_delta_mean` — среднее модуля разности соседних кадров (за один шаг); квантили с линейной интерполяцией, `_iqr` = p75 − p25. Векторы — по коэффициентам и полосам `_mean`. `zero_crossing_rate_std` считается по кадрам 2048 отсчётов, тогда как сам `zero_crossing_rate` — по всему сигналу |
 | `spectral_skewness_mean`, `spectral_kurtosis_excess_mean`, `spectral_decrease_mean` | Безразмерные. Среднее только по кадрам, где величина определена: тихие кадры пропускаются, без таких кадров — 0.0. Асимметрия и эксцесс (минус 3) — моменты спектра модуля вокруг центроида, нормированные на bandwidth. Decrease (Peeters) отсчитывается от DC-бина, который для музыки ≈ 0, поэтому на деле измеряет взвешенный 1/k перевес низких частот. Не больше 1, обычно положителен; отрицателен, когда DC-бин силён (постоянное смещение сигнала или утечка самого низкого баса через окно) |

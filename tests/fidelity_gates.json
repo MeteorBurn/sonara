@@ -72,6 +72,24 @@
       "base_sha256": "cd6df58aca17a1d0b56beb30a4a38cdf7aaf38d8ba9341e634ba0275d32993bb",
       "head_sha256": "d1bb486a4718886f863883300be7f771e0793d448d4f68d031b59df211984dac",
       "reason": "add the __main__ driver the canonical runner needs; the registered suite previously exited 0 without executing a single test, and no analysis behavior changes"
+    },
+    {
+      "path": "sonara/src/core/audio.rs",
+      "base_sha256": "7b4b842e696069edf452ccf3dbcbab62137d32352eed9451f47ebfc0e80297b6",
+      "head_sha256": "e4aac3c14df81d694e1a0752ff2e66b8464b61962e63117c4a7f01f8569ef357",
+      "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19)"
+    },
+    {
+      "path": "sonara/src/native_dynamics.rs",
+      "base_sha256": null,
+      "head_sha256": "b292999aa13b533367a5d77eb4a3be3f73e667ac14baa04381e67855b71030a9",
+      "reason": "new module behind the opt-in file-only features ebur128, native_dynamics and amplitude_envelope; no existing field reads it; verified on the EBU Tech 3341/3342 and ITU-R BS.2217 sets (2026-11-19)"
+    },
+    {
+      "path": "tests/python/test_native_dynamics.py",
+      "base_sha256": null,
+      "head_sha256": "d6b041f863c55b1795e1462af4c79010ce4e2817271e1be60696483d84fc418c",
+      "reason": "tests for the new opt-in file-only features only; no existing analysis behavior changes"
     }
   ],
   "domains": {
@@ -268,6 +286,7 @@
         "sonara/src/feature/spectral.rs",
         "sonara/src/filters.rs",
         "sonara/src/loudness_ext.rs",
+        "sonara/src/native_dynamics.rs",
         "sonara/src/onset.rs",
         "sonara/src/segment.rs",
         "sonara/src/sequence.rs",
@@ -280,6 +299,7 @@
         "tests/python/test_api.py",
         "tests/python/test_batch_errors.py",
         "tests/python/test_loudness.py",
+        "tests/python/test_native_dynamics.py",
         "tests/python/test_onset_bands.py",
         "tests/python/test_structure.py"
       ],

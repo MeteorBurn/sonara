@@ -361,6 +361,39 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   "loudness_momentary_max_db"   — max momentary (400 ms) loudness, dB
 #   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU
 
+# --- ebur128 / native_dynamics / amplitude_envelope ---
+# File-only, opt-in via features=[...] (no mode computes them): measured by
+# analyze_file / analyze_batch on the file's own channels at its own sample
+# rate, not on the mono mix at the analysis rate. analyze_signal never emits
+# them. A key is absent when its value is undefined (digital silence, file
+# shorter than the measurement window). The older loudness_lufs / true_peak_db
+# (mono, analysis rate, ungated) are unchanged.
+# features=["ebur128"] — ITU-R BS.1770-5 / EBU Tech 3341, 3342, all float.
+# Channels are read in WAV order (L R C LFE Ls Rs, LFE excluded); a file with
+# more than 6 channels gets no loudness keys (unknown layout), only the peak:
+#   "ebur128_integrated_lufs"      — gated programme loudness, LUFS
+#   "ebur128_momentary_max_lufs"   — max momentary (400 ms) loudness, LUFS
+#   "ebur128_short_term_max_lufs"  — max short-term (3 s) loudness, LUFS
+#   "ebur128_range_lu"             — loudness range (LRA), LU
+#   "ebur128_true_peak_dbtp"       — true peak over the channels, dBTP (4x);
+#                                    EBU Tech 3341 accuracy, +0.2 / -0.4 dB
+# Any of the three features also sets:
+#   "native_sample_rate"           — int, sample rate of the file, Hz. Present
+#                                    means "measured from a file", so a missing
+#                                    level is undefined, not unmeasured
+# features=["native_dynamics"]:
+#   "sample_peak_dbfs"             — max |x| over the file's channels, dBFS
+#   "crest_factor_db"              — track peak / RMS of all samples, dB
+#   "crest_factor_frame_mean_db"   — mean per-frame crest factor, dB, over
+#                                    envelope frames with RMS above -70 dBFS
+# features=["amplitude_envelope"]:
+#   "amplitude_envelope"           — List[float], max |x| over the channels in
+#                                    each frame (linear amplitude; above 1
+#                                    for float files with overs); frame k is
+#                                    centred at k * amplitude_envelope_hop_sec
+#   "amplitude_envelope_hop_sec"   — hop, seconds (512/22050)
+#   "amplitude_envelope_frame_sec" — frame length, seconds (2048/22050)
+
 # --- frame statistics ---
 # Spread, frame-to-frame change and quantiles of the per-frame values behind the
 # `_mean` fields, over the same frames (all main-pass frames, silence included).

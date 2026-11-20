@@ -22,6 +22,7 @@ STANDARD_TESTS = (
     "test_aggression_semantic",
     "test_fingerprint",
     "test_loudness",
+    "test_native_dynamics",
     "test_misc_features",
     "test_genre",
     "test_vocalness_model",

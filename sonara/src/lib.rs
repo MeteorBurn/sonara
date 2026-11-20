@@ -17,6 +17,7 @@ pub mod fingerprint;
 pub mod genre;
 pub mod loudness_ext;
 mod mood;
+pub mod native_dynamics;
 pub mod onset;
 pub mod perceptual;
 pub mod rhythmic_regularity;
