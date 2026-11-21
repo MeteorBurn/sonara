@@ -1,127 +1,44 @@
-# Project instructions
+# Sonara project instructions
 
-This is the single instruction entry point for Sonara, the MeteorBurn fork of
-`kkollsga/sonara`. Codex reads this file directly; Claude Code loads it through
-`CLAUDE.md`, which only imports it (`@AGENTS.md`). Do not add nested `AGENTS.md` or
-`CLAUDE.md` files: neither agent loads them reliably. Layer-specific instructions live in
-`dev-docs/agent-guides/`; read them only when the matching task needs them. Keep this file
-current by replacing obsolete guidance rather than layering rules.
+Sonara is the MeteorBurn fork of `kkollsga/sonara`, a Rust MIR library with a fused track analyzer and PyO3/Maturin bindings (`import sonara`). Apply the standing rules below to every task. Elsewhere, a rule is required when its stated condition holds. Defaults describe the usual starting point.
 
-## OVERVIEW
+## Standing rules
 
-Sonara is a Rust music-information-retrieval library (librosa-style DSP plus a fused
-single-pass track analyzer) with PyO3/Maturin bindings (`import sonara`). The fork (0.3.7)
-adds BPM fixes, opt-in rhythm features (`onset_bands`, `rhythmic_regularity`), Symphonia
-pinned to `=0.6.1` and a patched vendored Hound.
-
-## TASK-BASED READING
-
-Apply the rules below to every task. Before the matching work, read the relevant guide(s).
-Combine routes when a task crosses layers; do not read all guides or the whole README at
-session start. `dev-docs/` is git-ignored, so the guides and plans exist only in the
-maintainer's checkout. If a required guide is unavailable, report it and keep the dependent
-work unverified rather than inventing its instructions.
-
-| Task | Read before acting |
-| --- | --- |
-| Explore or change repository code; locate unfamiliar code | [Graphify](dev-docs/agent-guides/graphify.md), [Architecture](dev-docs/agent-guides/architecture.md) |
-| Core crate `sonara/`: features, fused pass, augment, cargo features, embedded models, `sonara/src/core/` DSP | [Rust core](dev-docs/agent-guides/rust-core.md) |
-| Binding `sonara-python/`, facade `python/sonara/`, `.pyi` stub, signatures, result dict shape | [Python API](dev-docs/agent-guides/python-api.md) |
-| Select checks; change `tests/`, fixtures, runners or `scripts/` gates | [Verification](dev-docs/agent-guides/verification.md) |
-| Detection or numeric behavior; `tests/fidelity_gates.json`; reference data | [Accuracy](dev-docs/agent-guides/accuracy.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
-| Stored-result meaning, schema versions, similarity layout | [docs/consumer-contract.md](docs/consumer-contract.md) |
-| Build a wheel or library; cut a fork release; Symphonia or Hound setup | [Build and release](dev-docs/agent-guides/build-release.md) |
-| Commit, push or PR (on request); upstream sync; downstream adoption; builds, data refreshes or benchmarks | [Git and upstream](dev-docs/agent-guides/git-upstream.md) |
-| Benchmarks and research harnesses in `dev-docs/bench/` (upstream's and ours) | [Research harnesses](dev-docs/agent-guides/research-harnesses.md) |
-| Agent instructions, guides, skills or hooks; workflow skills in `workflow/`; Spec Kit; `dev-docs/` layout | [Agent layer](dev-docs/agent-guides/agent-layer.md) |
-| Inspect or query SQLite data | [SQLite](dev-docs/agent-guides/sqlite-toolkit.md) |
-| Open threads and plans | [dev-docs/todos.md](dev-docs/todos.md) |
-| Need product/setup orientation | Relevant sections of [README.md](README.md) |
-
-## EXECUTION AND SCOPE
-
-- Inspect `git status --short` and the relevant diff before editing; preserve unrelated
-  work.
-- Commits, branches, pushes and PRs happen only on explicit request. Never force-push
-  `origin`. `upstream` (`kkollsga/sonara`) has push disabled; absorb it with a merge commit,
-  never a fast-forward. CI `publish` is gated to `kkollsga/sonara`, so pushes here never
-  reach PyPI; nothing is published to crates.io or PyPI from this fork.
-- This file overrides `workflow/skills/`: their branch, PR and push steps need explicit
-  authorization. The `CLAUDE.md`/`AGENTS.md` resync in `dev-docs-cleanup` does not apply:
-  this file is the authority and `CLAUDE.md` only imports it.
-- Where content belongs: upstream's code, Python wrapper, tests and docs stay where
-  `kkollsga/sonara` keeps them. `README.md` is the library description as upstream wrote it
-  plus this fork's features, without plans. `docs/` is user documentation only (English and
-  `docs/ru/`). `dev-docs/` is the single home of everything else of ours: agent guides,
-  plans, designs, notes, benchmarks with their datasets, patch kits, builds and tool
-  environments; no `locals/` or root `benchmarks/`. `CHANGELOG.md` records shipped work only.
-- Text files are UTF-8 with em-dashes and arrows that some consoles print as `-` or `?`, and
-  PowerShell may show Cyrillic as mojibake; check codepoints before "fixing" text.
-
-## CONVENTIONS
-
-- `Float = f32` throughout. Sample rate is always an explicit argument; no global SR.
-- Opt-in families (`onset_bands`, `beatgrid`, `rhythmic_regularity`, ...) are never
-  computed by a mode, only via `features=[...]`.
-- Additive fields ship without an `ANALYSIS_SCHEMA_VERSION` bump; bump only when existing
-  meaning or units change. Consumers key freshness per feature.
-- Abstention is `None` with confidence kept: a stored `None` regularity score means
-  "measured, undecidable", not "pending".
-- Rust unit tests sit inline at the bottom of each module. Python suite files run as plain
-  scripts (`python <file>`): pytest-style `def test_*` with no driver runs nothing and still
-  exits 0.
-- Versions move together in `sonara/Cargo.toml`, `sonara-python/Cargo.toml` and
-  `pyproject.toml`, only via the release procedure.
-- Wheel floor is abi3 `cp310`; repo tooling needs Python >= 3.11 (`tomllib`).
-
-## ANTI-PATTERNS
-
-- A feature that runs its own STFT: reuse the fused pass in `analyze_signal_inner`.
-- PyO3/NumPy, or an ML runtime in default features, inside `sonara/`: contract boundary;
-  downstream must be notified first.
-- Reinterpreting a similarity/fingerprint layout without a version bump. Bumping
-  `SIMILARITY_VERSION` also invalidates every genre/vocalness/aggression model.
-- Running pytest directly: `scripts/run_python_tests.py` runs the contract checks CI gates
-  on.
-- Trusting green `cargo test -p sonara` for aggression code or `FEATURE_REGISTRY`: the
-  binding always enables `aggression`; run the feature build too.
-- Static ACF score-ratio rules for tempo: they fix some rows and regress House/Techno
-  controls.
-- Committing audio, generated benchmark output, or sealed labels.
-- Rewriting `BUILD-METADATA.md` for an unpublished build: it records the latest published
-  fork release and its wheel hash.
-- Timing analysis through Python: benchmark with the Rust runner on real files.
-
-## VERIFICATION AND DELIVERY
-
-- Start at the smallest relevant check and widen only for shared APIs, cross-language
-  bindings, packaging, release risk or an observed failure. Canonical gates:
-  `cargo test -p sonara`, `cargo test -p sonara --features aggression` for aggression code
-  or `FEATURE_REGISTRY`, and `python scripts/run_python_tests.py` with the bindings built.
-- BPM, key and chord changes need before/after numbers on labeled data; a `blocked`
-  fidelity domain stops a change until evidence is supplied.
-- Report which checks ran, which did not and why; never present expected behavior as a
-  result. Leave no unexpected tracked changes.
+- Keep project instructions in this root file. If a root `CLAUDE.md` is used, its only content is `@AGENTS.md`. Never add nested instruction files or let a workflow skill resync the two files.
+- Before editing, inspect `git status --short` and the relevant diff. Preserve unrelated work. If UTF-8 text looks corrupted in the console, check its codepoints before editing it.
+- Create branches, commit, push or open PRs only on explicit request, including when following a workflow skill. Never force-push `origin`, push to `upstream`, or publish this fork to crates.io or PyPI. When syncing upstream, use a merge commit and disable fast-forward.
+- Never commit audio, generated benchmark output or sealed labels. At delivery, check for unexpected tracked changes and report what ran, what was skipped and why.
 
 ## graphify
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+- For a codebase question, when the local graph and CLI exist, run `& .\.tools\graphify\Scripts\graphify.exe query "<question>"` from the repo root in PowerShell before the first source search or read. Include this rule in any delegated code exploration. Here `graphify` means `.tools/graphify/Scripts/graphify.exe` (`graphifyy==0.9.112`). Never run the skill's interpreter detection or installation steps, or install Graphify globally.
+- Follow graph results or earlier reads to source lines. Use `path` for relationships, `explain` for symbols and `section` for indexed Markdown headings. Search unindexed files directly. For broad navigation, use `graphify-out/wiki/index.md` if present. Read `GRAPH_REPORT.md` only for broad architecture work or when focused queries are insufficient.
+- Skip graph navigation if the tools are absent, the task concerns incorrect or stale graph output, or the user opts out. Dirty graph files alone do not qualify. After code changes, run `graphify update .` when available. A tracked `graph.json` is rewritten in full on rebuild; preserve the rebuild and its hooks.
+- On an explicit `/graphify` request, consult the installed [Graphify skill](.claude/skills/graphify/SKILL.md) or the local [Graphify guide](dev-docs/agent-guides/graphify.md) first.
 
-`graphify` below means the project-local `.tools/graphify/Scripts/graphify.exe`
-(`graphifyy==0.9.112`); it is not on PATH. Never run the skill's install or
-interpreter-detection block and never install Graphify globally; project rules are in
-[Graphify](dev-docs/agent-guides/graphify.md).
+## Project documentation
 
-When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+- For setup, read the relevant [README](README.md) section. For numeric behavior or reference data, read [CONTRIBUTING.md](CONTRIBUTING.md). For stored fields, schema or similarity layout, read the [consumer contract](docs/consumer-contract.md). Local plans live under `dev-docs/plans/`. If required evidence or guidance is unavailable, identify the gap and leave the dependent conclusion unverified.
 
-Rules:
-- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. When the answer is under a Markdown heading, `graphify section "<heading>"` prints that section's text, so the .md need not be opened. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
-- A committed graphify-out/graph.json is rewritten whole on every build, so a large diff to it in a pull request is expected. Do not flag it as churn or suggest skipping the graph rebuild or its hooks.
+## Engineering contracts
 
-# graphify
-- **graphify** (`.claude/skills/graphify/SKILL.md`) - any input to knowledge graph. Trigger: `/graphify`
-When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+| When working on | Required behavior |
+| --- | --- |
+| DSP in `sonara/` | Use `Float = f32` and pass sample rate explicitly. When a new feature needs a spectrum, reuse the fused pass in `analyze_signal_inner`. Keep PyO3/NumPy out of the core crate and ML runtimes out of its default features. Any proposed boundary change requires prior downstream notification. |
+| Feature selection | Compute opt-in families such as `onset_bands`, `beatgrid` and `rhythmic_regularity` only through `features=[...]`. Preset modes must never enable them. |
+| Stored results | Bump `ANALYSIS_SCHEMA_VERSION` only when an existing field changes meaning or units. Additive fields use per-feature freshness. On abstention, keep confidence and store `None`; a stored `None` regularity score means the measurement was undecidable. |
+| Similarity or fingerprints | Bump the corresponding layout version when reinterpreting stored values. A `SIMILARITY_VERSION` bump invalidates the genre, vocalness and aggression models. |
+| Packaging or release | Change versions only during release, together in `sonara/Cargo.toml`, `sonara-python/Cargo.toml` and `pyproject.toml`. Wheels target abi3 `cp310`; repo tooling needs Python ≥ 3.11. The fork pins Symphonia to `=0.6.1` and uses a patched vendored Hound. Update `BUILD-METADATA.md` only for a published fork release. |
+| Adding files | Follow upstream layout for code, bindings and tests. Keep the library description in `README.md`, user documentation in `docs/` and `docs/ru/`, and shipped changes in `CHANGELOG.md`. Put fork development materials in `dev-docs/`, including plans and benchmark harnesses with their datasets. Never introduce `locals/` or a root `benchmarks/`. |
+
+## Choosing checks
+
+**Default:** Start with the smallest relevant check. Widen coverage for shared APIs, binding changes, packaging or release risk, or an observed failure.
+
+| Condition | Check |
+| --- | --- |
+| Rust core | Place unit tests at the bottom of their module. The full core gate is `cargo test -p sonara`. For aggression code or `FEATURE_REGISTRY` changes, also run `cargo test -p sonara --features aggression`; the Python binding always enables it. |
+| Python API or bindings | For contract tests on Windows, build the bindings and run `.\.venv\Scripts\python.exe scripts/run_python_tests.py` from the repo root using the project environment. Suite files run as plain scripts: a bare pytest-style function without a driver silently runs zero tests. |
+| BPM, key or chord behavior | Require before/after numbers on labeled data. A `blocked` domain in `tests/fidelity_gates.json` stops the change until evidence is supplied. For tempo, avoid static ACF score-ratio rules that regress House/Techno controls. |
+| Analysis timing | Benchmark the Rust runner on real files. |
+| Independent feature checks on the maintainer's Windows machine | Use the shared `audio-python` from `C:\Tools\audio` for independent comparisons with librosa and pyloudnorm. Both Essentia executables, `ffmpeg` and `ffprobe` are on PATH. For native dynamics, run `audio-python dev-docs/bench/scripts/native-dynamics/verify.py ebu` from the repo root with bindings built. Use `itu` for BS.2217 or `tracks` to regenerate the 60-track report. |
