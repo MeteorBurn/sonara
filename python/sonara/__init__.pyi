@@ -449,6 +449,25 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                                 top 50, sorted by frequency); depends on that
 #                                 peak picking; frames with < 2 peaks skipped
 
+# --- mel bands --- features=["mel_bands"] (also playlist/full modes)
+# Track summary of the main pass's log-mel spectrogram (MIR_FEATURES group 4.1),
+# the matrix the MFCCs and the onset envelopes are computed from: 128 Slaney mel
+# bands over 0..sr/2 (area-normalized triangles on |X|^2, n_fft 2048, hop 512,
+# Hann), 10*log10 with a 1e-10 power floor, then floored at the track's loudest
+# cell - 80 dB (librosa power_to_db(ref=1.0, amin=1e-10, top_db=80)). Statistics
+# run over every main-pass frame, silence included. Band centres:
+# mel_frequencies(n_mels=130, fmin=0, fmax=sr/2)[1:129].
+#   mel_bands_mean      List[float] (128), dB, low band first — per-band mean of
+#                       the dB values, not the dB of the mean power; mfcc_mean
+#                       is the first 13 coefficients of its orthonormal DCT-II
+#   mel_bands_std       List[float] (128), dB — per-band population std (ddof 0)
+#                       over the same frames; unchanged by a gain change
+#   mel_bands_floor_db  float, dB — the lowest value a cell can take: the loudest
+#                       cell - 80 dB, or -100 dB (the power floor) when that
+#                       is higher, as on silence; a band whose mean is within
+#                       about 1 dB of it holds no content above the floor; a
+#                       gain change shifts it and every mean by the same dB
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

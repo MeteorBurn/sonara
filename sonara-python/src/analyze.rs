@@ -174,6 +174,8 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         ("spectral_crest_mean", r.spectral_crest_mean),
         ("spectral_entropy_mean", r.spectral_entropy_mean),
         ("spectral_irregularity_mean", r.spectral_irregularity_mean),
+        // Mel bands (MIR_FEATURES group 4.1): travel with `mel_bands`.
+        ("mel_bands_floor_db", r.mel_bands_floor_db),
     ] {
         if let Some(v) = value {
             d.set_item(key, v)?;
@@ -185,6 +187,8 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         ("mfcc_delta_mean", &r.mfcc_delta_mean),
         ("chroma_std", &r.chroma_std),
         ("chroma_delta_mean", &r.chroma_delta_mean),
+        ("mel_bands_mean", &r.mel_bands_mean),
+        ("mel_bands_std", &r.mel_bands_std),
     ] {
         if let Some(v) = value {
             d.set_item(key, v.clone())?;
@@ -1135,6 +1139,9 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
             f32,
             "a float"
         ),
+        mel_bands_mean: opt_field!(cached, "mel_bands_mean", Vec<f32>, "a list of floats"),
+        mel_bands_std: opt_field!(cached, "mel_bands_std", Vec<f32>, "a list of floats"),
+        mel_bands_floor_db: opt_field!(cached, "mel_bands_floor_db", f32, "a float"),
         tempo_curve: opt_field!(cached, "tempo_curve", Vec<f32>, "a list of floats"),
         tempo_variability: opt_field!(cached, "tempo_variability", f32, "a float"),
         time_signature: opt_field!(cached, "time_signature", String, "a string"),

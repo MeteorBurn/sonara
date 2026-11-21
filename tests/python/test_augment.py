@@ -126,6 +126,20 @@ def _spectral_texture_keys():
 
 test("spectral_texture ships in playlist mode and on request", _spectral_texture_keys)
 
+MEL_BANDS = {"mel_bands_mean", "mel_bands_std", "mel_bands_floor_db"}
+
+
+def _mel_bands_keys():
+    assert MEL_BANDS <= set(REC_PLAYLIST), sorted(MEL_BANDS - set(REC_PLAYLIST))
+    assert not MEL_BANDS & set(REC_COMPACT), sorted(MEL_BANDS & set(REC_COMPACT))
+    assert len(REC_PLAYLIST["mel_bands_mean"]) == 128
+    assert len(REC_PLAYLIST["mel_bands_std"]) == 128
+    only = sonara.analyze_signal(_y, sr=SR, features=["mel_bands"])
+    assert {k: only[k] for k in MEL_BANDS} == {k: REC_PLAYLIST[k] for k in MEL_BANDS}
+
+
+test("mel_bands ships in playlist mode and on request", _mel_bands_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(

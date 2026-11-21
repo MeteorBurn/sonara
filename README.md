@@ -151,6 +151,9 @@ r['spectral_flux_std']         # of the normalized spectrum (0..1) and its std,
 r['spectral_crest_mean']       # peakiness max/mean |X| (>= 1),
 r['spectral_entropy_mean']     # spectral entropy (0 tonal .. 1 flat),
 r['spectral_irregularity_mean']  # Jensen irregularity of the spectral peaks
+r['mel_bands_mean']            # Mel bands (fork): per-band mean and std of the
+r['mel_bands_std']             # log-mel spectrogram in dB (128 values each),
+r['mel_bands_floor_db']        # and its dB floor (loudest cell - 80 dB, >= -100)
 
 # Frame statistics (fork): how the per-frame values behind the _mean fields move.
 # Same frames as the means; each key comes with its base feature.

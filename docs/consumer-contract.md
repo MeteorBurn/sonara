@@ -213,6 +213,33 @@ with `spectral_texture`: present exactly when it is, refilled by
 `augment_analysis` with it. They need the audio (class `C`) and are not embedding
 evidence.
 
+Mel bands (2026-11-21, MeteorBurn fork, no schema bump: additive keys,
+existing values unchanged). The `mel_bands` group (playlist/full, or
+`features=["mel_bands"]`) adds `mel_bands_mean`, `mel_bands_std` (128 values
+each, dB, low band first) and `mel_bands_floor_db` (dB). They summarize the main
+pass's log-mel spectrogram, the very matrix the MFCCs and the onset envelopes
+are computed from: 128 Slaney mel bands over 0..sr/2 (area-normalized triangles
+applied to the power spectrum |X|², n_fft 2048, hop 512, Hann), converted with
+10·log10 with a 1e-10 power floor, then floored at the track's loudest cell
+minus 80 dB (librosa `power_to_db(ref=1.0, amin=1e-10, top_db=80)`).
+`mel_bands_mean` is the per-band mean of the dB values over all main-pass frames
+(silence included): the mean of dB, not the dB of the mean power (on music the
+two differ by about 9 dB median). Averaging dB reads bands that span fewer FFT
+bins lower: on white noise the narrow low bands sit 1–1.3 dB below the top
+ones, so absolute levels of different bands compare only to about 1 dB.
+`mfcc_mean` equals the first 13 coefficients
+of the orthonormal DCT-II of this vector. `mel_bands_std` is the per-band
+population std (ddof 0) over the same frames. `mel_bands_floor_db` is the lowest
+value a cell can take: the loudest cell − 80 dB, or −100 dB (the power floor)
+when that is higher, as on silence. A band whose mean is within about 1 dB of
+it holds no content above the floor; exact equality is rare because edge frames
+lift the mean slightly. A gain change shifts every mean and the floor by the
+same dB and leaves the std unchanged. Band centre frequencies are
+`sonara.mel_frequencies(n_mels=130, fmin=0, fmax=sr/2)[1:129]`. The three keys
+travel with `mel_bands`: present exactly when it is, refilled by
+`augment_analysis` with it. They need the audio (class `C`) and are not embedding
+evidence.
+
 File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
 additive keys, existing values unchanged). Three opt-in features, never computed
 by a mode, measure the file's own channels at its own sample rate instead of the

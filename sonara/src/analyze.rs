@@ -478,6 +478,8 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("chroma", true, false, false, C, &[]),
     feature("spectral_shape", true, false, false, C, &[]),
     feature("spectral_texture", true, false, false, C, &[]),
+    // Reads the log-mel matrix every pass builds, so it needs no extended pass.
+    feature("mel_bands", false, false, false, C, &[]),
     feature("chords", true, false, false, C, &[]),
     feature("dissonance", true, false, false, C, &[]),
     feature(
@@ -1017,6 +1019,8 @@ pub(crate) const HOP_LENGTH: usize = 512;
 const N_CONTRAST_BANDS: usize = 6;
 /// Number of MFCC coefficients.
 const N_MFCC: usize = 13;
+/// Dynamic range kept in the log-mel matrix below its loudest cell, in dB.
+const MEL_TOP_DB: Float = 80.0;
 /// Number of HPCP harmonics.
 const N_HPCP_HARMONICS: usize = 4;
 /// Max spectral peaks for HPCP/dissonance.
@@ -1362,6 +1366,30 @@ pub struct TrackAnalysis {
     /// picking. Defined for frames with ≥ 2 peaks.
     pub spectral_irregularity_mean: Option<Float>,
     // --- end spectral texture ---
+
+    // --- mel bands ---
+    // Track summary of the main pass's log-mel spectrogram (MIR_FEATURES group
+    // 4.1), computed with `mel_bands` (playlist/full, or
+    // `features=["mel_bands"]`). It is the matrix the MFCCs and the onset
+    // envelopes are taken from: 128 Slaney mel bands over 0..sr/2
+    // (area-normalized triangles on |X_k|²), 10·log10 with a 1e-10 power
+    // floor, then floored at the track's loudest cell − 80 dB. Statistics run
+    // over every main-pass frame, silence included.
+    /// dB, 128 values, low band first (centres `mel_frequencies(130, 0,
+    /// sr/2)[1..129]`). Per-band mean of the dB values, not the dB of the mean
+    /// power. `mfcc_mean` is the first 13 coefficients of this vector's
+    /// orthonormal DCT-II.
+    pub mel_bands_mean: Option<Vec<Float>>,
+    /// dB, 128 values. Per-band population standard deviation (ddof 0) over
+    /// the same frames. A gain change shifts every mean and the floor by the
+    /// same dB and leaves this unchanged (while the floor is above −100 dB).
+    pub mel_bands_std: Option<Vec<Float>>,
+    /// dB. The lowest value a cell can take: the loudest cell − 80 dB, or
+    /// −100 dB (the 1e-10 power floor) when that is higher, as on silence. A
+    /// band whose mean is within about 1 dB of it holds nothing above the
+    /// floor; exact equality is rare, edge frames lift the mean slightly.
+    pub mel_bands_floor_db: Option<Float>,
+    // --- end mel bands ---
 
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
@@ -2646,7 +2674,28 @@ fn analyze_signal_inner(
     // ONSET STRENGTH from mel spectrogram (no additional FFT)
     // ================================================================
 
-    let s_db = spectrum::power_to_db(mel_spec.view(), 1.0, 1e-10, Some(80.0));
+    let s_db = spectrum::power_to_db(mel_spec.view(), 1.0, 1e-10, Some(MEL_TOP_DB));
+
+    // Mel bands (group 4.1): per-band mean / std of the dB matrix over all
+    // frames, plus the lowest value a cell can take: the `power_to_db` clamp
+    // (loudest cell − top_db), or its −100 dB power floor when that is higher.
+    let (mel_bands_mean, mel_bands_std, mel_bands_floor_db) = if config.wants("mel_bands") {
+        let mean: Vec<Float> = s_db
+            .rows()
+            .into_iter()
+            .map(|row| (row.iter().map(|&v| v as f64).sum::<f64>() / n_frames as f64) as Float)
+            .collect();
+        let std: Vec<Float> = s_db
+            .rows()
+            .into_iter()
+            .map(|row| series_std(row.as_slice().unwrap()))
+            .collect();
+        let peak = s_db.iter().copied().fold(Float::NEG_INFINITY, Float::max);
+        (Some(mean), Some(std), Some((peak - MEL_TOP_DB).max(-100.0)))
+    } else {
+        (None, None, None)
+    };
+
     // Tempo and its candidates follow the broadband envelope, the beat tracker
     // the mel bins below 3.2 kHz, and downbeats weigh the kick (below 200 Hz)
     // against the snare body (200-800 Hz): one loop, no onset bands needed.
@@ -3588,6 +3637,9 @@ fn analyze_signal_inner(
         spectral_crest_mean: texture_means[1],
         spectral_entropy_mean: texture_means[2],
         spectral_irregularity_mean: texture_means[3],
+        mel_bands_mean,
+        mel_bands_std,
+        mel_bands_floor_db,
         tempo_curve,
         tempo_variability,
         time_signature,
@@ -3795,6 +3847,11 @@ fn suppress_unrequested_spectral_summaries(result: &mut TrackAnalysis, config: &
         result.spectral_crest_mean = None;
         result.spectral_entropy_mean = None;
         result.spectral_irregularity_mean = None;
+    }
+    if !config.emits("mel_bands") {
+        result.mel_bands_mean = None;
+        result.mel_bands_std = None;
+        result.mel_bands_floor_db = None;
     }
 }
 
@@ -4534,6 +4591,11 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.spectral_entropy_mean = fresh.spectral_entropy_mean;
             out.spectral_irregularity_mean = fresh.spectral_irregularity_mean;
         }
+        "mel_bands" => {
+            out.mel_bands_mean = fresh.mel_bands_mean.clone();
+            out.mel_bands_std = fresh.mel_bands_std.clone();
+            out.mel_bands_floor_db = fresh.mel_bands_floor_db;
+        }
         "chords" => {
             out.chord_sequence = fresh.chord_sequence.clone();
             out.chord_events = fresh.chord_events.clone();
@@ -5018,6 +5080,7 @@ mod tests {
             "chroma",
             "spectral_shape",
             "spectral_texture",
+            "mel_bands",
             "chords",
             "dissonance",
             "energy",
@@ -7589,6 +7652,123 @@ mod tests {
             spectral_texture_fields(&fresh)
         );
         assert!(out.spectral_crest_mean.is_some());
+    }
+
+    // --- mel bands ---
+
+    /// Two tones with a loud second half: bands that move and bands at the floor.
+    fn mel_bands_signal() -> Array1<Float> {
+        let sr = 22050.0;
+        Array1::from_shape_fn(22050 * 3, |i| {
+            let t = i as Float / sr;
+            let gain = if t < 1.5 { 0.05 } else { 0.8 };
+            gain * ((2.0 * PI * 220.0 * t).sin() + 0.5 * (2.0 * PI * 3000.0 * t).sin())
+        })
+    }
+
+    #[test]
+    fn test_mel_bands_presence_follows_requests() {
+        let y = mel_bands_signal();
+        let c = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        assert!(c.mel_bands_mean.is_none() && c.mel_bands_std.is_none());
+        assert!(c.mel_bands_floor_db.is_none());
+        let p = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        let (mean, std) = (
+            p.mel_bands_mean.as_ref().unwrap(),
+            p.mel_bands_std.as_ref().unwrap(),
+        );
+        assert_eq!((mean.len(), std.len()), (128, 128));
+        let floor = p.mel_bands_floor_db.unwrap();
+        assert!(mean.iter().all(|&v| v.is_finite() && v >= floor));
+        assert!(std.iter().all(|&v| v.is_finite() && v >= 0.0));
+        let m = analyze_signal(y.view(), 22050, &feature_config(&["mfcc"])).unwrap();
+        assert!(m.mel_bands_mean.is_none() && m.mel_bands_floor_db.is_none());
+        // On its own it needs no extended pass and reads the same matrix.
+        let only = feature_config(&["mel_bands"]);
+        assert!(!only.needs_extended());
+        let s = analyze_signal(y.view(), 22050, &only).unwrap();
+        assert_eq!(s.mel_bands_mean, p.mel_bands_mean);
+        assert_eq!(s.mel_bands_std, p.mel_bands_std);
+        assert_eq!(s.mel_bands_floor_db, p.mel_bands_floor_db);
+        assert!(s.mfcc_mean.is_none());
+    }
+
+    #[test]
+    fn test_mel_bands_mean_is_the_pre_dct_mfcc_mean() {
+        let r = analyze_signal(mel_bands_signal().view(), 22050, &playlist()).unwrap();
+        let mean = r.mel_bands_mean.unwrap();
+        let n = mean.len() as f64;
+        // Orthonormal DCT-II of the band means reproduces mfcc_mean.
+        for (k, &mfcc) in r.mfcc_mean.unwrap().iter().enumerate() {
+            let scale = if k == 0 {
+                (1.0 / n).sqrt()
+            } else {
+                (2.0 / n).sqrt()
+            };
+            let c: f64 = mean
+                .iter()
+                .enumerate()
+                .map(|(m, &v)| {
+                    let angle =
+                        std::f64::consts::PI * k as f64 * (2.0 * m as f64 + 1.0) / (2.0 * n);
+                    v as f64 * angle.cos()
+                })
+                .sum::<f64>()
+                * scale;
+            assert!((c - mfcc as f64).abs() < 0.02, "mfcc[{k}]: {c} vs {mfcc}");
+        }
+        // 13 of 128 orthonormal coefficients cannot hold more variance than the bands.
+        let energy = |v: &[Float]| v.iter().map(|&s| (s as f64).powi(2)).sum::<f64>();
+        let (mfcc_var, mel_var) = (
+            energy(&r.mfcc_std.unwrap()),
+            energy(&r.mel_bands_std.unwrap()),
+        );
+        assert!(
+            mfcc_var > 0.0 && mfcc_var <= mel_var * 1.0001,
+            "{mfcc_var} vs {mel_var}"
+        );
+    }
+
+    #[test]
+    fn test_mel_bands_gain_shifts_mean_and_floor_not_std() {
+        let y = mel_bands_signal();
+        let half = y.mapv(|v| 0.5 * v);
+        let config = feature_config(&["mel_bands"]);
+        let a = analyze_signal(y.view(), 22050, &config).unwrap();
+        let b = analyze_signal(half.view(), 22050, &config).unwrap();
+        let shift = 20.0 * 0.5_f32.log10(); // -6.02 dB
+        let floor_shift = b.mel_bands_floor_db.unwrap() - a.mel_bands_floor_db.unwrap();
+        assert!((floor_shift - shift).abs() < 1e-3, "{floor_shift}");
+        let (am, bm) = (a.mel_bands_mean.unwrap(), b.mel_bands_mean.unwrap());
+        let (asd, bsd) = (a.mel_bands_std.unwrap(), b.mel_bands_std.unwrap());
+        for m in 0..128 {
+            assert!((bm[m] - am[m] - shift).abs() < 1e-3, "mean[{m}]");
+            assert!((bsd[m] - asd[m]).abs() < 1e-3, "std[{m}]");
+        }
+        // The level step moves the tone bands; bands with no content sit at the floor.
+        assert!(asd.iter().any(|&s| s > 5.0));
+        let floor = a.mel_bands_floor_db.unwrap();
+        assert!(am.iter().zip(&asd).any(|(&m, &s)| m == floor && s == 0.0));
+    }
+
+    #[test]
+    fn test_mel_bands_silence_and_augment_merge() {
+        // Silence: every cell is the 1e-10 power floor (-100 dB); the reported floor is
+        // that value, not the lower -180 dB clamp, so empty bands still sit on it.
+        let z = Array1::<Float>::zeros(22050 * 2);
+        let r = analyze_signal(z.view(), 22050, &playlist()).unwrap();
+        assert_eq!(r.mel_bands_mean, Some(vec![-100.0; 128]));
+        assert_eq!(r.mel_bands_std, Some(vec![0.0; 128]));
+        assert_eq!(r.mel_bands_floor_db, Some(-100.0));
+
+        let y = mel_bands_signal();
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        merge_feature_fields(&mut out, &fresh, "mel_bands");
+        assert!(out.mel_bands_mean.is_some());
+        assert_eq!(out.mel_bands_mean, fresh.mel_bands_mean);
+        assert_eq!(out.mel_bands_std, fresh.mel_bands_std);
+        assert_eq!(out.mel_bands_floor_db, fresh.mel_bands_floor_db);
     }
 
     // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---
