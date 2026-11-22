@@ -468,6 +468,37 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                       about 1 dB of it holds no content above the floor; a
 #                       gain change shifts it and every mean by the same dB
 
+# --- tuning --- features=["tuning"] (also playlist/full modes)
+# Deviation of the recording's tuning from A4 = 440 Hz (MIR_FEATURES group 5.2),
+# by the weighted circular mean of Dressler & Streich (ISMIR 2007). In every
+# main-pass frame (n_fft 2048, hop 512, Hann) the 10 strongest spectral peaks
+# with bin centre in 150..5000 Hz are taken (peaks at or below -80 dB of the
+# frame's strongest bin are skipped), each peak frequency is refined by a
+# parabola on the log magnitude, and its deviation from the nearest
+# equal-tempered semitone (relative to 440 Hz) becomes an angle; the angles are
+# averaged over all frames with weight sqrt(magnitude). Chroma, HPCP, key and
+# chord detection still assume 440 Hz and are not corrected by this value, so a
+# large offset means those are less reliable for that track.
+#   tuning_offset_cents  Optional[float], cents, [-50, 50) — angle of the mean
+#                        vector; None (key present) when tuning_confidence is
+#                        below 0.08: measured, could not tell. When only
+#                        n < 352 frames (about 8 s) carry a peak the bar is
+#                        1.5/sqrt(n) instead, since noise alone would clear
+#                        0.08 on short or mostly silent input. Wraps: a track
+#                        near +-50 lies between two semitones, so compare two
+#                        tracks with a circular difference. A known pitch
+#                        shift of real tracks is recovered within about 2.5
+#                        cents (median 0.2-0.4, at the default 22050 Hz
+#                        analysis rate); clean chords within 0.5 cents at
+#                        22050, 44100 and 48000 Hz
+#   tuning_confidence    float, 0..1 — length of the mean vector: 0 = the peaks
+#                        agree on no grid, 1 = every peak on the same grid;
+#                        about 0.01-0.03 on noise of 5 s or more, 0.05-0.6 on
+#                        mixed music, 0.99 on clean tones; loud vibrato
+#                        vocals lower it. Present
+#                        whenever the feature ran, also when the offset is
+#                        None: key freshness on it, not on the offset
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

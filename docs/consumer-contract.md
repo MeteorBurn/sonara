@@ -240,6 +240,38 @@ travel with `mel_bands`: present exactly when it is, refilled by
 `augment_analysis` with it. They need the audio (class `C`) and are not embedding
 evidence.
 
+Tuning (2026-11-21, MeteorBurn fork, no schema bump: additive keys, existing
+values unchanged). The `tuning` group (playlist/full, or `features=["tuning"]`)
+adds `tuning_offset_cents` (cents, [−50, 50)) and `tuning_confidence` (0..1):
+the deviation of the recording's tuning from A4 = 440 Hz, by the weighted
+circular mean of Dressler & Streich (ISMIR 2007). In every main-pass frame
+(n_fft 2048, hop 512, Hann) the 10 strongest spectral peaks with bin centre in
+150–5000 Hz are taken (peaks at or below −80 dB of the frame's strongest bin
+are skipped); each peak frequency is refined by a parabola on the log
+magnitude; its deviation from the nearest equal-tempered semitone (relative to
+440 Hz) becomes an angle; the angles are averaged over all frames with weight
+sqrt(magnitude). The angle of the mean vector gives `tuning_offset_cents`, its
+length gives `tuning_confidence` (0 = the peaks agree on no grid, 1 = every peak
+on the same grid): about 0.01–0.03 on noise of 5 s or more, 0.05–0.6 on mixed
+music, 0.99 on clean tones. The group **abstains**: whenever the feature ran,
+the result carries `tuning_confidence`, while `tuning_offset_cents` is `None`
+when the confidence is below 0.08 (the Python result includes both keys). When
+only n < 352 frames (about 8 s) carry a peak the bar is 1.5/√n instead: noise
+reads about 0.4/√n, so on a short or mostly silent input it would otherwise
+clear 0.08 by chance (20 % of 1 s noise clips). A stored `None` therefore
+means "measured, could not tell", not "not yet computed" — key freshness on the
+presence of the *confidence*, not of the offset. The value wraps: a track near
+±50 cents lies between two semitones, so compare two tracks' offsets with a
+circular difference. A known pitch shift of real tracks is recovered within
+about 2.5 cents (median 0.2–0.4, at the default 22050 Hz analysis rate); clean
+chords within 0.5 cents at 22050, 44100 and 48000 Hz; loud vibrato vocals lower
+the confidence.
+Chroma, HPCP, key and chord detection still assume 440 Hz and are not corrected
+by this value, so a large offset means those are less reliable for that track.
+The two keys travel with `tuning`: present exactly when it is, refilled by
+`augment_analysis` with it. They need the audio (class `C`) and are not
+embedding evidence.
+
 File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
 additive keys, existing values unchanged). Three opt-in features, never computed
 by a mode, measure the file's own channels at its own sample rate instead of the

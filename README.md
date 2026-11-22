@@ -154,6 +154,8 @@ r['spectral_irregularity_mean']  # Jensen irregularity of the spectral peaks
 r['mel_bands_mean']            # Mel bands (fork): per-band mean and std of the
 r['mel_bands_std']             # log-mel spectrogram in dB (128 values each),
 r['mel_bands_floor_db']        # and its dB floor (loudest cell - 80 dB, >= -100)
+r['tuning_offset_cents']       # Tuning (fork): cents from A4 = 440 Hz, [-50, 50),
+r['tuning_confidence']         # None when this confidence (0..1) is below 0.08
 
 # Frame statistics (fork): how the per-frame values behind the _mean fields move.
 # Same frames as the means; each key comes with its base feature.

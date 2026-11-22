@@ -281,6 +281,71 @@ fn spectral_texture_irregularity(freqs: &[Float], mags: &[Float]) -> Option<f64>
     Some(diff / energy)
 }
 
+// ---- Tuning (deviation from A4 = 440 Hz), per-frame math in f64 ----
+
+/// Mean resultant length below which `tuning_offset_cents` abstains.
+const TUNING_MIN_CONFIDENCE: Float = 0.08;
+/// With few voting frames the bar is `TUNING_SHORT_BAR / √frames` instead:
+/// noise reads about 0.4/√frames, so under ~3 s it would clear the fixed bar
+/// (20 % of 1 s clips, none of 300 at this factor). Above 352 frames (~8 s)
+/// the fixed bar is the higher one.
+const TUNING_SHORT_BAR: f64 = 1.5;
+/// Strongest spectral peaks per frame that vote on the tuning.
+const TUNING_PEAKS: usize = 10;
+/// Peaks at or below this fraction of the frame's strongest bin (−80 dB) are
+/// FFT round-off, not partials: a signal with nothing in the band must abstain.
+const TUNING_REL_FLOOR: Float = 1e-4;
+
+/// One frame's tuning vote `[re, im, wsum]` (Dressler & Streich, ISMIR 2007):
+/// the 10 strongest strict local maxima of `mag` with bin centre in
+/// 150–5000 Hz (on a tie the lower bin; peaks at or below −80 dB of the
+/// frame's strongest bin are skipped), each refined by a parabola on ln|X|
+/// and added as the unit vector at angle 2π·frac(12·log2(f/440)) with weight
+/// sqrt|X_i|. Deliberately separate from the linear-magnitude peak
+/// interpolation HPCP, dissonance and irregularity share.
+fn tuning_frame(mag: &[Float], sr: u32, n_fft: usize) -> [f64; 3] {
+    const TINY: f64 = 1e-30;
+    let bin_hz = sr as f64 / n_fft as f64;
+    let floor = mag.iter().copied().fold(0.0, Float::max) * TUNING_REL_FLOOR;
+    let mut peaks: Vec<usize> = (1..mag.len().saturating_sub(1))
+        .filter(|&i| {
+            (150.0..=5000.0).contains(&(i as f64 * bin_hz))
+                && mag[i] > floor
+                && mag[i] > mag[i - 1]
+                && mag[i] > mag[i + 1]
+        })
+        .collect();
+    // Strongest first, the lower bin on a tie: a total order, so selecting the
+    // top 10 before sorting them gives the same peaks in the same order.
+    let strongest = |a: &usize, b: &usize| mag[*b].total_cmp(&mag[*a]).then(a.cmp(b));
+    if peaks.len() > TUNING_PEAKS {
+        peaks.select_nth_unstable_by(TUNING_PEAKS - 1, strongest);
+        peaks.truncate(TUNING_PEAKS);
+    }
+    peaks.sort_unstable_by(strongest);
+    let mut sums = [0.0_f64; 3];
+    for i in peaks {
+        let la = (mag[i - 1] as f64).max(TINY).ln();
+        let lb = (mag[i] as f64).ln();
+        let lg = (mag[i + 1] as f64).max(TINY).ln();
+        let den = la - 2.0 * lb + lg;
+        // Negative at a strict maximum; only a peak below TINY (both
+        // neighbours clamped) fails that, and it keeps its bin centre.
+        let p = if den < 0.0 {
+            0.5 * (la - lg) / den
+        } else {
+            0.0
+        };
+        let semitones = 12.0 * ((i as f64 + p) * bin_hz / 440.0).log2();
+        let theta = std::f64::consts::TAU * (semitones - semitones.floor());
+        let w = (mag[i] as f64).sqrt();
+        sums[0] += w * theta.cos();
+        sums[1] += w * theta.sin();
+        sums[2] += w;
+    }
+    sums
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -480,6 +545,8 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("spectral_texture", true, false, false, C, &[]),
     // Reads the log-mel matrix every pass builds, so it needs no extended pass.
     feature("mel_bands", false, false, false, C, &[]),
+    // Reads the magnitude column every pass computes, so no extended pass.
+    feature("tuning", false, false, false, C, &[]),
     feature("chords", true, false, false, C, &[]),
     feature("dissonance", true, false, false, C, &[]),
     feature(
@@ -1391,6 +1458,36 @@ pub struct TrackAnalysis {
     pub mel_bands_floor_db: Option<Float>,
     // --- end mel bands ---
 
+    // --- tuning ---
+    // Tuning deviation of the recording from A4 = 440 Hz, computed with
+    // `tuning` (playlist/full, or `features=["tuning"]`) on the main pass's
+    // magnitudes |X_k| (Dressler & Streich, ISMIR 2007). In each frame the 10
+    // strongest spectral peaks (strict local maxima with bin centre in
+    // 150–5000 Hz and more than −80 dB of the frame's strongest bin,
+    // frequency refined by a parabola on ln|X|) vote with their
+    // deviation from the nearest equal-tempered semitone; the votes of all
+    // frames are averaged on the circle, weighted by sqrt|X|. Both fields are
+    // `None` when the feature was not requested.
+    /// Cents, in `[-50, 50)`, positive = sharp of A4 = 440 Hz. Circular mean,
+    /// weighted by sqrt magnitude, of the deviation from the nearest
+    /// equal-tempered semitone of the 10 strongest spectral peaks per frame in
+    /// 150–5000 Hz, over all frames (Dressler & Streich, ISMIR 2007). `None`
+    /// with a present `tuning_confidence` means the measure abstained:
+    /// measured, could not tell — noise, silence or unpitched material. It
+    /// abstains when the confidence is below 0.08, or below 1.5/√n when only
+    /// n < 352 frames (about 8 s) carry a peak, where noise alone would clear
+    /// 0.08. The value wraps: a track near ±50 lies between two
+    /// semitones and can read as either sign. Chroma, HPCP, key and chords
+    /// still assume 440 Hz and are not corrected by it.
+    pub tuning_offset_cents: Option<Float>,
+    /// Dimensionless, `[0, 1]`. Mean resultant length of the same votes:
+    /// 0 = no agreement, 1 = every peak on the same grid; about 0.01–0.03 on
+    /// noise of 5 s or more (noise reads about 0.4/√frames, so more on
+    /// shorter signals), 0.05–0.6 on mixed music, 0.99 on clean tones.
+    /// Reported whenever the feature ran, also when the offset abstained.
+    pub tuning_confidence: Option<Float>,
+    // --- end tuning ---
+
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
     /// the span between `beats[i]` and `beats[i+1]`
@@ -1604,6 +1701,8 @@ struct FrameResult {
     spectral_texture: [Option<f64>; 3],
     /// Normalized spectrum for the flux; `None` when silent or unwanted.
     texture_norm: Option<Vec<Float>>,
+    /// Tuning vote `[re, im, wsum]`; zeros when unwanted.
+    tuning: [f64; 3],
     #[cfg(feature = "aggression")]
     aggression_crest_db: Float,
     #[cfg(feature = "aggression")]
@@ -2197,6 +2296,12 @@ fn analyze_signal_inner(
     // Previous frame's normalized spectrum, carried across chunks.
     let mut texture_prev: Option<Vec<Float>> = None;
 
+    // Not gated on `extended`: it only reads the magnitude column.
+    let wants_tuning = config.wants("tuning");
+    // Σ re, Σ im, Σ weight of the frame votes, and how many frames voted.
+    let mut tuning_sum = [0.0_f64; 3];
+    let mut tuning_frames = 0_usize;
+
     let freqs_raw = freqs.as_slice().unwrap();
     let roll_percent: Float = 0.85;
     let contrast_quantile: Float = 0.02;
@@ -2392,6 +2497,12 @@ fn analyze_signal_inner(
             None
         };
 
+        let tuning = if wants_tuning {
+            tuning_frame(&mag_col, sr, n_fft)
+        } else {
+            [0.0; 3]
+        };
+
         // Sparse mel projection
         let mel_col: Vec<Float> = sparse_mel
             .iter()
@@ -2549,6 +2660,7 @@ fn analyze_signal_inner(
             spectral_shape,
             spectral_texture,
             texture_norm,
+            tuning,
             #[cfg(feature = "aggression")]
             aggression_crest_db,
             #[cfg(feature = "aggression")]
@@ -2610,6 +2722,10 @@ fn analyze_signal_inner(
                         texture_count[i + 1] += 1;
                     }
                 }
+            }
+            tuning_frames += (fr.tuning[2] > 0.0) as usize;
+            for (sum, v) in tuning_sum.iter_mut().zip(fr.tuning) {
+                *sum += v;
             }
             #[cfg(feature = "aggression")]
             if wants_aggression {
@@ -2983,6 +3099,32 @@ fn analyze_signal_inner(
             0.0
         }
     });
+
+    // Tuning: circular mean of the frame votes. The confidence is reported
+    // whenever the feature ran; the offset abstains below the threshold.
+    let tuning_confidence = wants_tuning.then(|| {
+        let [re, im, wsum] = tuning_sum;
+        if wsum > 0.0 {
+            ((re * re + im * im).sqrt() / wsum) as Float
+        } else {
+            0.0
+        }
+    });
+    // No voting frame gives an infinite bar: nothing to report.
+    let tuning_bar =
+        TUNING_MIN_CONFIDENCE.max((TUNING_SHORT_BAR / (tuning_frames as f64).sqrt()) as Float);
+    let tuning_offset_cents = tuning_confidence
+        .filter(|&confidence| confidence >= tuning_bar)
+        .map(|_| {
+            let [re, im, _] = tuning_sum;
+            let cents = (100.0 * im.atan2(re) / std::f64::consts::TAU) as Float;
+            // +50 (atan2 = π, or an f32 round-up) is the same grid as −50.
+            if cents >= 50.0 {
+                -50.0
+            } else {
+                cents
+            }
+        });
 
     // ================================================================
     // FRAME STATISTICS (MIR_FEATURES group 1.2): std / delta / quantiles
@@ -3640,6 +3782,8 @@ fn analyze_signal_inner(
         mel_bands_mean,
         mel_bands_std,
         mel_bands_floor_db,
+        tuning_offset_cents,
+        tuning_confidence,
         tempo_curve,
         tempo_variability,
         time_signature,
@@ -3852,6 +3996,10 @@ fn suppress_unrequested_spectral_summaries(result: &mut TrackAnalysis, config: &
         result.mel_bands_mean = None;
         result.mel_bands_std = None;
         result.mel_bands_floor_db = None;
+    }
+    if !config.emits("tuning") {
+        result.tuning_offset_cents = None;
+        result.tuning_confidence = None;
     }
 }
 
@@ -4596,6 +4744,10 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.mel_bands_std = fresh.mel_bands_std.clone();
             out.mel_bands_floor_db = fresh.mel_bands_floor_db;
         }
+        "tuning" => {
+            out.tuning_offset_cents = fresh.tuning_offset_cents;
+            out.tuning_confidence = fresh.tuning_confidence;
+        }
         "chords" => {
             out.chord_sequence = fresh.chord_sequence.clone();
             out.chord_events = fresh.chord_events.clone();
@@ -5081,6 +5233,7 @@ mod tests {
             "spectral_shape",
             "spectral_texture",
             "mel_bands",
+            "tuning",
             "chords",
             "dissonance",
             "energy",
@@ -7769,6 +7922,132 @@ mod tests {
         assert_eq!(out.mel_bands_mean, fresh.mel_bands_mean);
         assert_eq!(out.mel_bands_std, fresh.mel_bands_std);
         assert_eq!(out.mel_bands_floor_db, fresh.mel_bands_floor_db);
+    }
+
+    // --- tuning ---
+
+    /// 4 s of sustained harmonic triads (8 harmonics at 1/k per note, MIDI
+    /// 52..72), one per second, tuned to A4 = 440·2^(cents/1200).
+    fn tuning_chords(cents: f64) -> Array1<Float> {
+        const CHORDS: [[i32; 3]; 4] = [[57, 61, 64], [52, 59, 68], [62, 65, 69], [55, 62, 71]];
+        let a4 = 440.0 * 2f64.powf(cents / 1200.0);
+        Array1::from_shape_fn(22050 * 4, |i| {
+            let t = i as f64 / 22050.0;
+            let mut v = 0.0;
+            for note in CHORDS[(t as usize).min(3)] {
+                let f0 = a4 * 2f64.powf((note - 69) as f64 / 12.0);
+                for k in 1..=8 {
+                    v += (std::f64::consts::TAU * f0 * k as f64 * t).sin() / k as f64;
+                }
+            }
+            (0.1 * v) as Float
+        })
+    }
+
+    fn tuning_fields(y: &Array1<Float>, config: &AnalysisConfig) -> (Option<Float>, Option<Float>) {
+        let r = analyze_signal(y.view(), 22050, config).unwrap();
+        (r.tuning_offset_cents, r.tuning_confidence)
+    }
+
+    #[test]
+    fn test_tuning_presence_follows_requests() {
+        let y = tuning_chords(0.0);
+        assert_eq!(tuning_fields(&y, &compact()), (None, None));
+        let p = tuning_fields(&y, &playlist());
+        assert!(p.1.is_some_and(Float::is_finite), "{p:?}");
+        assert_eq!(tuning_fields(&y, &feature_config(&["mfcc"])), (None, None));
+        // On its own it needs no extended pass and reads the same magnitudes.
+        let only = feature_config(&["tuning"]);
+        assert!(!only.needs_extended());
+        assert_eq!(tuning_fields(&y, &only), p);
+    }
+
+    #[test]
+    fn test_tuning_recovers_known_detuning() {
+        for cents in [20.0, -45.0, 0.0] {
+            let (offset, confidence) =
+                tuning_fields(&tuning_chords(cents), &feature_config(&["tuning"]));
+            let (offset, confidence) = (offset.unwrap(), confidence.unwrap());
+            assert!((offset as f64 - cents).abs() < 1.0, "{cents}: {offset}");
+            assert!((-50.0..50.0).contains(&offset));
+            assert!(confidence > 0.9, "{cents}: {confidence}");
+        }
+    }
+
+    #[test]
+    fn test_tuning_single_sine() {
+        let y = sine(440.0 * 2f32.powf(-30.0 / 1200.0), 22050, 3.0);
+        let (offset, confidence) = tuning_fields(&y, &feature_config(&["tuning"]));
+        assert!((offset.unwrap() + 30.0).abs() < 1.5, "{offset:?}");
+        assert!(confidence.unwrap() > 0.9, "{confidence:?}");
+    }
+
+    #[test]
+    fn test_tuning_abstains_on_noise_and_silence() {
+        // Deterministic white noise from a 32-bit LCG.
+        let mut state = 12345_u32;
+        let noise = Array1::from_shape_fn(22050 * 5, |_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as Float / 8_388_608.0 - 1.0
+        });
+        let (offset, confidence) = tuning_fields(&noise, &feature_config(&["tuning"]));
+        assert!(
+            confidence.unwrap() < TUNING_MIN_CONFIDENCE,
+            "{confidence:?}"
+        );
+        assert_eq!(offset, None);
+
+        // A tone below the band leaves only FFT round-off there: no vote, no offset.
+        // f64 phase: the f32 phase ramp of `sine` adds −80 dB noise of its own.
+        let low = Array1::from_shape_fn(22050 * 3, |i| {
+            (std::f64::consts::TAU * 110.0 * i as f64 / 22050.0).sin() as Float
+        });
+        let (offset, confidence) = tuning_fields(&low, &feature_config(&["tuning"]));
+        assert_eq!(offset, None, "{confidence:?}");
+        assert!(confidence.unwrap() < TUNING_MIN_CONFIDENCE);
+
+        let z = Array1::<Float>::zeros(22050 * 2);
+        assert_eq!(tuning_fields(&z, &playlist()), (None, Some(0.0)));
+    }
+
+    #[test]
+    fn test_tuning_bar_rises_for_short_signals() {
+        // Half a second (22 frames) of noise often reads above the fixed 0.08
+        // bar; the 1.5/√frames bar keeps every draw from reporting an offset.
+        let config = feature_config(&["tuning"]);
+        let mut above_fixed_bar = 0;
+        for seed in 1..=12_u32 {
+            let mut state = seed.wrapping_mul(2_654_435_761);
+            let noise = Array1::from_shape_fn(22050 / 2, |_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as Float / 8_388_608.0 - 1.0
+            });
+            let (offset, confidence) = tuning_fields(&noise, &config);
+            assert_eq!(offset, None, "seed {seed}: {confidence:?}");
+            above_fixed_bar += (confidence.unwrap() >= TUNING_MIN_CONFIDENCE) as usize;
+        }
+        assert!(
+            above_fixed_bar > 0,
+            "no draw exercised the short-signal bar"
+        );
+        // A clean chord of the same length still clears it.
+        let short = tuning_chords(20.0).slice(s![..22050 / 2]).to_owned();
+        let (offset, confidence) = tuning_fields(&short, &config);
+        assert!(
+            (offset.unwrap() - 20.0).abs() < 1.5,
+            "{offset:?} {confidence:?}"
+        );
+    }
+
+    #[test]
+    fn test_tuning_augment_merge_moves_fields() {
+        let y = tuning_chords(20.0);
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        merge_feature_fields(&mut out, &fresh, "tuning");
+        assert!(out.tuning_offset_cents.is_some() && out.tuning_confidence.is_some());
+        assert_eq!(out.tuning_offset_cents, fresh.tuning_offset_cents);
+        assert_eq!(out.tuning_confidence, fresh.tuning_confidence);
     }
 
     // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---

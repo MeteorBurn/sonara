@@ -194,6 +194,14 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
             d.set_item(key, v.clone())?;
         }
     }
+    // Tuning (MIR_FEATURES group 5.2): travels with `tuning`. Keyed on the
+    // confidence, which is present whenever the measure ran: on abstention the
+    // offset is emitted as None rather than dropped, so a caller can tell "not
+    // measured" from "could not tell" (mirrors rhythmic_regularity).
+    if let Some(confidence) = r.tuning_confidence {
+        d.set_item("tuning_offset_cents", r.tuning_offset_cents)?;
+        d.set_item("tuning_confidence", confidence)?;
+    }
 
     // Rhythm (playlist/full modes)
     if let Some(ref v) = r.tempo_curve {
@@ -1142,6 +1150,10 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         mel_bands_mean: opt_field!(cached, "mel_bands_mean", Vec<f32>, "a list of floats"),
         mel_bands_std: opt_field!(cached, "mel_bands_std", Vec<f32>, "a list of floats"),
         mel_bands_floor_db: opt_field!(cached, "mel_bands_floor_db", f32, "a float"),
+        // Emitted together, keyed on a present confidence; `tuning_offset_cents`
+        // itself may be a stored None (abstain), which reads back as None.
+        tuning_offset_cents: opt_field!(cached, "tuning_offset_cents", f32, "a float or None"),
+        tuning_confidence: opt_field!(cached, "tuning_confidence", f32, "a float"),
         tempo_curve: opt_field!(cached, "tempo_curve", Vec<f32>, "a list of floats"),
         tempo_variability: opt_field!(cached, "tempo_variability", f32, "a float"),
         time_signature: opt_field!(cached, "time_signature", String, "a string"),

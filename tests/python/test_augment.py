@@ -140,6 +140,25 @@ def _mel_bands_keys():
 
 test("mel_bands ships in playlist mode and on request", _mel_bands_keys)
 
+TUNING = {"tuning_offset_cents", "tuning_confidence"}
+
+
+def _tuning_keys():
+    assert TUNING <= set(REC_PLAYLIST), sorted(TUNING - set(REC_PLAYLIST))
+    assert not TUNING & set(REC_COMPACT), sorted(TUNING & set(REC_COMPACT))
+    assert 0.0 <= REC_PLAYLIST["tuning_confidence"] <= 1.0
+    only = sonara.analyze_signal(_y, sr=SR, features=["tuning"])
+    assert {k: only[k] for k in TUNING} == {k: REC_PLAYLIST[k] for k in TUNING}
+    # Abstention: noise agrees on no semitone grid, so the offset is a present
+    # None next to a confidence below the 0.08 gate.
+    noise = (0.1 * np.random.default_rng(0).standard_normal(_t.size)).astype(np.float32)
+    rec = sonara.analyze_signal(noise, sr=SR, features=["tuning"])
+    assert "tuning_offset_cents" in rec and rec["tuning_offset_cents"] is None, rec
+    assert 0.0 <= rec["tuning_confidence"] < 0.08, rec["tuning_confidence"]
+
+
+test("tuning ships in playlist mode and on request, and abstains on noise", _tuning_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(
