@@ -309,7 +309,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
 ### Multiband onset strength (opt-in)
 
@@ -523,6 +523,41 @@ Three known limitations, all measured:
   will read the way its *rhythm* reads. This is a feature, not a defect: on the
   manual set it correctly called 93% of broken-beat tech house irregular even
   though every one of those tracks is filed as house.
+
+### Harmonic/percussive balance (opt-in)
+
+How much of the track's energy is percussive, by median-filter
+harmonic/percussive separation (HPSS) of the main-pass magnitude spectrogram.
+It is **opt-in only** — no mode computes it — and works with `analyze_file`,
+`analyze_batch` and `analyze_signal`:
+
+```python
+r = sonara.analyze_file("track.mp3", features=["hpss"])
+
+r['hpss_percussive_ratio']   # HPSS (fork): share of percussive energy, 0..1
+                             # (0 = sustained/tonal, 1 = broadband/transient)
+```
+
+A median along time estimates the harmonic part and a median along frequency
+the percussive part (kernel 0.72 s by 334 Hz, i.e. 31 frames by 31 bins at
+22050 Hz, scaled with the sample rate and equal to the default kernel of
+`librosa.decompose.hpss` at 22050 Hz; soft mask with exponent 2: the split of
+`librosa.decompose.hpss` with that kernel, `power=2.0` and `margin=1.0`); the
+value is the percussive share of the summed energy. A steady
+tone reads about 0, white noise about 0.5 and a click train about 1. On the
+150 songs of MUSDB18-HQ the drum stems read 0.76 (median; 0.38–0.94 for the
+middle 80 %), the same songs without drums 0.14 and the full mixes 0.23.
+Sustained low drums (kick and tom tails below 150 Hz) count as harmonic and
+dense distorted guitars partly as percussive, so the value follows the drum
+share closely in pop, rap and electronic music (rank correlation 0.8–0.95 with
+the energy share of the drum stem) and hardly at all in heavy metal (about
+0.2); each genre is 8–12 songs of MUSDB18-HQ. It is an energy ratio, so loud passages dominate and the overall level
+does not change it. The kernel is converted to odd counts of frames and bins
+at the analysis sample rate; that keeps the order of tracks (rank correlation
+0.97 between 22050 and 44100 Hz) but not the values (about 0.07 higher at
+44100 Hz), so compare values only between analyses at one sample rate; the
+readings above are for the default 22050 Hz. Digital silence reads `0.0`;
+there is no abstention and no confidence field.
 
 ### Structure & energy (opt-in)
 

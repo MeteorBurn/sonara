@@ -23,7 +23,7 @@
 //! - All features are fused into a single FFT pass to minimize cache pressure.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 
 use ndarray::{s, Array1, Array2};
@@ -346,6 +346,211 @@ fn tuning_frame(mag: &[Float], sr: u32, n_fft: usize) -> [f64; 3] {
     sums
 }
 
+// ---- HPSS percussive ratio (median-filter separation), f32 cells, f64 sums ----
+
+// The default kernel of `librosa.decompose.hpss`, 31 frames by 31 bins at
+// librosa's default resolution (22050 Hz, n_fft 2048, hop 512), in seconds and
+// hertz so that it spans the same time and frequency at every sample rate.
+// 31 * 512 / 22050 s (0.72 s) by 31 * 22050 / 2048 Hz (334 Hz).
+const HPSS_KERNEL: u64 = 31;
+const HPSS_KERNEL_SR: u64 = 22050;
+const HPSS_KERNEL_N_FFT: u64 = 2048;
+const HPSS_KERNEL_HOP: u64 = 512;
+
+/// The kernel in `(frames, bins)` of a pass at `sr`, converted as the FMP
+/// reference code does (`libfmp.c8.hps`: rounded up, then made odd, so a
+/// window has one middle element and is centred on its cell). In integers:
+/// 22050 Hz gives exactly 31 by 31.
+fn hpss_kernel(sr: u32, n_fft: usize, hop: usize) -> (usize, usize) {
+    let (sr, n_fft, hop) = (sr as u64, n_fft as u64, hop as u64);
+    let odd = |num: u64, den: u64| (num.div_ceil(den) | 1) as usize;
+    (
+        odd(HPSS_KERNEL * HPSS_KERNEL_HOP * sr, HPSS_KERNEL_SR * hop),
+        odd(HPSS_KERNEL * HPSS_KERNEL_SR * n_fft, HPSS_KERNEL_N_FFT * sr),
+    )
+}
+
+/// The in-range index that position `i` of an axis of length `n` mirrors to,
+/// the edge sample repeated (`scipy.ndimage` `reflect`: d c b a | a b c d |
+/// d c b a), folding as often as a short axis needs.
+fn hpss_reflect(i: isize, n: usize) -> usize {
+    let n = n as isize;
+    if (0..n).contains(&i) {
+        return i as usize;
+    }
+    let m = i.rem_euclid(2 * n);
+    (if m < n { m } else { 2 * n - 1 - m }) as usize
+}
+
+/// Replaces one `old` by `new` in the sorted window `win`, keeping it sorted.
+fn hpss_window_replace(win: &mut [Float], old: Float, new: Float) {
+    let from = win.partition_point(|w| w.total_cmp(&old).is_lt());
+    debug_assert!(win[from].to_bits() == old.to_bits());
+    let to = win.partition_point(|w| w.total_cmp(&new).is_lt());
+    if to > from {
+        win.copy_within(from + 1..to, from);
+        win[to - 1] = new;
+    } else {
+        win.copy_within(to..from, to + 1);
+        win[to] = new;
+    }
+}
+
+/// Median of `x` over the `k` values centred on each index (`k` odd), the axis
+/// mirrored at both ends: one sorted window, one value replaced per step.
+fn hpss_median(x: &[Float], k: usize) -> Vec<Float> {
+    let half = (k / 2) as isize;
+    let at = |i: isize| x[hpss_reflect(i, x.len())];
+    let mut win: Vec<Float> = (-half..=half).map(at).collect();
+    win.sort_unstable_by(Float::total_cmp);
+    (0..x.len() as isize)
+        .map(|j| {
+            let median = win[k / 2];
+            hpss_window_replace(&mut win, at(j - half), at(j + half + 1));
+            median
+        })
+        .collect()
+}
+
+/// Streaming state of `hpss_percussive_ratio`. The harmonic estimate of a
+/// frame is a median over `kernel` frames centred on it, so a
+/// frame waits here until its look-ahead has arrived or the track has ended;
+/// memory stays at the chunk plus one kernel of columns.
+struct HpssStream {
+    /// Frames in the harmonic (time) window, odd.
+    kernel: usize,
+    n_frames: usize,
+    /// `(|X|, its median over frequency)` of frames `first..first + cols.len()`:
+    /// the waiting frames and the earlier ones their windows still read.
+    cols: VecDeque<(Vec<Float>, Vec<Float>)>,
+    first: usize,
+    /// First frame not yet in the sums.
+    next: usize,
+    /// Per bin, the sorted time window of the last frame added to the sums.
+    windows: Vec<Float>,
+    /// Medians over time of the frames being added, bin-major; reused.
+    harmonic: Vec<Float>,
+    sum_h: f64,
+    sum_p: f64,
+}
+
+impl HpssStream {
+    fn new(n_bins: usize, n_frames: usize, kernel: usize) -> Self {
+        Self {
+            kernel,
+            n_frames,
+            cols: VecDeque::new(),
+            first: 0,
+            next: 0,
+            windows: vec![0.0; n_bins * kernel],
+            harmonic: Vec::new(),
+            sum_h: 0.0,
+            sum_p: 0.0,
+        }
+    }
+
+    /// Takes the next frames' columns, in frame order, and adds every frame
+    /// whose window is complete to the sums. Medians are exact and each
+    /// frame's sums are added in frame order, so neither the chunking nor
+    /// `parallel` changes a bit of the result.
+    fn push(&mut self, chunk: impl Iterator<Item = (Vec<Float>, Vec<Float>)>, parallel: bool) {
+        self.cols.extend(chunk);
+        let (k, half) = (self.kernel, self.kernel / 2);
+        let reach = half as isize;
+        let arrived = self.first + self.cols.len();
+        // At the end of the track the window mirrors at the right edge instead.
+        let ready = if arrived == self.n_frames {
+            arrived
+        } else {
+            arrived.saturating_sub(half)
+        };
+        let (next, count) = (self.next, ready.saturating_sub(self.next));
+        if count == 0 {
+            return;
+        }
+        let (cols, first, n_frames) = (&self.cols, self.first, self.n_frames);
+        // |X| of bin `b` in the frame that time position `i` mirrors to.
+        let at = |i: isize, b: usize| cols[hpss_reflect(i, n_frames) - first].0[b];
+
+        // Harmonic estimate: per bin, slide the sorted window over the frames.
+        self.harmonic.resize(self.windows.len() / k * count, 0.0);
+        let slide = |(b, (win, out)): (usize, (&mut [Float], &mut [Float]))| {
+            for (j, median) in out.iter_mut().enumerate() {
+                let t = (next + j) as isize;
+                if t == 0 {
+                    for (i, w) in win.iter_mut().enumerate() {
+                        *w = at(i as isize - reach, b);
+                    }
+                    win.sort_unstable_by(Float::total_cmp);
+                } else {
+                    hpss_window_replace(win, at(t - 1 - reach, b), at(t + reach, b));
+                }
+                *median = win[half];
+            }
+        };
+        if parallel {
+            self.windows
+                .par_chunks_mut(k)
+                .zip(self.harmonic.par_chunks_mut(count))
+                .enumerate()
+                .for_each(slide);
+        } else {
+            self.windows
+                .chunks_mut(k)
+                .zip(self.harmonic.chunks_mut(count))
+                .enumerate()
+                .for_each(slide);
+        }
+
+        // Soft mask (power 2, margin 1) and one frame's Σh², Σp² over its bins.
+        let harmonic = &self.harmonic;
+        let frame_sums = |j: usize| {
+            let (mag, percussive) = &cols[next + j - first];
+            let (mut sum_h, mut sum_p) = (0.0_f64, 0.0_f64);
+            for (b, (&s, &pm)) in mag.iter().zip(percussive).enumerate() {
+                let hm = harmonic[b * count + j];
+                let (wh, wp) = (hm * hm, pm * pm);
+                let tot = wh + wp;
+                let (h, p) = if tot > 0.0 {
+                    (s * wh / tot, s * wp / tot)
+                } else {
+                    (0.5 * s, 0.5 * s)
+                };
+                sum_h += h as f64 * h as f64;
+                sum_p += p as f64 * p as f64;
+            }
+            (sum_h, sum_p)
+        };
+        let sums: Vec<(f64, f64)> = if parallel {
+            (0..count).into_par_iter().map(frame_sums).collect()
+        } else {
+            (0..count).map(frame_sums).collect()
+        };
+        for (h, p) in sums {
+            self.sum_h += h;
+            self.sum_p += p;
+        }
+
+        self.next = ready;
+        // The next slide still reads frame `next - 1 - half`; mirrored
+        // positions never reach further back.
+        while self.first + half + 1 < self.next {
+            self.cols.pop_front();
+            self.first += 1;
+        }
+    }
+
+    /// Σp² / (Σh² + Σp²); 0 when the track holds no energy.
+    fn ratio(&self) -> Float {
+        let total = self.sum_h + self.sum_p;
+        if total > 0.0 {
+            (self.sum_p / total) as Float
+        } else {
+            0.0
+        }
+    }
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -597,6 +802,8 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("onset_bands", false, true, false, C, &[]),
     feature("beatgrid", false, true, false, C, &[]),
     feature("rhythmic_regularity", false, true, false, C, &[]),
+    // Reads the magnitude column every pass computes, so no extended pass.
+    feature("hpss", false, true, false, C, &[]),
     feature("structure", true, true, false, C, &[]),
     feature("embedding", true, true, false, E, EMBEDDING_EVIDENCE),
     #[cfg(feature = "aggression")]
@@ -1488,6 +1695,25 @@ pub struct TrackAnalysis {
     pub tuning_confidence: Option<Float>,
     // --- end tuning ---
 
+    // --- hpss ---
+    // Opt-in only (request via features=["hpss"]); `None` otherwise. Median
+    // filter harmonic/percussive separation of the main pass's magnitudes |X|
+    // over all bins and frames, as `librosa.decompose.hpss(S, kernel_size=
+    // hpss_kernel(sr, n_fft, hop), power=2.0, margin=1.0)`:
+    // the harmonic estimate of a cell is the median of |X| over that many
+    // frames within its bin, the percussive estimate the median over that
+    // many bins within its frame, both windows mirrored at the edges
+    // (`scipy.ndimage` `reflect`). The kernel is 0.72 s by 334 Hz: librosa's
+    // default 31 frames by 31 bins at 22050 Hz, scaled with the sample rate.
+    /// Dimensionless, `[0, 1]`: Σp² / (Σh² + Σp²) over every cell, the share
+    /// of the spectrogram's energy in the percussive component, where
+    /// h = |X|·H²/(H² + P²) and p = |X|·P²/(H² + P²) for the harmonic and
+    /// percussive estimates H and P (a cell with H = P = 0 is split evenly).
+    /// About 0 on sustained tones, 1 on isolated clicks. `0.0` on digital
+    /// silence: there is no abstention.
+    pub hpss_percussive_ratio: Option<Float>,
+    // --- end hpss ---
+
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
     /// the span between `beats[i]` and `beats[i+1]`
@@ -1703,6 +1929,8 @@ struct FrameResult {
     texture_norm: Option<Vec<Float>>,
     /// Tuning vote `[re, im, wsum]`; zeros when unwanted.
     tuning: [f64; 3],
+    /// `(|X|, its median over frequency)` for `hpss`; `None` when unwanted.
+    hpss: Option<(Vec<Float>, Vec<Float>)>,
     #[cfg(feature = "aggression")]
     aggression_crest_db: Float,
     #[cfg(feature = "aggression")]
@@ -2302,6 +2530,11 @@ fn analyze_signal_inner(
     let mut tuning_sum = [0.0_f64; 3];
     let mut tuning_frames = 0_usize;
 
+    // Request-only and not gated on `extended`: it reads the magnitude column.
+    let wants_hpss = config.wants("hpss");
+    let (hpss_frames, hpss_bins) = hpss_kernel(sr, n_fft, hop_length);
+    let mut hpss_stream = wants_hpss.then(|| HpssStream::new(n_bins, n_frames, hpss_frames));
+
     let freqs_raw = freqs.as_slice().unwrap();
     let roll_percent: Float = 0.85;
     let contrast_quantile: Float = 0.02;
@@ -2661,6 +2894,11 @@ fn analyze_signal_inner(
             spectral_texture,
             texture_norm,
             tuning,
+            // The median over frequency needs only this frame, so it runs here.
+            hpss: wants_hpss.then(|| {
+                let percussive = hpss_median(&mag_col, hpss_bins);
+                (mag_col, percussive)
+            }),
             #[cfg(feature = "aggression")]
             aggression_crest_db,
             #[cfg(feature = "aggression")]
@@ -2748,7 +2986,7 @@ fn analyze_signal_inner(
     let mut base = 0;
     while base < n_frames {
         let end = base.saturating_add(frame_chunk).min(n_frames);
-        let frame_results: Vec<FrameResult> = if n_frames >= PARALLEL_THRESHOLD {
+        let mut frame_results: Vec<FrameResult> = if n_frames >= PARALLEL_THRESHOLD {
             (base..end)
                 .into_par_iter()
                 .map(|t| compute_frame(t))
@@ -2756,6 +2994,12 @@ fn analyze_signal_inner(
         } else {
             (base..end).map(|t| compute_frame(t)).collect()
         };
+        // The median over time looks ahead: the stream holds each frame back
+        // until its window is complete, across chunks and at the track's end.
+        if let Some(stream) = hpss_stream.as_mut() {
+            let columns = frame_results.iter_mut().filter_map(|f| f.hpss.take());
+            stream.push(columns, n_frames >= PARALLEL_THRESHOLD);
+        }
         // Flux pairs each frame with its predecessor (the previous chunk's last
         // frame for the first one); computed in parallel, summed in frame order.
         let fluxes: Vec<Option<f64>> = if wants_spectral_texture {
@@ -2785,6 +3029,7 @@ fn analyze_signal_inner(
         scatter_results(base, frame_results, fluxes);
         base = end;
     }
+    let hpss_percussive_ratio = hpss_stream.map(|stream| stream.ratio());
 
     // ================================================================
     // ONSET STRENGTH from mel spectrogram (no additional FFT)
@@ -3784,6 +4029,7 @@ fn analyze_signal_inner(
         mel_bands_floor_db,
         tuning_offset_cents,
         tuning_confidence,
+        hpss_percussive_ratio,
         tempo_curve,
         tempo_variability,
         time_signature,
@@ -4793,6 +5039,7 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.rhythmic_regularity_confidence = fresh.rhythmic_regularity_confidence;
             out.rhythmic_regularity_candidates = fresh.rhythmic_regularity_candidates.clone();
         }
+        "hpss" => out.hpss_percussive_ratio = fresh.hpss_percussive_ratio,
         "structure" => {
             out.energy_curve = fresh.energy_curve.clone();
             out.energy_curve_hop_sec = fresh.energy_curve_hop_sec;
@@ -5246,6 +5493,7 @@ mod tests {
             "onset_bands",
             "beatgrid",
             "rhythmic_regularity",
+            "hpss",
             "structure",
             "embedding",
             "fingerprint",
@@ -8048,6 +8296,323 @@ mod tests {
         assert!(out.tuning_offset_cents.is_some() && out.tuning_confidence.is_some());
         assert_eq!(out.tuning_offset_cents, fresh.tuning_offset_cents);
         assert_eq!(out.tuning_confidence, fresh.tuning_confidence);
+    }
+
+    // --- hpss ---
+
+    /// A click every half second, the first at 0.25 s.
+    fn hpss_click_positions(len: usize) -> impl Iterator<Item = usize> {
+        (22050 / 4..len).step_by(22050 / 2)
+    }
+
+    /// Two tones, a click every half second and white noise (32-bit LCG).
+    fn hpss_mix(secs: usize) -> Array1<Float> {
+        let mut state = 20_261_122_u32;
+        let mut y = Array1::from_shape_fn(22050 * secs, |i| {
+            let t = i as Float / 22050.0;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (state >> 8) as Float / 8_388_608.0 - 1.0;
+            0.4 * (2.0 * PI * 330.0 * t).sin() + 0.2 * (2.0 * PI * 1870.0 * t).sin() + 0.05 * noise
+        });
+        for i in hpss_click_positions(y.len()) {
+            y[i] += 0.9;
+        }
+        y
+    }
+
+    fn hpss_of(y: &Array1<Float>, config: &AnalysisConfig) -> Option<Float> {
+        let r = analyze_signal(y.view(), 22050, config).unwrap();
+        r.hpss_percussive_ratio
+    }
+
+    /// `features=["hpss"]` alone, the fused pass cut into chunks of `chunk` frames.
+    fn hpss_chunked(y: &Array1<Float>, chunk: usize) -> Float {
+        let config = feature_config(&["hpss"]);
+        let zcr = validated_zero_crossing_rate(y.view()).unwrap();
+        analyze_signal_inner(y.view(), 22050, false, zcr, &config, chunk)
+            .unwrap()
+            .hpss_percussive_ratio
+            .unwrap()
+    }
+
+    /// The ratio of `y` straight from the definition with a `(frames, bins)`
+    /// kernel, and the frame count, on the full magnitude matrix of the
+    /// library STFT (same framing as the main pass).
+    fn hpss_reference(y: &Array1<Float>, kernel: (usize, usize)) -> (Float, usize) {
+        let hann = WindowSpec::Named("hann".into());
+        let stft = spectrum::stft(
+            y.view(),
+            2048,
+            Some(HOP_LENGTH),
+            None,
+            &hann,
+            true,
+            PadMode::Constant,
+        )
+        .unwrap();
+        let mag = stft.mapv(|c| c.norm_sqr().sqrt());
+        (hpss_reference_of(&mag, kernel), mag.ncols())
+    }
+
+    /// The ratio of a `[bins x frames]` magnitude matrix with a `(frames,
+    /// bins)` kernel: every window collected with indices mirrored by
+    /// repeated folding and sorted whole.
+    fn hpss_reference_of(mag: &Array2<Float>, kernel: (usize, usize)) -> Float {
+        let (bins, frames) = mag.dim();
+        let fold = |mut i: isize, n: usize| {
+            let n = n as isize;
+            while !(0..n).contains(&i) {
+                i = if i < 0 { -i - 1 } else { 2 * n - 1 - i };
+            }
+            i as usize
+        };
+        let median = |mut window: Vec<Float>| {
+            window.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            window[window.len() / 2]
+        };
+        let over_frames = (kernel.0 / 2) as isize;
+        let over_bins = (kernel.1 / 2) as isize;
+        let (mut sum_h, mut sum_p) = (0.0_f64, 0.0_f64);
+        for t in 0..frames {
+            let (mut frame_h, mut frame_p) = (0.0_f64, 0.0_f64);
+            for b in 0..bins {
+                let (ti, bi) = (t as isize, b as isize);
+                let hm = median(
+                    (ti - over_frames..=ti + over_frames)
+                        .map(|i| mag[(b, fold(i, frames))])
+                        .collect(),
+                );
+                let pm = median(
+                    (bi - over_bins..=bi + over_bins)
+                        .map(|i| mag[(fold(i, bins), t)])
+                        .collect(),
+                );
+                let (s, wh, wp) = (mag[(b, t)], hm * hm, pm * pm);
+                let tot = wh + wp;
+                let (h, p) = if tot > 0.0 {
+                    (s * wh / tot, s * wp / tot)
+                } else {
+                    (0.5 * s, 0.5 * s)
+                };
+                frame_h += (h as f64).powi(2);
+                frame_p += (p as f64).powi(2);
+            }
+            sum_h += frame_h;
+            sum_p += frame_p;
+        }
+        let total = sum_h + sum_p;
+        let ratio = if total > 0.0 { sum_p / total } else { 0.0 };
+        ratio as Float
+    }
+
+    #[test]
+    fn test_hpss_kernel_scales_with_sample_rate() {
+        assert_eq!(hpss_kernel(16000, 2048, 512), (23, 43));
+        // librosa's default kernel at librosa's default resolution.
+        assert_eq!(hpss_kernel(22050, 2048, 512), (31, 31));
+        assert_eq!(hpss_kernel(44100, 2048, 512), (63, 17));
+        assert_eq!(hpss_kernel(48000, 2048, 512), (69, 15));
+    }
+
+    #[test]
+    fn test_hpss_stream_matches_reference_on_sparse_matrices() {
+        // 60 % zeros and two repeated levels: ties in every window, cells
+        // whose two medians are both 0 (split evenly), axes shorter than a
+        // kernel, chunks shorter than the look-ahead. The kernels of 22050
+        // and 44100 Hz.
+        let mut state = 7_u32;
+        for (bins, frames) in [(40, 1), (3, 50), (64, 45), (33, 70)] {
+            let mag = Array2::from_shape_fn((bins, frames), |_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let u = (state >> 8) as Float / 16_777_216.0;
+                if u < 0.6 {
+                    0.0
+                } else {
+                    (u * 4.0).floor() * 0.25
+                }
+            });
+            for kernel in [(31, 31), (63, 17)] {
+                let want = hpss_reference_of(&mag, kernel);
+                assert!(
+                    want > 0.0 && want < 1.0,
+                    "{bins}x{frames} {kernel:?}: {want}"
+                );
+                for chunk in [frames, 11, 4, 1] {
+                    for parallel in [false, true] {
+                        let mut stream = HpssStream::new(bins, frames, kernel.0);
+                        for base in (0..frames).step_by(chunk) {
+                            let columns = (base..(base + chunk).min(frames)).map(|t| {
+                                let column = mag.column(t).to_vec();
+                                let percussive = hpss_median(&column, kernel.1);
+                                (column, percussive)
+                            });
+                            stream.push(columns, parallel);
+                        }
+                        let got = stream.ratio();
+                        assert!(
+                            (got - want).abs() < 1e-6,
+                            "{bins}x{frames} {kernel:?}, chunk {chunk}, parallel {parallel}: {got} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hpss_presence_follows_requests() {
+        let y = hpss_mix(3);
+        // Request-only: no preset mode computes it.
+        for config in [compact(), playlist(), full()] {
+            assert_eq!(hpss_of(&y, &config), None);
+        }
+        assert_eq!(hpss_of(&y, &feature_config(&["mfcc"])), None);
+        // On its own it needs no extended pass and reads the same magnitudes.
+        let only = feature_config(&["hpss"]);
+        assert!(!only.needs_extended());
+        let r = hpss_of(&y, &only).unwrap();
+        assert!(r > 0.0 && r < 1.0, "{r}");
+        assert_eq!(hpss_of(&y, &feature_config(&["hpss", "mfcc"])), Some(r));
+    }
+
+    #[test]
+    fn test_hpss_known_answers() {
+        let config = feature_config(&["hpss"]);
+        let tone = sine(440.0, 22050, 3.0);
+        let r = hpss_of(&tone, &config).unwrap();
+        assert!(r < 0.01, "sine: {r}");
+
+        let stack = Array1::from_shape_fn(22050 * 3, |i| {
+            let t = i as Float / 22050.0;
+            (1..=8)
+                .map(|k| 0.2 * (2.0 * PI * 220.0 * k as Float * t).sin() / k as Float)
+                .sum::<Float>()
+        });
+        let r = hpss_of(&stack, &config).unwrap();
+        assert!(r < 0.01, "harmonic stack: {r}");
+
+        let mut clicks = Array1::<Float>::zeros(tone.len());
+        for i in hpss_click_positions(clicks.len()) {
+            clicks[i] = 1.0;
+        }
+        let r = hpss_of(&clicks, &config).unwrap();
+        assert!(r > 0.99, "clicks: {r}");
+
+        // Clicks carrying as much time-domain energy as the sine.
+        let energy: f64 = tone.iter().map(|&v| (v as f64).powi(2)).sum();
+        let n_clicks = hpss_click_positions(tone.len()).count();
+        let mut both = tone.clone();
+        for i in hpss_click_positions(both.len()) {
+            both[i] += (energy / n_clicks as f64).sqrt() as Float;
+        }
+        let r = hpss_of(&both, &config).unwrap();
+        assert!((r - 0.5).abs() < 0.02, "sine + clicks: {r}");
+
+        // Digital silence: no energy to split, 0.0 rather than an abstention.
+        let z = Array1::<Float>::zeros(22050 * 2);
+        assert_eq!(hpss_of(&z, &config), Some(0.0));
+    }
+
+    #[test]
+    fn test_hpss_matches_brute_force_reference() {
+        let y = hpss_mix(3);
+        let (want, frames) = hpss_reference(&y, (31, 31));
+        assert_eq!(frames, 1 + y.len() / HOP_LENGTH);
+        let got = hpss_of(&y, &feature_config(&["hpss"])).unwrap();
+        assert!((got - want).abs() < 1e-6, "{got} vs {want}");
+    }
+
+    #[test]
+    fn test_hpss_at_44100_matches_brute_force_reference() {
+        // The same samples read at 44100 Hz: twice the frames, half the bins.
+        let y = hpss_mix(3);
+        let (want, _) = hpss_reference(&y, (63, 17));
+        // The 22050 Hz kernel would not pass the comparison below.
+        let (other, _) = hpss_reference(&y, (31, 31));
+        assert!((want - other).abs() > 1e-4, "{want} vs {other}");
+        let r = analyze_signal(y.view(), 44100, &feature_config(&["hpss"])).unwrap();
+        let got = r.hpss_percussive_ratio.unwrap();
+        assert!((got - want).abs() < 1e-6, "{got} vs {want}");
+    }
+
+    #[test]
+    fn test_hpss_chunking_is_bit_identical() {
+        // 13 s is 560 frames: more than one chunk of FRAME_CHUNK.
+        let y = hpss_mix(13);
+        let zcr = validated_zero_crossing_rate(y.view()).unwrap();
+        let config = feature_config(&["hpss", "spectral_texture", "tuning"]);
+        let extended = config.needs_extended();
+        let run =
+            |chunk| analyze_signal_inner(y.view(), 22050, extended, zcr, &config, chunk).unwrap();
+        let whole = run(usize::MAX);
+        assert!(whole
+            .hpss_percussive_ratio
+            .is_some_and(|r| r > 0.0 && r < 1.0));
+        // Chunks longer and shorter than the look-ahead; every output matches.
+        for chunk in [FRAME_CHUNK, 7, 1] {
+            assert_eq!(run(chunk), whole, "chunk {chunk}");
+        }
+        assert_eq!(
+            hpss_chunked(&y, 1).to_bits(),
+            whole.hpss_percussive_ratio.unwrap().to_bits()
+        );
+    }
+
+    #[test]
+    fn test_hpss_short_inputs_match_reference() {
+        // 1, 2, 5 and 12 frames are fewer than the look-ahead, 20 fewer than
+        // the kernel: the time window folds back, more than once on the shortest.
+        let mix = hpss_mix(1);
+        for (len, frames) in [(300, 1), (700, 2), (2300, 5), (6000, 12), (10000, 20)] {
+            // The slice holds the click at 5512.
+            let y = mix.slice(s![5400..5400 + len]).to_owned();
+            let (want, n) = hpss_reference(&y, (31, 31));
+            assert_eq!(n, frames);
+            assert!(want > 0.0 && want < 1.0, "{frames} frames: {want}");
+            for chunk in [usize::MAX, 3, 1] {
+                let got = hpss_chunked(&y, chunk);
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "{frames} frames, chunk {chunk}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_hpss_augment_merge_moves_field() {
+        let y = hpss_mix(3);
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &feature_config(&["hpss"])).unwrap();
+        merge_feature_fields(&mut out, &fresh, "hpss");
+        assert!(out.hpss_percussive_ratio.is_some());
+        assert_eq!(out.hpss_percussive_ratio, fresh.hpss_percussive_ratio);
+    }
+
+    #[test]
+    fn test_hpss_request_leaves_other_fields_untouched() {
+        let y = hpss_mix(3);
+        let requests: [&[&str]; 2] = [
+            &["tuning", "mel_bands"],
+            &[
+                "bpm",
+                "mfcc",
+                "chroma",
+                "spectral_shape",
+                "spectral_texture",
+                "tuning",
+                "key",
+                "onset_bands",
+            ],
+        ];
+        for names in requests {
+            let without = analyze_signal(y.view(), 22050, &feature_config(names)).unwrap();
+            let with_hpss = feature_config(&[names, &["hpss"]].concat());
+            let mut with = analyze_signal(y.view(), 22050, &with_hpss).unwrap();
+            assert!(with.hpss_percussive_ratio.take().is_some());
+            with.provenance.requested_features = without.provenance.requested_features.clone();
+            assert_eq!(with, without);
+        }
     }
 
     // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---

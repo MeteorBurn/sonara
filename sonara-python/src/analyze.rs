@@ -176,6 +176,10 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         ("spectral_irregularity_mean", r.spectral_irregularity_mean),
         // Mel bands (MIR_FEATURES group 4.1): travel with `mel_bands`.
         ("mel_bands_floor_db", r.mel_bands_floor_db),
+        // HPSS (MIR_FEATURES group 6.2): opt-in, travels with `hpss`. No
+        // abstention: silence reads 0.0, so the key is present exactly when
+        // the feature ran.
+        ("hpss_percussive_ratio", r.hpss_percussive_ratio),
     ] {
         if let Some(v) = value {
             d.set_item(key, v)?;
@@ -1154,6 +1158,7 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         // itself may be a stored None (abstain), which reads back as None.
         tuning_offset_cents: opt_field!(cached, "tuning_offset_cents", f32, "a float or None"),
         tuning_confidence: opt_field!(cached, "tuning_confidence", f32, "a float"),
+        hpss_percussive_ratio: opt_field!(cached, "hpss_percussive_ratio", f32, "a float"),
         tempo_curve: opt_field!(cached, "tempo_curve", Vec<f32>, "a list of floats"),
         tempo_variability: opt_field!(cached, "tempo_variability", f32, "a float"),
         time_signature: opt_field!(cached, "time_signature", String, "a string"),

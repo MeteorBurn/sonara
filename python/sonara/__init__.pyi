@@ -499,6 +499,44 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                        whenever the feature ran, also when the offset is
 #                        None: key freshness on it, not on the offset
 
+# --- hpss --- features=["hpss"] (opt-in only: no mode computes it)
+# Share of percussive energy in the track by median-filter harmonic/percussive
+# separation (MIR_FEATURES group 6.2). Computed in the main pass on the mono
+# analysis signal, so analyze_file, analyze_batch and analyze_signal all emit
+# it. On the main-pass magnitude spectrogram (n_fft 2048, hop 512, Hann, at the
+# analysis sample rate; all frames, silence included) a median along time gives
+# the harmonic estimate and a median along frequency the percussive estimate;
+# the kernel is 0.72 s by 334 Hz, i.e. 31 frames by 31 bins at 22050 Hz, scaled
+# with the sample rate and equal to the default kernel of
+# librosa.decompose.hpss at 22050 Hz, edges mirrored. A soft mask with exponent
+# 2 splits each cell's magnitude into a harmonic part H and a percussive part P
+# (H + P = |X|): the split of librosa.decompose.hpss with this kernel,
+# power=2.0 and margin=1.0. It is not the Rust decompose::hpss / effects::hpss
+# separation, which handles the edges differently.
+#   hpss_percussive_ratio  float, 0..1 — sum(P^2) / (sum(H^2) + sum(P^2)) over
+#                          the whole track: 0 = all energy in sustained,
+#                          horizontal (tonal) structure, 1 = all energy in
+#                          broadband, vertical (transient) structure. About 0
+#                          on a steady tone, about 0.5 on white noise, about 1
+#                          on a click train; on the 150 songs of MUSDB18-HQ
+#                          0.76 on the drum stems (median), 0.14 on the same
+#                          songs without drums, 0.23 on the full mixes.
+#                          Sustained low drums (kick and tom tails) count as
+#                          harmonic and dense distorted guitars partly as
+#                          percussive: the value follows the drum share in
+#                          pop, rap and electronic music and hardly at all in
+#                          heavy metal. An energy ratio: loud passages
+#                          dominate and the overall level does not change it.
+#                          The kernel spans about the same time and frequency
+#                          at every analysis sample rate (rounded up to odd
+#                          counts of frames and bins); that keeps the order
+#                          of tracks but not the values (about 0.07 higher at
+#                          44100 Hz), so compare values only between analyses
+#                          at one sample rate. These numbers are for 22050 Hz.
+#                          Digital silence reads 0.0: there is no
+#                          abstention and no confidence, so key freshness on
+#                          the presence of this key
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

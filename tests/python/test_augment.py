@@ -159,6 +159,34 @@ def _tuning_keys():
 
 test("tuning ships in playlist mode and on request, and abstains on noise", _tuning_keys)
 
+HPSS = "hpss_percussive_ratio"
+
+
+def _hpss_keys():
+    # Request-only: no mode computes it.
+    full = sonara.analyze_signal(_y, sr=SR, mode="full")
+    for rec in (REC_COMPACT, REC_PLAYLIST, full):
+        assert HPSS not in rec, rec["provenance"]["mode"]
+    only = sonara.analyze_signal(_y, sr=SR, features=["hpss"])
+    assert 0.0 <= only[HPSS] <= 1.0, only[HPSS]
+    # A steady tone is all horizontal structure, a click train all vertical.
+    tone = (0.5 * np.sin(2 * np.pi * 440.0 * _t)).astype(np.float32)
+    clicks = np.zeros(_t.size, dtype=np.float32)
+    clicks[SR // 4::SR // 2] = 1.0
+    low = sonara.analyze_signal(tone, sr=SR, features=["hpss"])[HPSS]
+    high = sonara.analyze_signal(clicks, sr=SR, features=["hpss"])[HPSS]
+    assert 0.0 <= low < 0.05, low
+    assert 0.95 < high <= 1.0, high
+    # Class C, opt-in: a stored value survives the dict round trip, and a
+    # refill needs the audio again.
+    row = next(r for r in sonara.feature_dependencies() if r["name"] == "hpss")
+    assert row["class"] == "frame_curves" and row["opt_in_only"] is True, row
+    assert sonara.augment_analysis(only, []) == only
+    assert sonara.augment_blocker(REC_PLAYLIST, "hpss") == "needs audio (frame_curves-class feature)"
+
+
+test("hpss is request-only, reads ~0 on a tone and ~1 on clicks", _hpss_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(

@@ -272,6 +272,50 @@ The two keys travel with `tuning`: present exactly when it is, refilled by
 `augment_analysis` with it. They need the audio (class `C`) and are not
 embedding evidence.
 
+HPSS percussive ratio (2026-11-22, MeteorBurn fork, no schema bump: additive
+key, existing values unchanged). The opt-in `hpss` feature (`features=["hpss"]`
+only; no mode computes it) adds `hpss_percussive_ratio` (dimensionless, 0..1):
+the share of percussive energy in the track by median-filter
+harmonic/percussive separation. `0` means all energy is in sustained,
+horizontal (tonal) structure of the spectrogram; `1` means all energy is in
+broadband, vertical (transient) structure. Unlike the file-only `ebur128`
+family it is computed in the main pass on the mono analysis signal, so
+`analyze_file`, `analyze_batch` and `analyze_signal` all emit it. On the main
+pass's magnitude spectrogram (n_fft 2048, hop 512, Hann, at the analysis sample
+rate; all frames, silence included) a median along time gives the harmonic
+estimate and a median along frequency gives the percussive estimate; the kernel
+is 0.72 s by 334 Hz, i.e. 31 frames by 31 bins at 22050 Hz, scaled with the
+sample rate (rounded up to an odd count of frames and of bins, the conversion
+of the FMP reference code `libfmp`) and equal to the
+default kernel of `librosa.decompose.hpss` at 22050 Hz, with mirrored edges. A
+soft mask with exponent 2
+splits each cell's magnitude into a harmonic part `H` and a percussive part `P`
+(`H + P = |X|`), and the value is ΣP² / (ΣH² + ΣP²) over the whole track. This
+equals `librosa.decompose.hpss` with this kernel, `power=2.0` and `margin=1.0`,
+followed by that energy ratio. Reference readings: about 0 on a steady tone,
+about 0.5 on white noise, about 1 on a click train; on the 150 songs of
+MUSDB18-HQ, 0.76 on the drum stems (median; 0.38–0.94 for the middle 80 %),
+0.14 on the same songs without drums and 0.23 on the full mixes. Known limits:
+sustained low drums (kick and tom tails below 150 Hz) count as harmonic and
+dense distorted guitars partly as percussive, so the value follows the energy
+share of the drum stem closely in pop, rap and electronic music (rank
+correlation 0.8–0.95) and hardly at all in heavy metal (about 0.2); each genre
+is 8–12 songs of MUSDB18-HQ. The kernel
+spans about the same time and frequency at every analysis sample rate
+(`provenance.sample_rate`); that keeps the order of tracks (rank correlation
+0.97 between 22050 and 44100 Hz) but not the values (about 0.07 higher at
+44100 Hz), so compare values only between analyses at one sample rate. The
+reference readings are for 22050 Hz. It is an energy ratio: loud passages dominate it, and the overall
+level does not change it. The feature does **not abstain** and has no
+confidence field: digital silence reads `0.0`, and the key is present exactly
+when the feature ran (`None` in Rust when it was not requested) — key freshness
+on the presence of `hpss_percussive_ratio` itself. It is not the Rust
+`decompose::hpss` / `effects::hpss` separation, which handles the spectrogram
+edges differently, and it returns no separated signals. The key travels with
+`hpss`: present exactly when it is, refilled by `augment_analysis` with it. It
+needs the audio (class `C`), is not embedding evidence and is not an input to
+any model.
+
 File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
 additive keys, existing values unchanged). Three opt-in features, never computed
 by a mode, measure the file's own channels at its own sample rate instead of the
