@@ -7,7 +7,8 @@ Sonara is the MeteorBurn fork of `kkollsga/sonara`, a Rust MIR library with a fu
 - Keep project instructions in this root file. If a root `CLAUDE.md` is used, its only content is `@AGENTS.md`. Never add nested instruction files or let a workflow skill resync the two files.
 - Before editing, inspect `git status --short` and the relevant diff. Preserve unrelated work. If UTF-8 text looks corrupted in the console, check its codepoints before editing it.
 - Create branches, commit, push or open PRs only on explicit request, including when following a workflow skill. Never force-push `origin`, push to `upstream`, or publish this fork to crates.io or PyPI. When syncing upstream, use a merge commit and disable fast-forward.
-- Never commit audio, generated benchmark output or sealed labels. At delivery, check for unexpected tracked changes and report what ran, what was skipped and why.
+- Never commit audio, generated benchmark output or sealed labels. At delivery, check for unexpected tracked changes and report what ran, what was skipped and why. Report passed mandatory checks in one line; name a check only when it failed or was skipped.
+- Never fit a descriptor's method, constants or code paths to the user's tracks or to a verification dataset to make a check pass. Parameter values must come from the method's literature or an established implementation; data may confirm a choice, never produce it. For every parameter, report its source, the data that picked it and the data that only confirmed it. When a result falls short, report the shortfall; never tune it away.
 
 ## graphify
 
@@ -19,6 +20,11 @@ Sonara is the MeteorBurn fork of `kkollsga/sonara`, a Rust MIR library with a fu
 ## Project documentation
 
 - For setup, read the relevant [README](README.md) section. For numeric behavior or reference data, read [CONTRIBUTING.md](CONTRIBUTING.md). For stored fields, schema or similarity layout, read the [consumer contract](docs/consumer-contract.md). Local plans live under `dev-docs/plans/`. If required evidence or guidance is unavailable, identify the gap and leave the dependent conclusion unverified.
+
+## Research
+
+- When the user asks for research, or a task needs it (literature, algorithm definitions, reference implementations, datasets), use the Firecrawl research tools: `firecrawl_research_search_papers`, `firecrawl_research_read_paper`, `firecrawl_research_related_papers` and `firecrawl_research_inspect_paper` for papers, and `firecrawl_agent` for questions that span several sites. Read a known URL with `firecrawl_scrape`. For an ordinary lookup, use ordinary search. Include this rule in any delegated research.
+- Record research per descriptor in the local research base `dev-docs/research/` (git-ignored): one folder per descriptor, holding the reports as delivered, an index of sources that says how far each was read, and the saved source texts. Later research on the same descriptor goes into that folder's existing files, never into a parallel set. Dataset and tool findings go to `dev-docs/research/datasets-and-tools.md`. Read the base before searching the web again.
 
 ## Engineering contracts
 
@@ -37,8 +43,9 @@ Sonara is the MeteorBurn fork of `kkollsga/sonara`, a Rust MIR library with a fu
 
 | Condition | Check |
 | --- | --- |
-| Rust core | Place unit tests at the bottom of their module. The full core gate is `cargo test -p sonara`. For aggression code or `FEATURE_REGISTRY` changes, also run `cargo test -p sonara --features aggression`; the Python binding always enables it. |
+| Delivery of a change under `sonara/`, `sonara-python/` or `python/` | Run `.\.venv\Scripts\python.exe scripts/run_gate.py` from the repo root. It runs the core tests in every build configuration, rebuilds the bindings, runs the Python suites and the fidelity gates, and prints one verdict. |
+| Rust core | Place unit tests at the bottom of their module. While iterating, run the targeted `cargo test -p sonara --lib <filter>`. |
 | Python API or bindings | For contract tests on Windows, build the bindings and run `.\.venv\Scripts\python.exe scripts/run_python_tests.py` from the repo root using the project environment. Suite files run as plain scripts: a bare pytest-style function without a driver silently runs zero tests. |
 | BPM, key or chord behavior | Require before/after numbers on labeled data. A `blocked` domain in `tests/fidelity_gates.json` stops the change until evidence is supplied. For tempo, avoid static ACF score-ratio rules that regress House/Techno controls. |
 | Analysis timing | Benchmark the Rust runner on real files. |
-| Independent feature checks on the maintainer's Windows machine | Use the shared `audio-python` from `C:\Tools\audio` for independent comparisons with librosa and pyloudnorm. Both Essentia executables, `ffmpeg` and `ffprobe` are on PATH. For native dynamics, run `audio-python dev-docs/bench/scripts/native-dynamics/verify.py ebu` from the repo root with bindings built. Use `itu` for BS.2217 or `tracks` to regenerate the 60-track report. |
+| Independent feature checks on the maintainer's Windows machine | Use the shared `audio-python` from `C:\Utils\tools\audio` for independent comparisons with librosa and pyloudnorm. Both Essentia executables, `ffmpeg` and `ffprobe` are on PATH. For native dynamics, run `audio-python dev-docs/bench/scripts/native-dynamics/verify.py ebu` from the repo root with bindings built. Use `itu` for BS.2217 or `tracks` to regenerate the 60-track report. |
