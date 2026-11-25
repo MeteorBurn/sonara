@@ -423,13 +423,82 @@ with more than six channels, whose layout the channel count does not determine
 (up to six are read in WAV order L R C LFE Ls Rs, LFE excluded) — so with the
 feature listed in `provenance.requested_features` and `native_sample_rate`
 present, a missing key means "measured, undefined", not "pending". Any of the
-three features sets `native_sample_rate` (Hz, int) when it measured a file, so
+three features (and `stereo_field` below) sets `native_sample_rate` (Hz, int) when it measured a file, so
 a record without it (an `analyze_signal` result) was never measured. The
 envelope is always present for a measured file. The always-on `loudness_lufs` and the `loudness` group
 (`true_peak_db`, ...) are a different measurement (mono mix, analysis rate,
 ungated) and keep their values. The keys travel with their feature name and
 `augment_analysis` refills them from the audio path (class `A`); they are not
 embedding evidence.
+
+Stereo field (2026-11-25, MeteorBurn fork, no schema bump: additive keys,
+existing values unchanged). The opt-in `stereo_field` feature
+(`features=["stereo_field"]` only; no mode computes it) belongs to the
+file-level family above: it is measured on the file's left and right channels
+at the file's own sample rate, so only `analyze_file` / `analyze_batch` emit
+it; `analyze_signal` never does, even when it is requested. It adds four
+dimensionless keys. `stereo_side_ratio` (0..1) is the share of the Side signal
+in the energy of the whole file: with Mid `(L + R)/2` and Side `(L − R)/2` it
+is `E_S / (E_M + E_S)` = `½·(1 − 2·cov(L,R) / (var L + var R))`. The variances
+and the covariance have the means removed, so a constant offset in a channel
+does not change the value. `0` means identical channels, `0.5` uncorrelated
+channels of equal power or sound in one channel only, `1` antiphase
+(`R = −L`); plain panning `R = a·L` reads `½·(1 − 2a/(1 + a²))`.
+`stereo_side_ratio_low` (0..1) is the same after a 4th-order Butterworth
+low-pass at 150 Hz applied to both channels. `stereo_correlation_mean`
+(−1..+1) is the mean over frames of the Pearson correlation of L and R; the
+frames are `2048/22050` s long, do not overlap, and an incomplete last frame
+is dropped. `stereo_correlation_p05` (−1..+1) is the 5th percentile of the
+same per-frame values, with the linear interpolation of the `_p10` fields.
+The filter is set in Hz and the frame in seconds, so values are comparable
+between files of different sample rates. Edge cases: a mono file is measured
+as `L = R` (shares `0`, correlations `+1`: this is how mono plays on a stereo
+system); a file with more than two channels gets none of the four keys,
+because its channel layout is unknown; a share is undefined when
+`(var L + var R)/2` in its band is below −70 dB; a frame in which the
+variance of both channels is below −70 dB is left out of the correlation
+statistics (a constant offset is not signal; each channel's mean is removed
+before the low-pass as well); a frame
+in which one channel has zero variance counts as `0`; the correlation is
+undefined when no frame is left. Abstention follows the family: a key is
+absent (`None` in Rust) when its value is undefined, and `stereo_field` sets
+`native_sample_rate` like the three features above, so with the feature
+listed in `provenance.requested_features` and `native_sample_rate` present, a
+missing key means "measured, undefined", not "pending". Sources of the
+parameters. The width measure is Tardieu, Deruty, Charbuillet and Peeters,
+"Production Effect: Audio Features for Recording Techniques Description and
+Decade Prediction" (DAFx 2011), eq. (3), `σ_LR = σ(L − R) / σ(L + R)`; the
+field is `σ_LR² / (1 + σ_LR²)`, the same quantity in a bounded 0..1 form. A
+related measure is the side/mid ratio of De Man et al. (ISMIR 2014). The
+correlation follows Ziemer 2023 (arXiv:2302.01090): `np.corrcoef` per frame
+of 2048 samples at 22050 Hz without overlap, averaged over the frames. Two
+differences: the frame is set in seconds, and the whole file is read at its
+own sample rate (the author takes 500 frames from the middle after
+downsampling to 22050 Hz). The zero for a channel without variance is the
+convention of hardware meters (RTW 1260C: with one input signal only the
+meter shows 0) and of Essentia; the −70 dB frame threshold is the one of
+Essentia's `FalseStereoDetector`, applied here to the variance instead of the
+power. No standard defines a correlation meter or
+a low-band edge. For the same purpose (mono compatibility of the low end)
+100 Hz and 300 Hz (the Furnace record-pressing guide), 180 Hz (Ableton Hybrid
+Reverb) and a 10–200 Hz scale (Maselec MTC-1X) are published; 150 Hz lies
+inside that range and is a choice of this project, as are the Butterworth
+filter of 4th order and the 5th percentile. No value was fitted to tracks or
+verification sets. Known limits: the correlation is `+1` for identical
+channels and for plain panning alike, so the width in that case shows only in
+`stereo_side_ratio`; `ffmpeg aphasemeter` computes a different quantity (the
+mean of `2LR / (L² + R²)` per sample) and matches the correlation fields only
+at `+1` and `−1`; lossy coding (joint stereo) can change the side signal: on
+10 MUSDB18-HQ mixtures MP3 at 128 kbit/s moved the four fields by at most
+0.006 and at 320 kbit/s by at most 0.001. Readings on the 150 MUSDB18-HQ
+mixtures (median, 10th–90th percentile): `stereo_side_ratio` 0.09
+(0.02–0.19), `stereo_side_ratio_low` 0.04 (0.004–0.11),
+`stereo_correlation_mean` 0.79 (0.55–0.93), `stereo_correlation_p05` 0.49
+(0.02–0.82, below zero in 15 mixtures). The published reference agrees: De
+Man et al. give a side/mid ratio of 0.101 ± 0.049 for finished mixes (averaged
+over frames there), a share of about 0.09. The keys
+travel with `stereo_field` and `augment_analysis` refills them from the audio
+path (class `A`); they are not embedding evidence.
 
 `mood_aggressive` no longer depends on the rest of the request (2026-10-03, no
 schema bump): a `mood` request computes `dissonance` for its `0.20·dissonance`

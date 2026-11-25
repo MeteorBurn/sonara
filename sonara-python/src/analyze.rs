@@ -90,6 +90,11 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
             "amplitude_envelope_frame_sec",
             r.amplitude_envelope_frame_sec,
         ),
+        // stereo_field (file-only as well)
+        ("stereo_side_ratio", r.stereo_side_ratio),
+        ("stereo_side_ratio_low", r.stereo_side_ratio_low),
+        ("stereo_correlation_mean", r.stereo_correlation_mean),
+        ("stereo_correlation_p05", r.stereo_correlation_p05),
     ] {
         if let Some(v) = value {
             d.set_item(key, v)?;
@@ -1075,6 +1080,10 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
             f32,
             "a float"
         ),
+        stereo_side_ratio: opt_field!(cached, "stereo_side_ratio", f32, "a float"),
+        stereo_side_ratio_low: opt_field!(cached, "stereo_side_ratio_low", f32, "a float"),
+        stereo_correlation_mean: opt_field!(cached, "stereo_correlation_mean", f32, "a float"),
+        stereo_correlation_p05: opt_field!(cached, "stereo_correlation_p05", f32, "a float"),
         spectral_centroid_mean: core_field!(cached, "spectral_centroid_mean", f32, "a float", 0.0),
         zero_crossing_rate: core_field!(cached, "zero_crossing_rate", f32, "a float", 0.0),
         onset_density: core_field!(cached, "onset_density", f32, "a float", 0.0),

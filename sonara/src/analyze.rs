@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 
-use ndarray::{s, Array1, Array2};
+use ndarray::{s, Array1, Array2, ArrayView2};
 use rayon::prelude::*;
 
 use crate::core::{audio, convert, fft, spectrum};
@@ -625,6 +625,171 @@ fn rhythm_levels(
     (ratio(sums[1]), ratio(sums[2]), confidence as Float)
 }
 
+// ---- Stereo field (Side share and L/R correlation on the file's channels), math in f64 ----
+
+// Width: Tardieu et al., DAFx 2011, eq. (3), sigma(L-R)/sigma(L+R), in the
+// bounded form E_S / (E_M + E_S).
+// Edge of the low band, Hz: project choice, no published norm. So is its
+// filter, a Butterworth low-pass of order 4.
+const STEREO_LOW_CUTOFF_HZ: f64 = 150.0;
+// Correlation frame, seconds, no overlap, mean over frames: Ziemer 2023 (arXiv:2302.01090).
+const STEREO_FRAME_SEC: f64 = 2048.0 / 22050.0;
+// Silence threshold, a variance of -70 dB, and "no variance reads 0":
+// Essentia FalseStereoDetector / RTW 1260C.
+const STEREO_SILENCE_POWER: f64 = 1e-7;
+// Low percentile of the frame correlations: project choice, no published norm.
+const STEREO_CORRELATION_LOW_QUANTILE: f64 = 0.05;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct StereoField {
+    side_ratio: Option<Float>,
+    side_ratio_low: Option<Float>,
+    correlation_mean: Option<Float>,
+    correlation_p05: Option<Float>,
+}
+
+/// Running sums over a pair of channels.
+#[derive(Clone, Copy, Default)]
+struct PairSums {
+    n: f64,
+    l: f64,
+    r: f64,
+    ll: f64,
+    rr: f64,
+    lr: f64,
+}
+
+impl PairSums {
+    #[inline]
+    fn add(&mut self, l: f64, r: f64) {
+        self.n += 1.0;
+        self.l += l;
+        self.r += r;
+        self.ll += l * l;
+        self.rr += r * r;
+        self.lr += l * r;
+    }
+
+    /// `(1 - 2 cov(L, R) / (var L + var R)) / 2`, the Side share of the energy
+    /// with each channel's mean removed; `None` without samples or when the
+    /// mean variance is below the silence threshold.
+    fn side_ratio(&self) -> Option<Float> {
+        let (mean_l, mean_r) = (self.l / self.n, self.r / self.n);
+        let var = (self.ll / self.n - mean_l * mean_l) + (self.rr / self.n - mean_r * mean_r);
+        let cov = self.lr / self.n - mean_l * mean_r;
+        (var / 2.0 >= STEREO_SILENCE_POWER)
+            .then(|| (0.5 * (1.0 - 2.0 * cov / var)).clamp(0.0, 1.0) as Float)
+    }
+
+    /// Pearson correlation of the frame; 0 when a channel has no variance,
+    /// `None` when the variance of both channels is below the silence
+    /// threshold (a constant offset is not signal).
+    fn correlation(&self) -> Option<Float> {
+        // `n^2` times the variances.
+        let var_l = self.n * self.ll - self.l * self.l;
+        let var_r = self.n * self.rr - self.r * self.r;
+        let floor = STEREO_SILENCE_POWER * self.n * self.n;
+        if var_l < floor && var_r < floor {
+            return None;
+        }
+        // A constant channel keeps a rounding residue of about 1e-12 of its
+        // power here, so "no variance" is tested against the power, not zero.
+        let flat = |var: f64, power: f64| var <= 1e-9 * self.n * power;
+        Some(if flat(var_l, self.ll) || flat(var_r, self.rr) {
+            0.0
+        } else {
+            ((self.n * self.lr - self.l * self.r) / (var_l * var_r).sqrt()).clamp(-1.0, 1.0)
+                as Float
+        })
+    }
+}
+
+/// Stereo field of a file's channels (rows) at its sample rate `sr`: the Side
+/// share of the energy, whole and below 150 Hz, and the mean and 5th
+/// percentile of the per-frame correlation of the unfiltered channels. One
+/// channel reads as `L = R`; everything is `None` for no or over two channels.
+fn stereo_field(channels: ArrayView2<Float>, sr: u32) -> StereoField {
+    let (left, right) = match channels.nrows() {
+        1 => (channels.row(0), channels.row(0)),
+        2 => (channels.row(0), channels.row(1)),
+        _ => return StereoField::default(),
+    };
+    let fs = sr as f64;
+    // Each channel's mean comes off before the low-pass: left in, a constant
+    // offset would reach the filter as a step and read as bass.
+    let mean =
+        |x: ndarray::ArrayView1<Float>| x.iter().map(|&v| v as f64).sum::<f64>() / x.len() as f64;
+    let (mean_l, mean_r) = (mean(left), mean(right));
+    // Low-pass biquads `[b0, b1, b2, a1, a2]`: bilinear transform with
+    // prewarping, as `scipy.signal.butter(4, 150, fs=fs)`.
+    let low_pass = (STEREO_LOW_CUTOFF_HZ < fs / 2.0).then(|| {
+        use std::f64::consts::PI;
+        let k = (PI * STEREO_LOW_CUTOFF_HZ / fs).tan();
+        // The order-4 poles sit at pi/8 and 3 pi/8 off the real axis.
+        [PI / 8.0, 3.0 * PI / 8.0].map(|angle| {
+            let q = 1.0 / (2.0 * angle.cos());
+            let a0 = 1.0 + k / q + k * k;
+            [
+                k * k / a0,
+                2.0 * k * k / a0,
+                k * k / a0,
+                2.0 * (k * k - 1.0) / a0,
+                (1.0 - k / q + k * k) / a0,
+            ]
+        })
+    });
+    // Transposed direct form II.
+    let step = |c: &[f64; 5], x: f64, st: &mut [f64; 2]| {
+        let y = c[0] * x + st[0];
+        st[0] = c[1] * x - c[3] * y + st[1];
+        st[1] = c[2] * x - c[4] * y;
+        y
+    };
+    let frame_len = (STEREO_FRAME_SEC * fs).round();
+    let (mut whole, mut low, mut frame) = (
+        PairSums::default(),
+        PairSums::default(),
+        PairSums::default(),
+    );
+    // Filter state per section, left then right.
+    let mut state = [[[0.0_f64; 2]; 2]; 2];
+    let mut correlations: Vec<Float> = Vec::new();
+    for (&l, &r) in left.iter().zip(right.iter()) {
+        let (l, r) = (l as f64, r as f64);
+        whole.add(l, r);
+        frame.add(l, r);
+        // A trailing partial frame is never closed, so it is dropped.
+        if frame.n == frame_len {
+            correlations.extend(frame.correlation());
+            frame = PairSums::default();
+        }
+        if let Some(sections) = &low_pass {
+            let (mut low_l, mut low_r) = (l - mean_l, r - mean_r);
+            for (c, st) in sections.iter().zip(state.iter_mut()) {
+                low_l = step(c, low_l, &mut st[0]);
+                low_r = step(c, low_r, &mut st[1]);
+            }
+            low.add(low_l, low_r);
+        }
+    }
+    let any = !correlations.is_empty();
+    StereoField {
+        side_ratio: whole.side_ratio(),
+        // Without the filter `low` holds no samples and reads `None`.
+        side_ratio_low: low.side_ratio(),
+        correlation_mean: any.then(|| {
+            let sum: f64 = correlations.iter().map(|&c| c as f64).sum();
+            (sum / correlations.len() as f64) as Float
+        }),
+        correlation_p05: any.then(|| {
+            sorted_quantile(
+                &sorted_series(&correlations),
+                STEREO_CORRELATION_LOW_QUANTILE,
+            )
+        }),
+    }
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -891,6 +1056,7 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("ebur128", false, true, false, A, &[]),
     feature("native_dynamics", false, true, false, A, &[]),
     feature("amplitude_envelope", false, true, false, A, &[]),
+    feature("stereo_field", false, true, false, A, &[]),
     feature("silence", false, true, false, C, &[]),
     feature("key_candidates", true, true, false, S, &["chroma_mean"]),
     feature(
@@ -1576,9 +1742,10 @@ pub struct TrackAnalysis {
     /// tolerance (+0.2 / -0.4 dB): it can read up to 0.4 dB low.
     pub ebur128_true_peak_dbtp: Option<Float>,
     /// Sample rate of the file in Hz, the rate the file-only features are
-    /// measured at. `Some` whenever any of `ebur128`, `native_dynamics` or
-    /// `amplitude_envelope` was measured from a file, so it tells "measured,
-    /// value undefined" (a level is `None`) from "never measured" (a signal).
+    /// measured at. `Some` whenever any of `ebur128`, `native_dynamics`,
+    /// `amplitude_envelope` or `stereo_field` was measured from a file, so it
+    /// tells "measured, value undefined" (a level is `None`) from "never
+    /// measured" (a signal).
     pub native_sample_rate: Option<u32>,
     /// `native_dynamics`: sample peak in dBFS, max |x| over the file's channels
     /// (not the mono mix).
@@ -1597,6 +1764,32 @@ pub struct TrackAnalysis {
     pub amplitude_envelope_hop_sec: Option<Float>,
     /// `amplitude_envelope`: envelope frame length in seconds.
     pub amplitude_envelope_frame_sec: Option<Float>,
+    // --- stereo_field ---
+    // File-only and opt-in like the group above, measured on the left and
+    // right channels of the file. A mono file reads as L = R (shares 0,
+    // correlation +1). `None` when not requested, for a signal, for a file
+    // with more than two channels (unknown layout), and where noted below.
+    /// `stereo_field`: share of the Side signal in the energy of the whole
+    /// file, `E_S / (E_M + E_S)` with `M = (L + R) / 2`, `S = (L - R) / 2` and
+    /// each channel's mean removed, in `[0, 1]`: 0 for identical channels, 0.5
+    /// for unrelated ones, 1 for an inverted channel (Tardieu et al. 2011,
+    /// eq. 3, in bounded form). `None` when the mean variance of the channels
+    /// is below -70 dB.
+    pub stereo_side_ratio: Option<Float>,
+    /// `stereo_field`: the same share below 150 Hz, after a Butterworth
+    /// low-pass of order 4 on both channels (means removed first). `None`
+    /// when the filtered channels are below -70 dB or the file's Nyquist
+    /// frequency is at most 150 Hz.
+    pub stereo_side_ratio_low: Option<Float>,
+    /// `stereo_field`: mean of the Pearson correlation of the left and right
+    /// channels over frames of 2048/22050 s without overlap (Ziemer 2023), in
+    /// `[-1, 1]`. A frame with the variance of both channels below -70 dB is
+    /// left out; a frame with a channel of no variance counts as 0. `None`
+    /// when no frame is left.
+    pub stereo_correlation_mean: Option<Float>,
+    /// `stereo_field`: 5th percentile of the same frame correlations (linear
+    /// interpolation, as the `_p10` fields), `None` under the same condition.
+    pub stereo_correlation_p05: Option<Float>,
     pub spectral_centroid_mean: Float,
     pub zero_crossing_rate: Float,
     pub onset_density: Float,
@@ -2052,17 +2245,19 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
     // requested, then post-fill the result. When not requested, `load_with_tags`
     // does zero extra work — identical to the plain `load` fast path.
     let want_tags = config.wants("tags");
-    // File-only loudness/dynamics need the file's own channels and rate: decode
+    // File-only loudness/dynamics/stereo need the file's own channels and rate: decode
     // once without downmixing, measure, then continue on the same mono mix
     // `load_with_tags` would have produced.
     let want_ebur128 = config.wants("ebur128");
     let want_dynamics = config.wants("native_dynamics");
     let want_envelope = config.wants("amplitude_envelope");
-    if want_ebur128 || want_dynamics || want_envelope {
+    let want_stereo = config.wants("stereo_field");
+    if want_ebur128 || want_dynamics || want_envelope || want_stereo {
         let (channels, native_sr, tags) = audio::load_channels_with_tags(path, want_tags)?;
         let ebu = want_ebur128.then(|| crate::native_dynamics::ebur128(channels.view(), native_sr));
         let dynamics = (want_dynamics || want_envelope)
             .then(|| crate::native_dynamics::native_dynamics(channels.view(), native_sr));
+        let stereo = want_stereo.then(|| stereo_field(channels.view(), native_sr));
         let native = if channels.nrows() == 1 {
             channels.row(0).to_owned()
         } else {
@@ -2094,6 +2289,12 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
                 result.amplitude_envelope_frame_sec =
                     Some(crate::native_dynamics::ENVELOPE_FRAME_SEC as Float);
             }
+        }
+        if let Some(stereo) = stereo {
+            result.stereo_side_ratio = stereo.side_ratio;
+            result.stereo_side_ratio_low = stereo.side_ratio_low;
+            result.stereo_correlation_mean = stereo.correlation_mean;
+            result.stereo_correlation_p05 = stereo.correlation_p05;
         }
         return Ok(result);
     }
@@ -4096,6 +4297,10 @@ fn analyze_signal_inner(
         amplitude_envelope: None,
         amplitude_envelope_hop_sec: None,
         amplitude_envelope_frame_sec: None,
+        stereo_side_ratio: None,
+        stereo_side_ratio_low: None,
+        stereo_correlation_mean: None,
+        stereo_correlation_p05: None,
         spectral_centroid_mean: centroid_mean,
         zero_crossing_rate: zcr,
         onset_density,
@@ -5214,6 +5419,13 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.amplitude_envelope_hop_sec = fresh.amplitude_envelope_hop_sec;
             out.amplitude_envelope_frame_sec = fresh.amplitude_envelope_frame_sec;
         }
+        "stereo_field" => {
+            out.native_sample_rate = fresh.native_sample_rate;
+            out.stereo_side_ratio = fresh.stereo_side_ratio;
+            out.stereo_side_ratio_low = fresh.stereo_side_ratio_low;
+            out.stereo_correlation_mean = fresh.stereo_correlation_mean;
+            out.stereo_correlation_p05 = fresh.stereo_correlation_p05;
+        }
         "silence" => {
             out.leading_silence_sec = fresh.leading_silence_sec;
             out.trailing_silence_sec = fresh.trailing_silence_sec;
@@ -5626,6 +5838,7 @@ mod tests {
             "ebur128",
             "native_dynamics",
             "amplitude_envelope",
+            "stereo_field",
             "silence",
             "key_candidates",
             "vocalness",
@@ -5695,6 +5908,7 @@ mod tests {
         assert_eq!(class_of("ebur128"), DependencyClass::Audio);
         assert_eq!(class_of("native_dynamics"), DependencyClass::Audio);
         assert_eq!(class_of("amplitude_envelope"), DependencyClass::Audio);
+        assert_eq!(class_of("stereo_field"), DependencyClass::Audio);
         assert_eq!(class_of("tags"), DependencyClass::Audio);
         assert_eq!(class_of("bpm"), DependencyClass::FrameCurves);
         assert_eq!(class_of("chroma"), DependencyClass::FrameCurves);
@@ -8922,7 +9136,12 @@ mod tests {
 
     // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---
 
-    const NATIVE_FEATURES: [&str; 3] = ["ebur128", "native_dynamics", "amplitude_envelope"];
+    const NATIVE_FEATURES: [&str; 4] = [
+        "ebur128",
+        "native_dynamics",
+        "amplitude_envelope",
+        "stereo_field",
+    ];
 
     /// Stereo 16-bit 48 kHz WAV: 1 kHz sine at `peak_dbfs` (silence if `None`),
     /// in phase on both channels.
@@ -8978,7 +9197,7 @@ mod tests {
         )
     }
 
-    /// `r` with the 12 file-only fields and the recorded request cleared.
+    /// `r` with the 16 file-only fields and the recorded request cleared.
     fn without_native_fields(mut r: TrackAnalysis) -> TrackAnalysis {
         let blank = analyze_signal(sine(440.0, 22050, 0.5).view(), 22050, &compact()).unwrap();
         for name in NATIVE_FEATURES {
@@ -9032,19 +9251,21 @@ mod tests {
                 ebur128_fields(r) != ebur128_fields(&none),
                 native_dynamics_fields(r) != native_dynamics_fields(&none),
                 amplitude_envelope_fields(r) != amplitude_envelope_fields(&none),
+                stereo_field_fields(r) != stereo_field_fields(&none),
             ]
         };
         assert_eq!(ebur128_fields(&none), [None; 5]);
         assert_eq!(native_dynamics_fields(&none), [None; 3]);
         assert_eq!(none.native_sample_rate, None);
         assert_eq!(amplitude_envelope_fields(&none), (None, [None; 2]));
-        assert_eq!(groups(&all), [true; 3]);
+        assert_eq!(stereo_field_fields(&none), [None; 4]);
+        assert_eq!(groups(&all), [true; 4]);
         for (i, name) in NATIVE_FEATURES.iter().enumerate() {
             let one = run(&[*name]);
-            let mut expected = [false; 3];
+            let mut expected = [false; 4];
             expected[i] = true;
             assert_eq!(groups(&one), expected, "{name}");
-            // Any of the three marks the record as measured from a file.
+            // Any of the four marks the record as measured from a file.
             assert_eq!(one.native_sample_rate, Some(48_000), "{name}");
             // The envelope run shares the dynamics pass but emits the same values.
             assert_eq!(
@@ -9052,6 +9273,7 @@ mod tests {
                     ebur128_fields(&one) == ebur128_fields(&all),
                     native_dynamics_fields(&one) == native_dynamics_fields(&all),
                     amplitude_envelope_fields(&one) == amplitude_envelope_fields(&all),
+                    stereo_field_fields(&one) == stereo_field_fields(&all),
                 ],
                 expected,
                 "{name}"
@@ -9061,7 +9283,7 @@ mod tests {
         // A bare signal has no file: requested or not, the fields stay None.
         let y = sine(440.0, 22050, 2.0);
         let signal = analyze_signal(y.view(), 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
-        assert_eq!(groups(&signal), [false; 3]);
+        assert_eq!(groups(&signal), [false; 4]);
         assert_eq!(signal.native_sample_rate, None);
         std::fs::remove_file(&path).unwrap();
 
@@ -9072,6 +9294,7 @@ mod tests {
         assert_eq!(ebur128_fields(&z), [None; 5]);
         assert_eq!(z.native_sample_rate, Some(48_000));
         assert_eq!(native_dynamics_fields(&z), [None; 3]);
+        assert_eq!(stereo_field_fields(&z), [None; 4]);
         assert!(z
             .amplitude_envelope
             .is_some_and(|e| !e.is_empty() && e.iter().all(|&v| v == 0.0)));
@@ -9124,6 +9347,9 @@ mod tests {
             amplitude_envelope_fields(&out),
             amplitude_envelope_fields(&fresh)
         );
+        assert_eq!(stereo_field_fields(&out), [None; 4]);
+        merge_feature_fields(&mut out, &fresh, "stereo_field");
+        assert_eq!(stereo_field_fields(&out), stereo_field_fields(&fresh));
 
         // End to end: the audio fallback of augment fills the same values.
         let augmented =
@@ -9139,5 +9365,269 @@ mod tests {
             amplitude_envelope_fields(&augmented),
             amplitude_envelope_fields(&fresh)
         );
+        assert_eq!(stereo_field_fields(&augmented), stereo_field_fields(&fresh));
+    }
+
+    // --- stereo_field (file-only) ---
+
+    const STEREO_RATES: [u32; 4] = [22050, 44100, 48000, 96000];
+    /// Ten cycles per correlation frame, inside the low band.
+    const STEREO_TONE_HZ: f64 = 10.0 * 22050.0 / 2048.0;
+
+    fn stereo_field_fields(r: &TrackAnalysis) -> [Option<Float>; 4] {
+        [
+            r.stereo_side_ratio,
+            r.stereo_side_ratio_low,
+            r.stereo_correlation_mean,
+            r.stereo_correlation_p05,
+        ]
+    }
+
+    fn stereo_values(s: StereoField) -> [Option<Float>; 4] {
+        [
+            s.side_ratio,
+            s.side_ratio_low,
+            s.correlation_mean,
+            s.correlation_p05,
+        ]
+    }
+
+    fn wave(freq: f64, t: f64) -> f64 {
+        (2.0 * std::f64::consts::PI * freq * t).sin()
+    }
+
+    /// 60 Hz plus 1 kHz: energy in the low band and above it.
+    fn two_tones(t: f64) -> f64 {
+        0.4 * (wave(60.0, t) + wave(1000.0, t))
+    }
+
+    /// Channels `(l, r)` as functions of time in seconds.
+    fn stereo_pair(sr: u32, secs: f64, f: impl Fn(f64) -> (f64, f64)) -> Array2<Float> {
+        let n = (sr as f64 * secs) as usize;
+        let mut out = Array2::zeros((2, n));
+        for i in 0..n {
+            let (l, r) = f(i as f64 / sr as f64);
+            out[[0, i]] = l as Float;
+            out[[1, i]] = r as Float;
+        }
+        out
+    }
+
+    /// `[side_ratio, side_ratio_low, correlation_mean, correlation_p05]` within `tol`.
+    fn assert_stereo(x: &Array2<Float>, sr: u32, want: [f64; 4], tol: f64, label: &str) {
+        let got = stereo_values(stereo_field(x.view(), sr));
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                g.is_some_and(|g| (g as f64 - w).abs() <= tol),
+                "{label} sr={sr} field {i}: {got:?} vs {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stereo_field_exact_cases() {
+        for sr in STEREO_RATES {
+            let same = stereo_pair(sr, 4.0, |t| (two_tones(t), two_tones(t)));
+            assert_stereo(&same, sr, [0.0, 0.0, 1.0, 1.0], 0.01, "L = R");
+            // A mono file plays as L = R.
+            let mono = same.slice(s![..1, ..]).to_owned();
+            assert_stereo(&mono, sr, [0.0, 0.0, 1.0, 1.0], 0.01, "mono");
+
+            let inverted = stereo_pair(sr, 4.0, |t| (two_tones(t), -two_tones(t)));
+            assert_stereo(&inverted, sr, [1.0, 1.0, -1.0, -1.0], 0.01, "R = -L");
+
+            // Panning R = a L: side share (1 - 2a / (1 + a^2)) / 2 = 0.1 at a = 0.5.
+            let panned = stereo_pair(sr, 4.0, |t| (two_tones(t), 0.5 * two_tones(t)));
+            assert_stereo(&panned, sr, [0.1, 0.1, 1.0, 1.0], 0.01, "R = 0.5 L");
+
+            // One tone shifted by phi: correlation cos(phi), side share (1 - cos(phi)) / 2.
+            for degrees in [60.0_f64, 120.0] {
+                let phi = degrees.to_radians();
+                let shifted = stereo_pair(sr, 4.0, |t| {
+                    let phase = 2.0 * std::f64::consts::PI * STEREO_TONE_HZ * t;
+                    (0.5 * phase.sin(), 0.5 * (phase + phi).sin())
+                });
+                let (c, side) = (phi.cos(), (1.0 - phi.cos()) / 2.0);
+                assert_stereo(&shifted, sr, [side, side, c, c], 0.01, "phase shift");
+            }
+
+            // A constant offset in one channel is not stereo content.
+            let offset = stereo_pair(sr, 4.0, |t| (two_tones(t) + 0.1, two_tones(t)));
+            assert_stereo(&offset, sr, [0.0, 0.0, 1.0, 1.0], 0.01, "L = R + 0.1");
+        }
+    }
+
+    #[test]
+    fn test_stereo_field_independent_noise() {
+        for sr in STEREO_RATES {
+            // Knuth's MMIX generator; rows are filled one after the other, so
+            // the channels are independent.
+            let mut state = 1_u64;
+            let noise = Array2::from_shape_fn((2, sr as usize * 4), |_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 40) as f64 / (1_u64 << 24) as f64 - 0.5) as Float
+            });
+            let [side, low, mean, p05] =
+                stereo_values(stereo_field(noise.view(), sr)).map(Option::unwrap);
+            assert!((side - 0.5).abs() < 0.02, "sr={sr} side {side}");
+            // About 2 * 150 Hz * 4 s independent values in the low band.
+            assert!((low - 0.5).abs() < 0.1, "sr={sr} low {low}");
+            assert!(mean.abs() < 0.02, "sr={sr} mean {mean}");
+            assert!(p05 < mean && p05 > -0.1, "sr={sr} p05 {p05}");
+        }
+    }
+
+    #[test]
+    fn test_stereo_field_low_band_differs_from_the_whole() {
+        for sr in STEREO_RATES {
+            let wide_top = stereo_pair(sr, 4.0, |t| {
+                let (low, high) = (0.4 * wave(60.0, t), 0.4 * wave(2000.0, t));
+                (low + high, low - high)
+            });
+            let got = stereo_field(wide_top.view(), sr);
+            assert!(got.side_ratio_low.unwrap() < 0.01, "sr={sr} {got:?}");
+            assert!(
+                (got.side_ratio.unwrap() - 0.5).abs() < 0.01,
+                "sr={sr} {got:?}"
+            );
+
+            let wide_bass = stereo_pair(sr, 4.0, |t| {
+                let (low, high) = (0.4 * wave(60.0, t), 0.4 * wave(2000.0, t));
+                (low + high, high - low)
+            });
+            let got = stereo_field(wide_bass.view(), sr);
+            assert!(got.side_ratio_low.unwrap() > 0.99, "sr={sr} {got:?}");
+            assert!(
+                (got.side_ratio.unwrap() - 0.5).abs() < 0.01,
+                "sr={sr} {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stereo_field_edges() {
+        for sr in STEREO_RATES {
+            let n = sr as usize * 4;
+            let silence = Array2::<Float>::zeros((2, n));
+            assert_eq!(stereo_values(stereo_field(silence.view(), sr)), [None; 4]);
+            let empty = Array2::<Float>::zeros((2, 0));
+            assert_eq!(stereo_values(stereo_field(empty.view(), sr)), [None; 4]);
+
+            // Past two channels the layout is unknown.
+            let three =
+                Array2::from_shape_fn((3, n), |(_, i)| two_tones(i as f64 / sr as f64) as Float);
+            assert_eq!(stereo_values(stereo_field(three.view(), sr)), [None; 4]);
+
+            // Shorter than one correlation frame: the share is defined, the correlation is not.
+            let short = stereo_pair(sr, 0.05, |t| (two_tones(t), two_tones(t)));
+            let got = stereo_field(short.view(), sr);
+            assert_eq!(got.side_ratio, Some(0.0));
+            assert_eq!([got.correlation_mean, got.correlation_p05], [None; 2]);
+
+            // One channel empty: correlation 0 by convention, half the energy is Side.
+            let one_sided = stereo_pair(sr, 4.0, |t| (two_tones(t), 0.0));
+            assert_stereo(&one_sided, sr, [0.5, 0.5, 0.0, 0.0], 0.01, "R = 0");
+            // A constant channel has no variance either, whatever its level.
+            let flat = stereo_pair(sr, 4.0, |t| (two_tones(t), 0.3));
+            assert_stereo(&flat, sr, [0.5, 0.5, 0.0, 0.0], 0.01, "R = 0.3");
+
+            // Silent frames stay out of the statistics, with or without a
+            // constant offset: counted in, they would pull the mean to -0.5.
+            for offset in [0.0, 0.01] {
+                let half_silent = stereo_pair(sr, 4.0, |t| {
+                    let x = if t < 2.0 { two_tones(t) } else { 0.0 };
+                    (x + offset, offset - x)
+                });
+                assert_stereo(
+                    &half_silent,
+                    sr,
+                    [1.0, 1.0, -1.0, -1.0],
+                    0.01,
+                    "half silent",
+                );
+            }
+
+            // Only a constant: nothing varies, so nothing is defined.
+            let constant = stereo_pair(sr, 4.0, |_| (0.1, 0.3));
+            assert_eq!(
+                stereo_values(stereo_field(constant.view(), sr)),
+                [None; 4]
+            );
+            // An offset on a signal without bass does not read as wide bass.
+            let no_bass = stereo_pair(sr, 4.0, |t| {
+                let x = 0.5 * wave(1000.0, t);
+                (x + 0.1, x)
+            });
+            let got = stereo_field(no_bass.view(), sr);
+            assert!(got.side_ratio_low.unwrap_or(0.0) < 0.01, "sr={sr} {got:?}");
+            assert!(got.side_ratio.unwrap() < 0.01, "sr={sr} {got:?}");
+        }
+        // 43 frames at 22050 Hz, the first three inverted: the mean is 37/43 and
+        // the 5th percentile lies 0.1 of the way from -1 to +1.
+        let mostly_same = stereo_pair(22050, 4.0, |t| {
+            let x = two_tones(t);
+            (x, if t < 3.0 * 2048.0 / 22050.0 { -x } else { x })
+        });
+        let got = stereo_field(mostly_same.view(), 22050);
+        assert!(
+            (got.correlation_mean.unwrap() - 37.0 / 43.0).abs() < 1e-3,
+            "{got:?}"
+        );
+        assert!((got.correlation_p05.unwrap() + 0.8).abs() < 1e-3, "{got:?}");
+        // The low band needs its 150 Hz edge below Nyquist.
+        let slow = stereo_pair(300, 4.0, |t| (wave(20.0, t), -wave(20.0, t)));
+        let got = stereo_field(slow.view(), 300);
+        assert_eq!(got.side_ratio_low, None);
+        assert_eq!(got.side_ratio, Some(1.0));
+    }
+
+    /// Stereo 16-bit 48 kHz WAV, 3 s of `two_tones` with the right channel at half level.
+    fn write_stereo_field_wav(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sonara-stereo-field-{tag}-{}.wav",
+            std::process::id()
+        ));
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..48_000 * 3 {
+            let x = two_tones(i as f64 / 48_000.0);
+            for level in [1.0, 0.5] {
+                writer
+                    .write_sample((level * x * 32768.0).round() as i16)
+                    .unwrap();
+            }
+        }
+        writer.finalize().unwrap();
+        path
+    }
+
+    #[test]
+    fn test_stereo_field_presence_follows_requests() {
+        let path = write_stereo_field_wav("presence");
+        let with = analyze_file(&path, 22050, &feature_config(&["stereo_field"])).unwrap();
+        let without = analyze_file(&path, 22050, &feature_config(&["rms"])).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(with.native_sample_rate, Some(48_000));
+        for (got, want) in stereo_field_fields(&with).iter().zip([0.1, 0.1, 1.0, 1.0]) {
+            assert!(
+                got.is_some_and(|g| (g - want).abs() < 0.01),
+                "{got:?} vs {want}"
+            );
+        }
+        assert_eq!(stereo_field_fields(&without), [None; 4]);
+
+        // A bare signal has no file channels: requested or not, the fields stay None.
+        let y = sine(440.0, 22050, 2.0);
+        let signal = analyze_signal(y.view(), 22050, &feature_config(&["stereo_field"])).unwrap();
+        assert_eq!(stereo_field_fields(&signal), [None; 4]);
+        assert_eq!(signal.native_sample_rate, None);
     }
 }

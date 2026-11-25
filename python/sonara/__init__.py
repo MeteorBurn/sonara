@@ -49,8 +49,8 @@ def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None,
 
     ``features`` selects features explicitly (overriding ``mode``) and is the
     only way to enable the opt-in features: ``beatgrid``, ``onset_bands``,
-    ``rhythmic_regularity``, ``hpss``, ``rhythm_levels``, ``structure``,
-    ``embedding``, ``aggression``,
+    ``rhythmic_regularity``, ``hpss``, ``rhythm_levels``, ``stereo_field``,
+    ``structure``, ``embedding``, ``aggression``,
     ``fingerprint``, ``loudness``, ``silence``, ``key_candidates``,
     ``vocalness``. See the README for the full list.
 

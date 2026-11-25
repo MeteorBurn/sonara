@@ -377,7 +377,7 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   "ebur128_range_lu"             — loudness range (LRA), LU
 #   "ebur128_true_peak_dbtp"       — true peak over the channels, dBTP (4x);
 #                                    EBU Tech 3341 accuracy, +0.2 / -0.4 dB
-# Any of the three features also sets:
+# Any of the three features (and stereo_field below) also sets:
 #   "native_sample_rate"           — int, sample rate of the file, Hz. Present
 #                                    means "measured from a file", so a missing
 #                                    level is undefined, not unmeasured
@@ -393,6 +393,42 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                                    centred at k * amplitude_envelope_hop_sec
 #   "amplitude_envelope_hop_sec"   — hop, seconds (512/22050)
 #   "amplitude_envelope_frame_sec" — frame length, seconds (2048/22050)
+
+# --- stereo_field --- features=["stereo_field"] (opt-in only: no mode computes it)
+# File-only like the family above: measured by analyze_file / analyze_batch on
+# the file's left and right channels at its own sample rate; analyze_signal
+# never emits it. All float, dimensionless. A key is absent when its value is
+# undefined; "native_sample_rate" (above) is set as well and marks the record
+# as measured from a file. A mono file is measured as L = R (shares 0,
+# correlations +1); a file with more than two channels gets none of the four
+# keys (unknown layout).
+#   "stereo_side_ratio"        — 0..1, share of the Side signal in the energy
+#                                of the whole file:
+#                                0.5 * (1 - 2*cov(L,R) / (var L + var R)),
+#                                means removed (a constant offset in a channel
+#                                does not change it). 0 = identical channels,
+#                                0.5 = uncorrelated channels of equal power or
+#                                sound in one channel only, 1 = antiphase
+#                                (R = -L). Tardieu et al., DAFx 2011, eq. (3):
+#                                s^2 / (1 + s^2) with s = std(L-R) / std(L+R).
+#                                Absent when (var L + var R) / 2 is below -70 dB
+#   "stereo_side_ratio_low"    — the same after a 4th-order Butterworth
+#                                low-pass at 150 Hz on both channels; absent
+#                                when the band holds less than -70 dB
+#   "stereo_correlation_mean"  — -1..+1, mean over frames of the Pearson
+#                                correlation of L and R; frames of 2048/22050 s
+#                                without overlap, an incomplete last frame is
+#                                dropped (Ziemer 2023, arXiv:2302.01090).
+#                                Frames with both variances below -70 dB are
+#                                skipped; a frame where one channel has zero
+#                                variance counts as 0. Absent when no frame is
+#                                left. +1 for identical channels and for plain
+#                                panning (R = a*L) alike
+#   "stereo_correlation_p05"   — 5th percentile of the same frames (linear
+#                                interpolation, as the _p10 keys)
+# The filter is set in Hz and the frame in seconds, so values are comparable
+# between files of different sample rates. The 150 Hz edge, the filter order
+# and the 5th percentile are project choices, not taken from a standard.
 
 # --- frame statistics ---
 # Spread, frame-to-frame change and quantiles of the per-frame values behind the

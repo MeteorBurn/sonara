@@ -277,7 +277,7 @@ r['ebur128_momentary_max_lufs']    # max momentary (400 ms) loudness (LUFS)
 r['ebur128_short_term_max_lufs']   # max short-term (3 s) loudness (LUFS)
 r['ebur128_range_lu']              # loudness range, EBU Tech 3342 (LU)
 r['ebur128_true_peak_dbtp']        # true peak over the channels (dBTP)
-r['native_sample_rate']            # sample rate of the file (Hz); set by any of the three
+r['native_sample_rate']            # sample rate of the file (Hz); set by any file-level feature
 r['sample_peak_dbfs']              # max |x| over the channels (dBFS)
 r['crest_factor_db']               # track peak / overall RMS (dB)
 r['crest_factor_frame_mean_db']    # mean per-frame crest factor, RMS > -70 dBFS
@@ -309,7 +309,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `rhythm_levels`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `rhythm_levels`, `stereo_field`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
 ### Multiband onset strength (opt-in)
 
@@ -603,6 +603,75 @@ Limitations (the sources of every parameter and all measured numbers are in
 - The values were checked against MIDI on drum recordings, not against
   listeners.
 - The half-tempo level (half-time) is not measured by this feature.
+
+### Stereo field (opt-in, files only)
+
+How much of the energy lies in the difference between the left and the right
+channel, overall and below 150 Hz, and how the two channels correlate over
+time. It is **opt-in only** — no mode computes it — and, like the file-level
+loudness features above, it is measured on the file's own channels at the
+file's own sample rate, so only `analyze_file` / `analyze_batch` compute it;
+`analyze_signal` has no channels and never emits the keys.
+
+```python
+r = sonara.analyze_file("track.flac", features=["stereo_field"])
+
+r['stereo_side_ratio']        # share of the Side signal in the energy, 0..1
+                              # (0 = identical channels, 0.5 = uncorrelated, 1 = antiphase)
+r['stereo_side_ratio_low']    # the same below 150 Hz
+r['stereo_correlation_mean']  # mean per-frame correlation of L and R, -1..+1
+r['stereo_correlation_p05']   # 5th percentile of the per-frame correlation
+r['native_sample_rate']       # sample rate of the file (Hz): the record was measured
+```
+
+- **`stereo_side_ratio`** — `½·(1 − 2·cov(L,R) / (var L + var R))` over the
+  whole file, which is the energy of Side `(L − R)/2` divided by the energy of
+  Mid `(L + R)/2` plus Side. The variances and the covariance have the means
+  removed, so a constant offset in a channel does not change the value. `0`
+  means identical channels, `0.5` uncorrelated channels of equal power or sound
+  in one channel only, `1` antiphase (`R = −L`).
+- **`stereo_side_ratio_low`** — the same after a 4th-order Butterworth low-pass
+  at 150 Hz on both channels.
+- **`stereo_correlation_mean`** — the Pearson correlation of L and R in frames
+  of `2048/22050` s (about 93 ms) without overlap, averaged over the frames; an
+  incomplete last frame is dropped.
+- **`stereo_correlation_p05`** — the 5th percentile of the same frames (linear
+  interpolation, as for the `_p10` fields).
+
+The filter is set in Hz and the frame in seconds, so values are comparable
+between files of different sample rates. Edge cases: a mono file is measured as
+`L = R` (shares `0`, correlations `+1`); a file with more than two channels
+gets none of the four keys, because its layout is unknown. A share is absent
+when `(var L + var R)/2` in its band is below −70 dB (silence, or nothing below
+150 Hz for the low share). Frames in which the variance of both channels is
+below −70 dB are left out of the correlation (a constant offset is not signal;
+it is removed before the low-pass as well), a frame in which one channel has zero variance
+counts as `0`, and both correlation keys are absent when no frame is left.
+`native_sample_rate` is set even then, so in a record that has it a missing
+key means "undefined", not "not measured".
+
+Limitations (the sources of every parameter are in
+[docs/consumer-contract.md](docs/consumer-contract.md)):
+
+- There is no standard for a correlation meter. The frame and the mean follow
+  Ziemer 2023 (arXiv:2302.01090); the 5th percentile, the 150 Hz edge and the
+  filter order are choices of this project. Published values for the same
+  purpose range from 100 to 300 Hz.
+- The width measure is the one of Tardieu et al. (DAFx 2011) in a bounded
+  0..1 form; it is related to the side/mid ratio of De Man et al. (ISMIR 2014).
+- The correlation is `+1` for identical channels and for plain panning
+  (`R = a·L`) alike; the width in that case shows in `stereo_side_ratio`.
+- `ffmpeg aphasemeter` computes a different quantity and does not match the
+  correlation fields.
+- Lossy coding (joint stereo) can change the side signal. On 10 MUSDB18-HQ
+  mixtures MP3 at 128 kbit/s moved the four fields by at most 0.006, and at
+  320 kbit/s by at most 0.001.
+- Readings on the 150 MUSDB18-HQ mixtures (median, 10th–90th percentile):
+  `stereo_side_ratio` 0.09 (0.02–0.19), `stereo_side_ratio_low` 0.04
+  (0.004–0.11), `stereo_correlation_mean` 0.79 (0.55–0.93),
+  `stereo_correlation_p05` 0.49 (0.02–0.82, below zero in 15 mixtures). The
+  published reference agrees: De Man et al. give a side/mid ratio of
+  0.101 ± 0.049 for finished mixes, a share of about 0.09.
 
 ### Structure & energy (opt-in)
 

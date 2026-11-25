@@ -227,6 +227,87 @@ def _rhythm_levels_keys():
 
 test("rhythm_levels is request-only, abstains below 8 s and round-trips", _rhythm_levels_keys)
 
+STEREO_FIELD = {
+    "stereo_side_ratio", "stereo_side_ratio_low",
+    "stereo_correlation_mean", "stereo_correlation_p05",
+}
+STEREO_SR = 44100
+
+
+def _write_stereo_wav(path, *channels):
+    """16-bit WAV at STEREO_SR, one argument per channel."""
+    pcm = np.round(np.column_stack(channels) * 32767.0).astype("<i2")
+    with wave.open(path, "wb") as w:
+        w.setnchannels(len(channels))
+        w.setsampwidth(2)
+        w.setframerate(STEREO_SR)
+        w.writeframes(pcm.tobytes())
+
+
+def _stereo_field_keys():
+    t = np.arange(3 * STEREO_SR) / STEREO_SR
+    tone = 0.5 * np.sin(2 * np.pi * 1000.0 * t)
+    low = 0.5 * np.sin(2 * np.pi * 60.0 * t)
+    # 1 kHz is far above the 150 Hz edge, so the low share of the tone files
+    # may be undefined; a 60 Hz file checks it.
+    full_band = STEREO_FIELD - {"stereo_side_ratio_low"}
+
+    def expect(rec, side, correlation):
+        assert full_band <= set(rec), sorted(full_band - set(rec))
+        assert abs(rec["stereo_side_ratio"] - side) < 0.02, rec["stereo_side_ratio"]
+        for key in ("stereo_correlation_mean", "stereo_correlation_p05"):
+            assert abs(rec[key] - correlation) < 0.02, (key, rec[key])
+
+    with tempfile.TemporaryDirectory(prefix="sonara_stereo_") as tmp:
+        def measure(name, *channels):
+            path = os.path.join(tmp, name + ".wav")
+            _write_stereo_wav(path, *channels)
+            return path, sonara.analyze_file(path, features=["stereo_field"])
+
+        # Antiphase (R = -L): all Side, correlation -1.
+        anti_path, anti = measure("anti", tone, -tone)
+        expect(anti, 1.0, -1.0)
+        # Request-only: no mode computes it.
+        by_mode = {
+            mode: sonara.analyze_file(anti_path, mode=mode)
+            for mode in ("compact", "playlist", "full")
+        }
+        for mode, rec in by_mode.items():
+            assert not STEREO_FIELD & set(rec), mode
+        # Identical channels and a mono file (measured as L = R): no Side, +1.
+        expect(measure("same", tone, tone)[1], 0.0, 1.0)
+        expect(measure("mono", tone)[1], 0.0, 1.0)
+        # A constant offset in one channel does not move the share.
+        offset = measure("offset", tone + 0.1, tone)[1]
+        assert abs(offset["stereo_side_ratio"]) < 0.02, offset["stereo_side_ratio"]
+        # Antiphase below 150 Hz: the low band is all Side too.
+        low_anti = measure("low_anti", low, -low)[1]
+        assert abs(low_anti["stereo_side_ratio_low"] - 1.0) < 0.02, low_anti
+        # Silence: nothing is defined, but the record is marked as measured.
+        quiet = measure("silence", np.zeros(t.size), np.zeros(t.size))[1]
+        assert not STEREO_FIELD & set(quiet), sorted(STEREO_FIELD & set(quiet))
+        assert quiet["native_sample_rate"] == STEREO_SR
+        # File-only: a bare signal has no channels to measure.
+        signal = sonara.analyze_signal(_y, sr=SR, features=["stereo_field"])
+        assert not STEREO_FIELD & set(signal), sorted(STEREO_FIELD & set(signal))
+        # Class A, opt-in: stored values survive the dict round trip, and a
+        # refill needs the audio path.
+        measured = STEREO_FIELD & set(anti)
+        again = sonara.augment_analysis(anti, [])
+        assert {k: again[k] for k in measured} == {k: anti[k] for k in measured}
+        row = next(r for r in sonara.feature_dependencies() if r["name"] == "stereo_field")
+        assert row["class"] == "audio" and row["opt_in_only"] is True, row
+        rec = by_mode["compact"]
+        assert sonara.augment_blocker(rec, "stereo_field") == "needs audio (audio-class feature)"
+        aug = sonara.augment_analysis(rec, ["stereo_field"], audio_path=anti_path)
+        assert {k: aug[k] for k in measured} == {k: anti[k] for k in measured}
+        assert aug["native_sample_rate"] == STEREO_SR
+        # Untouched compact fields keep their record values.
+        assert aug["bpm"] == rec["bpm"]
+
+
+test("stereo_field is request-only and file-only, exact on synthetic stereo", _stereo_field_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(
