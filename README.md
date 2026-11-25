@@ -309,7 +309,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `rhythm_levels`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
 
 ### Multiband onset strength (opt-in)
 
@@ -558,6 +558,51 @@ at the analysis sample rate; that keeps the order of tracks (rank correlation
 44100 Hz), so compare values only between analyses at one sample rate; the
 readings above are for the default 22050 Hz. Digital silence reads `0.0`;
 there is no abstention and no confidence field.
+
+### Rhythmic level ratios (opt-in)
+
+How strong the eighth-note level and the one-and-a-half level (triplets,
+shuffle, three against two) are next to the beat, read from the
+autocorrelation of the onset curve at fractions of the beat period. It is
+**opt-in only** — no mode computes it — and works with `analyze_file` and
+`analyze_signal`:
+
+```python
+r = sonara.analyze_file("track.mp3", features=["rhythm_levels"])
+
+r['rhythm_level_double_ratio']        # eighth-note (double-tempo) level against the beat: >= 0, or None
+                                      # (0 = nothing regular between the beats, about 1 = eighths as strong as the beats)
+r['rhythm_level_one_and_half_ratio']  # one-and-a-half level (triplets, shuffle, 3 against 2): >= 0, or None
+r['rhythm_level_confidence']          # 0..1: how well the onset curve repeats at the beat period of `bpm`
+```
+
+The onset curve is cut into frames of 8 s every 0.5 s (Peeters 2011). Each
+frame has its mean removed and is autocorrelated; the result, divided by its
+value at lag zero, is read at the lags `T/2`, `2T/3` and `T`, where `T` is the
+beat period at the track's final `bpm`, and averaged over the frames. The two
+ratios divide the readings at `T/2` and at `2T/3` by the one at `T`, which is
+itself the confidence. Neither ratio has an upper bound. No parameter was
+fitted to data. When the feature is requested all three keys are present: the
+confidence is always a number (`0` when nothing can be measured), and the two
+ratios are `None` when the feature abstains (no tempo, a track shorter than
+8 s, or nothing repeating at the beat period). On synthetic drum patterns a
+pulse without eighths reads `0` on the double ratio and one with eighths about
+1; the one-and-a-half ratio reads `0` on straight rhythms, about 0.4 on a
+shuffle and 0.6–0.9 on triplets.
+
+Limitations (the sources of every parameter and all measured numbers are in
+[docs/consumer-contract.md](docs/consumer-contract.md)):
+
+- The values are counted from `bpm`: a tempo error, a tempo on another
+  metrical level or a tempo range (`bpm_min`/`bpm_max`) changes them. Analyze
+  a library with one range.
+- Compare values only between analyses at one sample rate.
+- Read the ratios together with the confidence: near zero confidence they are
+  a ratio of two small numbers.
+- The one-and-a-half ratio is zero on most straight tracks.
+- The values were checked against MIDI on drum recordings, not against
+  listeners.
+- The half-tempo level (half-time) is not measured by this feature.
 
 ### Structure & energy (opt-in)
 

@@ -340,6 +340,18 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
             r.rhythmic_regularity_candidates.clone(),
         )?;
     }
+    // --- rhythm levels --- (opt-in: features=["rhythm_levels"])
+    // Keyed on the confidence, which is present whenever the measure ran: on
+    // abstention the two ratios are emitted as None rather than dropped
+    // (mirrors rhythmic_regularity).
+    if let Some(confidence) = r.rhythm_level_confidence {
+        d.set_item("rhythm_level_double_ratio", r.rhythm_level_double_ratio)?;
+        d.set_item(
+            "rhythm_level_one_and_half_ratio",
+            r.rhythm_level_one_and_half_ratio,
+        )?;
+        d.set_item("rhythm_level_confidence", confidence)?;
+    }
     // --- structure --- (opt-in: features=["structure"])
     if let Some(ref v) = r.energy_curve {
         d.set_item("energy_curve", v.clone())?;
@@ -1208,6 +1220,21 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
             "a float"
         ),
         rhythmic_regularity_candidates,
+        // Emitted together, keyed on a present confidence; the two ratios may
+        // be a stored None (abstain), which reads back as None.
+        rhythm_level_double_ratio: opt_field!(
+            cached,
+            "rhythm_level_double_ratio",
+            f32,
+            "a float or None"
+        ),
+        rhythm_level_one_and_half_ratio: opt_field!(
+            cached,
+            "rhythm_level_one_and_half_ratio",
+            f32,
+            "a float or None"
+        ),
+        rhythm_level_confidence: opt_field!(cached, "rhythm_level_confidence", f32, "a float"),
         energy_curve: opt_field!(cached, "energy_curve", Vec<f32>, "a list of floats"),
         energy_curve_hop_sec: opt_field!(cached, "energy_curve_hop_sec", f32, "a float"),
         segments,

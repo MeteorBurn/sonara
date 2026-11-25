@@ -537,6 +537,32 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                          abstention and no confidence, so key freshness on
 #                          the presence of this key
 
+# --- rhythm_levels --- features=["rhythm_levels"] (opt-in only: no mode computes it)
+# Strength of the metrical levels next to the beat, from the autocorrelation
+# of the onset envelope the tempo is estimated from. Computed in the main pass,
+# so analyze_file, analyze_batch and analyze_signal all emit it. The envelope
+# (one value per hop of 512 samples) is cut into frames of 8 s every 0.5 s;
+# each frame has its mean removed and is autocorrelated, the result is divided
+# by its value at lag 0, read at a fractional lag by linear interpolation and
+# set to zero where negative. With T the beat period of the reported bpm, each
+# level is the mean over frames at its lag. The three keys are present
+# together whenever the feature ran.
+#   rhythm_level_double_ratio        Optional[float], >= 0 — level at T/2
+#                                    (eighth notes) divided by the level at T:
+#                                    0 = nothing repeats at half a beat
+#   rhythm_level_one_and_half_ratio  Optional[float], >= 0 — level at 2T/3
+#                                    (triplets, shuffle, three against two)
+#                                    divided by the level at T
+#   rhythm_level_confidence          float, 0..1 — the level at T itself: mean
+#                                    normalized autocorrelation of the onset
+#                                    envelope at the beat period
+# Both ratios are None (keys present) when the measure abstained: the track
+# holds no full 8 s frame, no frame has any variation, the beat period does not
+# fit a frame, or nothing repeats at the beat period (confidence 0.0). Key
+# freshness on rhythm_level_confidence, not on the ratios. The ratios are
+# relative to the reported bpm: a tempo read at double or half speed moves
+# every level by one step.
+
 # Opt-in analysis keys (present only when requested via `features=[...]`; never
 # enabled by any mode). Values are plain Python types in the returned dict:
 # --- silence --- features=["silence"]

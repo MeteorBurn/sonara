@@ -316,6 +316,89 @@ edges differently, and it returns no separated signals. The key travels with
 needs the audio (class `C`), is not embedding evidence and is not an input to
 any model.
 
+Rhythmic level ratios (2026-11-25, MeteorBurn fork, no schema bump: additive
+keys, existing values unchanged). The opt-in `rhythm_levels` feature
+(`features=["rhythm_levels"]` only; no mode computes it) adds three
+dimensionless keys, emitted by `analyze_file` and `analyze_signal` alike:
+`rhythm_level_double_ratio` (≥ 0, no upper bound), the strength of the
+eighth-note (double-tempo) level against the beat — `0` means nothing regular
+lies between the beats, about `1` means the eighths are as strong as the
+beats; `rhythm_level_one_and_half_ratio` (≥ 0, no upper bound), the strength of
+the one-and-a-half level (triplets, shuffle, three against two) against the
+beat, `0` on straight tracks; and `rhythm_level_confidence` (0..1), the mean
+normalised autocorrelation of the onset curve at the beat period: how well the
+onset curve repeats at the period set by `bpm`. Definition: `T` is the beat
+period at the result's final `bpm`, one tempo for the whole track (a
+simplification: Peeters uses the local tempo of each frame). The onset curve
+is cut into frames of 8 s every 0.5 s (`round(8·sr/hop)` and
+`round(0.5·sr/hop)` onset frames; Peeters 2011, sec. II); the mean of each
+frame is removed (Tzanetakis & Cook 2002); the frame's autocorrelation is the
+biased estimate with a rectangular window, divided by its value at lag zero
+(Peeters 2011, sec. II-C); a value at a fractional lag is linearly
+interpolated (as in `librosa.feature.tempogram_ratio`; Peeters does not
+describe this step) and negative autocorrelation is set to zero (Tolonen &
+Karjalainen 2000). The values at the lags `T/2`, `2T/3` and `T` are averaged
+over the frames, and each ratio is a ratio of averages: the one at `T/2`, or
+at `2T/3`, over the one at `T` (a level against the main one is the `RA`
+feature of Tzanetakis & Cook 2002; the lags are points of Peeters's grid and
+the factors 2 and 3/2 those of `librosa.feature.tempogram_ratio`). Lags, not
+frequencies, are used because both levels are faster than the beat (Peeters
+2011: the octave errors of the DFT and of the autocorrelation lie in opposite
+domains; Klapuri 2006). No value was fitted to tracks or verification sets. The
+feature **abstains**: whenever it ran, the result carries all three keys;
+`rhythm_level_confidence` is always a number (`0` when nothing can be
+measured), while each ratio is a number or `None` — `None` when there is no
+tempo, the track is shorter than one 8 s frame, or the autocorrelation at the
+beat period is not positive. A stored `None` therefore means "measured, could
+not tell", not "not yet computed" — key freshness on the presence of the
+*confidence*, not of the ratios. Reference readings: on synthetic drum
+patterns at five tempos the double ratio is `0` on a pulse without eighths and
+0.84–1.10 with eighths; the one-and-a-half ratio is 0.32–0.46 on a shuffle,
+0.64–0.86 on triplets, 1.42–1.87 on three against two and `0` on even eighths
+and sixteenths. On 346 drum recordings of Groove MIDI, against the same
+formula applied to the MIDI hits, the rank correlation is +0.817 (95 %
+interval +0.757 to +0.864) for the double ratio and +0.732 (+0.651 to +0.796)
+for the one-and-a-half ratio (+0.832 among the 89 recordings where both values
+are above zero); the shuffle and swing styles (17 recordings) against the
+straight ones (301) give AUC 0.683 (0.545 to 0.813). On the 664 previews of
+GiantSteps Tempo the double ratio has a median of 0.90 (quartiles 0.67 and
+1.08) and the one-and-a-half ratio is exactly zero on 45 % of the tracks and
+below 0.01 on 69 %; no link was
+found between the double ratio and the share of listeners at the faster tempo
+(67 tracks, −0.120, interval −0.357 to +0.139). Dependence on `bpm`: the
+values are counted from `bpm`, so they inherit its errors. On the synthetic
+patterns a 1 % tempo error changes them by up to 21–22 % and a 2 % error by up
+to 44–49 %; on the Groove MIDI recordings where Sonara's tempo matched the
+metronome the values differed from those at the metronome tempo by 0.0–0.1 %
+(median). When `bpm` sits on another metrical level (32 % of the Groove MIDI
+drum recordings), the numbers describe the levels relative to that `bpm`, not
+to the felt tempo. A tempo range (`bpm_min`/`bpm_max`) folds `bpm` by octaves
+and the ratios are computed from the folded value: on the GiantSteps previews
+the range 79–192 moved the tempo of 27 tracks and 70–180 of 24, and on those
+the double ratio changed by +0.63 and +0.79 (median) and the confidence by
+−0.17 and −0.13; tracks whose tempo the range leaves alone are unchanged.
+Values are therefore comparable only between analyses made with one range. Dependence on the analysis sample rate
+(`provenance.sample_rate`): at a rate other than 22050 Hz the onset curve is
+different, so compare values only between analyses at one sample rate; the
+reference readings are for 22050 Hz. One synthetic beat with eighths at 120 BPM
+read a double ratio of 1.21 at 22050 Hz, 0.76 at 44100 Hz and 0.81 at 48000 Hz
+(confidence 0.61, 0.89 and 0.84). The confidence also depends on where the
+beat period falls between onset frames: the same clean pulse read 0.71 to 0.85
+at five tempos from 90 to 174 BPM. Other known limits: the one-and-a-half
+ratio is zero on most straight tracks, and its check on styles passed with a
+small margin on 17 recordings; at 174 BPM with even sixteenths the double
+ratio falls to 0.32 on the synthetic pattern (the lag `T/2` is about 7 onset
+frames); both ratios divide by the level at the beat period, so at a
+confidence near zero they are a ratio of two small numbers (20 s of white
+noise read a confidence of 0.05 and a double ratio of 1.28; no confidence
+threshold was validated). The half-tempo level (half-time) is **not** measured by this
+feature: on the full onset curve an ordinary beat (kick on every quarter,
+snare on 2 and 4) reads the same as half-time, and on GiantSteps the link to
+the share of listeners at the slower tempo was +0.097 (interval −0.025 to
++0.217, which includes zero). A reading of the onset curve below 200 Hz did
+better there (+0.472, interval +0.373 to +0.557, 313 tracks) but has no second
+set labelled by listeners to confirm it, so it is not shipped.
+
 File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
 additive keys, existing values unchanged). Three opt-in features, never computed
 by a mode, measure the file's own channels at its own sample rate instead of the

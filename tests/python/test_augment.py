@@ -187,6 +187,46 @@ def _hpss_keys():
 
 test("hpss is request-only, reads ~0 on a tone and ~1 on clicks", _hpss_keys)
 
+RHYTHM_LEVELS = {
+    "rhythm_level_double_ratio", "rhythm_level_one_and_half_ratio", "rhythm_level_confidence",
+}
+
+
+def _rhythm_levels_keys():
+    # Request-only: no mode computes it.
+    full = sonara.analyze_signal(_y, sr=SR, mode="full")
+    for rec in (REC_COMPACT, REC_PLAYLIST, full):
+        assert not RHYTHM_LEVELS & set(rec), rec["provenance"]["mode"]
+    # Abstention: 5 s hold no 8 s frame, so both ratios are a present None
+    # next to a zero confidence, and that survives the dict round trip.
+    short = sonara.analyze_signal(_y, sr=SR, features=["rhythm_levels"])
+    assert {k: short[k] for k in RHYTHM_LEVELS} == {
+        "rhythm_level_double_ratio": None,
+        "rhythm_level_one_and_half_ratio": None,
+        "rhythm_level_confidence": 0.0,
+    }, short
+    assert sonara.augment_analysis(short, []) == short
+    # A click every half second for 12 s is long enough to measure.
+    clicks = np.zeros(12 * SR, dtype=np.float32)
+    clicks[SR // 4::SR // 2] = 1.0
+    only = sonara.analyze_signal(clicks, sr=SR, features=["rhythm_levels"])
+    assert RHYTHM_LEVELS <= set(only), sorted(RHYTHM_LEVELS - set(only))
+    assert 0.0 < only["rhythm_level_confidence"] <= 1.0, only["rhythm_level_confidence"]
+    assert only["rhythm_level_double_ratio"] >= 0.0, only["rhythm_level_double_ratio"]
+    assert only["rhythm_level_one_and_half_ratio"] >= 0.0, only["rhythm_level_one_and_half_ratio"]
+    # Class C, opt-in: stored values survive the dict round trip, and a refill
+    # needs the audio again.
+    row = next(r for r in sonara.feature_dependencies() if r["name"] == "rhythm_levels")
+    assert row["class"] == "frame_curves" and row["opt_in_only"] is True, row
+    assert sonara.augment_analysis(only, []) == only
+    assert (
+        sonara.augment_blocker(REC_PLAYLIST, "rhythm_levels")
+        == "needs audio (frame_curves-class feature)"
+    )
+
+
+test("rhythm_levels is request-only, abstains below 8 s and round-trips", _rhythm_levels_keys)
+
 
 def _roundtrip_optin():
     rec = sonara.analyze_signal(

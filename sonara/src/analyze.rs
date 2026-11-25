@@ -551,6 +551,80 @@ impl HpssStream {
     }
 }
 
+// ---- Rhythm levels (onset autocorrelation at fractions of the beat period), math in f64 ----
+
+// Autocorrelation frame and its step, seconds (Peeters 2011).
+const RHYTHM_LEVELS_WINDOW_SEC: f64 = 8.0;
+const RHYTHM_LEVELS_HOP_SEC: f64 = 0.5;
+// Lags in beat periods: Peeters 2011 grid (factors 2 and 3/2 of `librosa.feature.tempogram_ratio`).
+const RHYTHM_LEVELS_DOUBLE_LAG: f64 = 1.0 / 2.0;
+const RHYTHM_LEVELS_ONE_AND_HALF_LAG: f64 = 2.0 / 3.0;
+
+/// `(double_ratio, one_and_half_ratio, confidence)` of the onset envelope
+/// `oenv` (one value per hop) at the tempo `bpm`: the normalized
+/// autocorrelation of the envelope at 1/2 and at 2/3 of the beat period, each
+/// relative to the one at the beat period, and that last one as the
+/// confidence. All three are means over frames of 8 s every 0.5 s. The ratios
+/// are `None` and the confidence 0 without a tempo, a full frame, a frame
+/// with any variation, or a beat period shorter than the frame; the ratios
+/// are also `None` when the envelope does not repeat at the beat period.
+fn rhythm_levels(
+    oenv: &[Float],
+    bpm: Float,
+    sr: u32,
+    hop_length: usize,
+) -> (Option<Float>, Option<Float>, Float) {
+    let fr = sr as f64 / hop_length as f64;
+    let window = (RHYTHM_LEVELS_WINDOW_SEC * fr).round() as usize;
+    // At least one frame per step: a sample rate below the hop must not stall.
+    let hop = ((RHYTHM_LEVELS_HOP_SEC * fr).round() as usize).max(1);
+    let period = fr * 60.0 / bpm as f64;
+    // The longest lag read is floor(period) + 1; the other two levels are shorter.
+    if !bpm.is_finite()
+        || bpm <= 0.0
+        || oenv.len() < window
+        || period.floor() + 1.0 >= window as f64
+    {
+        return (None, None, 0.0);
+    }
+    let lags = [
+        period,
+        period * RHYTHM_LEVELS_DOUBLE_LAG,
+        period * RHYTHM_LEVELS_ONE_AND_HALF_LAG,
+    ];
+    let mut sums = [0.0_f64; 3];
+    let mut frames = 0_usize;
+    let mut x = vec![0.0_f64; window];
+    for frame in oenv.windows(window).step_by(hop) {
+        // The frame's mean is removed first (Tzanetakis & Cook 2002).
+        let mean = frame.iter().map(|&v| v as f64).sum::<f64>() / window as f64;
+        for (d, &v) in x.iter_mut().zip(frame) {
+            *d = v as f64 - mean;
+        }
+        // Biased autocorrelation at an integer lag, rectangular window.
+        let acf = |lag: usize| -> f64 { x.iter().zip(&x[lag..]).map(|(a, b)| a * b).sum() };
+        let acf0 = acf(0);
+        if acf0 <= 0.0 {
+            continue;
+        }
+        frames += 1;
+        for (sum, &lag) in sums.iter_mut().zip(&lags) {
+            let i = lag.floor() as usize;
+            let g = lag - lag.floor();
+            // Linear interpolation between integer lags; negative
+            // autocorrelation is set to zero (Tolonen & Karjalainen 2000).
+            *sum += (((1.0 - g) * acf(i) + g * acf(i + 1)) / acf0).max(0.0);
+        }
+    }
+    let confidence = if frames > 0 {
+        sums[0] / frames as f64
+    } else {
+        0.0
+    };
+    let ratio = |sum: f64| (sums[0] > 0.0).then(|| (sum / sums[0]) as Float);
+    (ratio(sums[1]), ratio(sums[2]), confidence as Float)
+}
+
 #[inline]
 fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
     let mut non_finite = false;
@@ -804,6 +878,8 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     feature("rhythmic_regularity", false, true, false, C, &[]),
     // Reads the magnitude column every pass computes, so no extended pass.
     feature("hpss", false, true, false, C, &[]),
+    // Reads the onset envelope and the tempo every pass computes.
+    feature("rhythm_levels", false, true, false, C, &[]),
     feature("structure", true, true, false, C, &[]),
     feature("embedding", true, true, false, E, EMBEDDING_EVIDENCE),
     #[cfg(feature = "aggression")]
@@ -1819,6 +1895,28 @@ pub struct TrackAnalysis {
     /// scores are complementary measurements (`r` and `1 - r`), not model
     /// probabilities.
     pub rhythmic_regularity_candidates: Option<Vec<(String, Float)>>,
+
+    // --- rhythm levels ---
+    // Opt-in only (request via features=["rhythm_levels"]); all three `None`
+    // otherwise. The onset envelope the tempo is estimated from is cut into
+    // frames of 8 s every 0.5 s (Peeters 2011); each frame has its mean
+    // removed and is autocorrelated (biased, rectangular window), the result
+    // divided by its value at lag 0, read at a fractional lag by linear
+    // interpolation and set to zero where negative. With T the beat period of
+    // `bpm`, the ratios divide the mean over frames at T/2 and at 2T/3 by the
+    // mean at T. Both ratios are `None` with a present confidence when the
+    // measure abstained: no tempo, less than 8 s, no variation in any frame,
+    // or no repetition at the beat period at all.
+    /// Dimensionless, `>= 0`: strength of the eighth-note level (lag T/2)
+    /// relative to the beat. 0 = nothing repeats at half a beat.
+    pub rhythm_level_double_ratio: Option<Float>,
+    /// Dimensionless, `>= 0`: strength of the one-and-a-half level (lag 2T/3:
+    /// triplets, shuffle, three against two) relative to the beat.
+    pub rhythm_level_one_and_half_ratio: Option<Float>,
+    /// Dimensionless, `[0, 1]`: mean normalized autocorrelation of the onset
+    /// envelope at the beat period. Reported whenever the feature ran, `0.0`
+    /// when nothing could be measured.
+    pub rhythm_level_confidence: Option<Float>,
     // --- structure ---
     /// Time-resolved perceptual energy (0-1), one value per window.
     pub energy_curve: Option<Vec<Float>>,
@@ -3564,6 +3662,23 @@ fn analyze_signal_inner(
         });
 
     // ================================================================
+    // RHYTHM LEVELS: strength of the eighth-note and one-and-a-half
+    // levels relative to the beat (opt-in via features). Reuses the onset
+    // envelope the tempo was estimated from and the reported tempo.
+    // ================================================================
+
+    let (rhythm_level_double_ratio, rhythm_level_one_and_half_ratio, rhythm_level_confidence) =
+        if config.wants("rhythm_levels") {
+            let oenv = oenv_padded
+                .as_slice()
+                .expect("owned envelope is contiguous");
+            let (double, one_and_half, confidence) = rhythm_levels(oenv, bpm, sr, hop_length);
+            (double, one_and_half, Some(confidence))
+        } else {
+            (None, None, None)
+        };
+
+    // ================================================================
     // TONAL: chords from fused HPCP, dissonance from fused accumulator
     // ================================================================
 
@@ -4089,6 +4204,10 @@ fn analyze_signal_inner(
         rhythmic_regularity_label,
         rhythmic_regularity_confidence,
         rhythmic_regularity_candidates,
+        // --- rhythm levels ---
+        rhythm_level_double_ratio,
+        rhythm_level_one_and_half_ratio,
+        rhythm_level_confidence,
         // --- structure ---
         energy_curve: structure.as_ref().map(|s| s.energy_curve.clone()),
         energy_curve_hop_sec: structure.as_ref().map(|s| s.energy_curve_hop_sec),
@@ -5040,6 +5159,11 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
             out.rhythmic_regularity_candidates = fresh.rhythmic_regularity_candidates.clone();
         }
         "hpss" => out.hpss_percussive_ratio = fresh.hpss_percussive_ratio,
+        "rhythm_levels" => {
+            out.rhythm_level_double_ratio = fresh.rhythm_level_double_ratio;
+            out.rhythm_level_one_and_half_ratio = fresh.rhythm_level_one_and_half_ratio;
+            out.rhythm_level_confidence = fresh.rhythm_level_confidence;
+        }
         "structure" => {
             out.energy_curve = fresh.energy_curve.clone();
             out.energy_curve_hop_sec = fresh.energy_curve_hop_sec;
@@ -5494,6 +5618,7 @@ mod tests {
             "beatgrid",
             "rhythmic_regularity",
             "hpss",
+            "rhythm_levels",
             "structure",
             "embedding",
             "fingerprint",
@@ -5599,6 +5724,11 @@ mod tests {
             dep_of("rhythmic_regularity").opt_in_only
                 && !dep_of("rhythmic_regularity").needs_extended
                 && !dep_of("rhythmic_regularity").full_only
+        );
+        assert!(
+            dep_of("rhythm_levels").opt_in_only
+                && !dep_of("rhythm_levels").needs_extended
+                && !dep_of("rhythm_levels").full_only
         );
         assert!(!dep_of("energy").opt_in_only);
         assert!(dep_of("tempo_curve").full_only);
@@ -8613,6 +8743,181 @@ mod tests {
             with.provenance.requested_features = without.provenance.requested_features.clone();
             assert_eq!(with, without);
         }
+    }
+
+    // --- rhythm_levels ---
+
+    /// Frames per second of the main pass at 22050 Hz.
+    const RHYTHM_LEVELS_FR: f64 = 22050.0 / 512.0;
+
+    /// 30 s onset curve at 120 BPM: a unit impulse at `round((k + offset) * T)`
+    /// for every beat `k` and every `offset` (in beats).
+    fn rhythm_levels_curve(offsets: &[f64]) -> Vec<Float> {
+        rhythm_levels_curve_at(RHYTHM_LEVELS_FR, offsets)
+    }
+
+    /// The same curve at `fr` frames per second.
+    fn rhythm_levels_curve_at(fr: f64, offsets: &[f64]) -> Vec<Float> {
+        let period = fr * 60.0 / 120.0;
+        let mut o = vec![0.0; (30.0 * fr) as usize + 1];
+        for &offset in offsets {
+            for k in 0.. {
+                let i = ((k as f64 + offset) * period).round() as usize;
+                if i >= o.len() {
+                    break;
+                }
+                o[i] = 1.0;
+            }
+        }
+        o
+    }
+
+    fn rhythm_levels_at_120(o: &[Float]) -> (Option<Float>, Option<Float>, Float) {
+        rhythm_levels(o, 120.0, 22050, 512)
+    }
+
+    #[test]
+    fn test_rhythm_levels_synthetic_patterns() {
+        // Beats only: nothing repeats at half or two thirds of a beat.
+        let (double, one_and_half, confidence) = rhythm_levels_at_120(&rhythm_levels_curve(&[0.0]));
+        assert_eq!((double, one_and_half), (Some(0.0), Some(0.0)));
+        // The period is 21.53 frames, so the rounded impulses lie 21 or 22
+        // frames apart and the interpolated value is about 0.45, not 1.
+        assert!(confidence > 0.4, "{confidence}");
+        // Eighth notes.
+        let (double, one_and_half, _) = rhythm_levels_at_120(&rhythm_levels_curve(&[0.0, 0.5]));
+        assert!(double.unwrap() > 0.5, "{double:?}");
+        assert!(one_and_half.unwrap() < 0.05, "{one_and_half:?}");
+        // A hit two thirds of a beat after every beat.
+        let (_, one_and_half, _) = rhythm_levels_at_120(&rhythm_levels_curve(&[0.0, 2.0 / 3.0]));
+        assert!(one_and_half.unwrap() > 0.2, "{one_and_half:?}");
+        // The frame is 8 s at any frame rate: the same patterns at 44100 Hz.
+        let at_44100 = |offsets: &[f64]| {
+            let o = rhythm_levels_curve_at(44100.0 / 512.0, offsets);
+            rhythm_levels(&o, 120.0, 44100, 512)
+        };
+        assert_eq!(at_44100(&[0.0]).0, Some(0.0));
+        let double = at_44100(&[0.0, 0.5]).0;
+        assert!(double.unwrap() > 0.5, "{double:?}");
+    }
+
+    #[test]
+    fn test_rhythm_levels_ignore_a_constant_offset() {
+        let o = rhythm_levels_curve(&[0.0, 0.5, 2.0 / 3.0]);
+        let raised: Vec<Float> = o.iter().map(|&v| v + 3.0).collect();
+        let (a, b) = (rhythm_levels_at_120(&o), rhythm_levels_at_120(&raised));
+        assert!((a.0.unwrap() - b.0.unwrap()).abs() < 1e-4, "{a:?} {b:?}");
+        assert!((a.1.unwrap() - b.1.unwrap()).abs() < 1e-4, "{a:?} {b:?}");
+        assert!((a.2 - b.2).abs() < 1e-4, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn test_rhythm_levels_abstain() {
+        let o = rhythm_levels_curve(&[0.0]);
+        let window = (8.0 * RHYTHM_LEVELS_FR).round() as usize;
+        // Shorter than one frame, no tempo, no variation.
+        assert_eq!(rhythm_levels_at_120(&o[..window - 1]), (None, None, 0.0));
+        assert_eq!(rhythm_levels(&o, 0.0, 22050, 512), (None, None, 0.0));
+        assert_eq!(rhythm_levels(&o, Float::NAN, 22050, 512), (None, None, 0.0));
+        assert_eq!(rhythm_levels_at_120(&vec![0.7; o.len()]), (None, None, 0.0));
+        // A beat period that does not fit the frame is not measured either.
+        assert_eq!(rhythm_levels(&o, 1.0, 22050, 512), (None, None, 0.0));
+    }
+
+    /// The same measure written out naively: every lag of every frame.
+    fn rhythm_levels_reference(o: &[Float], bpm: f64) -> [f64; 3] {
+        let (w, h) = (345, 22);
+        let period = RHYTHM_LEVELS_FR * 60.0 / bpm;
+        let mut means = [0.0; 3];
+        let mut frames = 0.0;
+        let mut start = 0;
+        while start + w <= o.len() {
+            let mean = o[start..start + w].iter().map(|&v| v as f64).sum::<f64>() / w as f64;
+            let x: Vec<f64> = (0..w).map(|n| o[start + n] as f64 - mean).collect();
+            let acf: Vec<f64> = (0..w)
+                .map(|l| (0..w - l).map(|n| x[n] * x[n + l]).sum())
+                .collect();
+            for (m, lag) in means
+                .iter_mut()
+                .zip([period, period / 2.0, period * 2.0 / 3.0])
+            {
+                let i = lag as usize;
+                let v = acf[i] + (lag - i as f64) * (acf[i + 1] - acf[i]);
+                *m += (v / acf[0]).max(0.0);
+            }
+            frames += 1.0;
+            start += h;
+        }
+        [means[1] / means[0], means[2] / means[0], means[0] / frames]
+    }
+
+    #[test]
+    fn test_rhythm_levels_match_naive_reference() {
+        // 20 s of non-negative noise (32-bit LCG).
+        let mut state = 20_261_125_u32;
+        let o: Vec<Float> = (0..(20.0 * RHYTHM_LEVELS_FR) as usize)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as Float / 16_777_216.0
+            })
+            .collect();
+        let want = rhythm_levels_reference(&o, 128.0);
+        let (double, one_and_half, confidence) = rhythm_levels(&o, 128.0, 22050, 512);
+        let got = [double.unwrap(), one_and_half.unwrap(), confidence];
+        for (g, w) in got.iter().zip(want) {
+            assert!((*g as f64 - w).abs() < 1e-5, "{got:?} {want:?}");
+        }
+    }
+
+    fn rhythm_levels_of(
+        y: &Array1<Float>,
+        config: &AnalysisConfig,
+    ) -> (Option<Float>, Option<Float>, Option<Float>) {
+        let r = analyze_signal(y.view(), 22050, config).unwrap();
+        (
+            r.rhythm_level_double_ratio,
+            r.rhythm_level_one_and_half_ratio,
+            r.rhythm_level_confidence,
+        )
+    }
+
+    #[test]
+    fn test_rhythm_levels_presence_follows_requests() {
+        // A click every half second: 12 s hold a full frame.
+        let y = hpss_mix(12);
+        // Request-only: no preset mode computes it.
+        for config in [compact(), playlist(), full()] {
+            assert_eq!(rhythm_levels_of(&y, &config), (None, None, None));
+        }
+        assert_eq!(
+            rhythm_levels_of(&y, &feature_config(&["mfcc"])),
+            (None, None, None)
+        );
+        // On its own it needs no extended pass; the tempo is always tracked.
+        let only = feature_config(&["rhythm_levels"]);
+        assert!(!only.needs_extended());
+        let got = rhythm_levels_of(&y, &only);
+        assert!(got.0.is_some() && got.1.is_some(), "{got:?}");
+        assert!(got.2.unwrap() > 0.0 && got.2.unwrap() <= 1.0, "{got:?}");
+        assert_eq!(
+            rhythm_levels_of(&y, &feature_config(&["rhythm_levels", "mfcc"])),
+            got
+        );
+        // Too short to measure: the confidence stays, the ratios abstain.
+        let short = rhythm_levels_of(&hpss_mix(3), &only);
+        assert_eq!(short, (None, None, Some(0.0)));
+        // Augment moves all three fields.
+        let mut out = analyze_signal(y.view(), 22050, &compact()).unwrap();
+        let fresh = analyze_signal(y.view(), 22050, &only).unwrap();
+        merge_feature_fields(&mut out, &fresh, "rhythm_levels");
+        assert_eq!(
+            (
+                out.rhythm_level_double_ratio,
+                out.rhythm_level_one_and_half_ratio,
+                out.rhythm_level_confidence
+            ),
+            got
+        );
     }
 
     // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---
