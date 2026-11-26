@@ -180,6 +180,12 @@
       "base_sha256": "c798d52f1aeae9102244048f7ea5880d0b98380680136ca71f242a285ce9c27d",
       "head_sha256": "1402a6e0740a13439534b869afc9c3a7bd810fcb895b812f7c938abe3b865d28",
       "reason": "the f64 prefix sum of squares is kept only at block edges (2026-11-26): the running sum is accumulated sample by sample as before, so every value read is unchanged; loudness fields identical on 60 real tracks and on 30- and 60-minute signals"
+    },
+    {
+      "path": "sonara/src/tonal.rs",
+      "base_sha256": "cf43e9f9d9d65e37cab207d385619dee6e62c4b08f688357d81e4fed974cd882",
+      "head_sha256": "77cf9b8183072faae0b2ff543c530ac78b28562f788f7119500713e102ff2cfc",
+      "reason": "hpcp and hpcp_and_dissonance measure a peak's distance to the rounded pitch class instead of the wrapped bin index (2026-11-26): a peak up to half a semitone below C was assigned to C with distance near 12 and dropped, now it gets the same cosine weight as at every other note; the fused pass in analyze.rs carries the same fix. Labeled evidence, RWC Popular (100 songs, Cho and Bello chord annotations, mir_eval): majmin 0.421 -> 0.447 (+0.026, 95% bootstrap interval +0.016..+0.036), root 0.478 -> 0.500; time on chords containing C 0.19 -> 0.35 against 0.35 in the annotations; synthetic triads tuned 10 and 30 cents flat: 8 of 28 wrong -> 0 of 28. Chord fields and embedding dimension 42 change; key, dissonance and every other field are identical on 60 real tracks"
     }
   ],
   "domains": {

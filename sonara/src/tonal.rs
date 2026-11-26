@@ -162,8 +162,11 @@ pub fn hpcp(
 
                 // Cosine weighting: contribute to nearest pitch class with
                 // weight based on distance (Gomez 2006 style)
-                let center = pitch_class.round() as usize % 12;
-                let dist = (pitch_class - center as Float).abs();
+                // Distance to the rounded value, not to the wrapped bin:
+                // 11.9 is 0.1 from C, not 11.9.
+                let nearest = pitch_class.round();
+                let center = nearest as usize % 12;
+                let dist = (pitch_class - nearest).abs();
 
                 // Cosine window: full contribution at center, zero at 0.5 semitone away
                 let w = if dist < 0.5 {
@@ -568,8 +571,11 @@ pub fn hpcp_and_dissonance(
                 }
                 let semitones = 12.0 * (freq / C_REF).log2();
                 let pitch_class = ((semitones % 12.0) + 12.0) % 12.0;
-                let center = pitch_class.round() as usize % 12;
-                let dist = (pitch_class - center as Float).abs();
+                // Distance to the rounded value, not to the wrapped bin:
+                // 11.9 is 0.1 from C, not 11.9.
+                let nearest = pitch_class.round();
+                let center = nearest as usize % 12;
+                let dist = (pitch_class - nearest).abs();
                 let w = if dist < 0.5 {
                     (std::f32::consts::PI * dist).cos()
                 } else {

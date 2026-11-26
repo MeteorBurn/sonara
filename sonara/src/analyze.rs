@@ -3218,8 +3218,11 @@ fn analyze_signal_inner(
                     }
                     let semitones = 12.0 * (freq / c_ref).log2();
                     let pitch_class = ((semitones % 12.0) + 12.0) % 12.0;
-                    let center = pitch_class.round() as usize % 12;
-                    let dist = (pitch_class - center as Float).abs();
+                    // Distance to the rounded value, not to the wrapped bin:
+                    // 11.9 is 0.1 from C, not 11.9.
+                    let nearest = pitch_class.round();
+                    let center = nearest as usize % 12;
+                    let dist = (pitch_class - nearest).abs();
                     if dist < 0.5 {
                         let w = (std::f32::consts::PI * dist).cos();
                         hpcp_col[center] += harmonic_weights[h] * pmag_sq * w;
