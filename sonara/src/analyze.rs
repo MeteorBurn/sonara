@@ -3802,17 +3802,11 @@ fn analyze_signal_inner(
     // Runs in Full mode or when requested via features=["beatgrid"].
     // ================================================================
 
-    // Prefer the detected meter when time_signature was computed too (always
-    // in Full mode, whatever its confidence); otherwise assume 4/4. Lazy so
-    // Compact and Playlist pay nothing.
-    let detected_beats_per_bar = || {
-        time_signature
-            .as_deref()
-            .and_then(|ts| ts.split('/').next())
-            .and_then(|n| n.trim().parse::<usize>().ok())
-            .filter(|&n| n >= 2)
-            .unwrap_or(crate::beatgrid::DEFAULT_BEATS_PER_BAR)
-    };
+    // Bars are always 4 beats: the meter detector is not reliable enough to
+    // set the bar length (it reads plain four-on-the-floor as "2/4").
+    // shortcut: 3/4 material gets a 4/4 grid; take the bar length from
+    // `time_signature` once its detector is validated.
+    let beats_per_bar = crate::beatgrid::DEFAULT_BEATS_PER_BAR;
 
     let (grid_offset_sec, downbeats, grid_stability) = if config.wants("beatgrid") {
         let grid = crate::beatgrid::analyze_grid_low_mid(
@@ -3821,7 +3815,7 @@ fn analyze_signal_inner(
             mid_env_padded.view(),
             sr,
             hop_length,
-            detected_beats_per_bar(),
+            beats_per_bar,
         );
         (
             Some(grid.grid_offset_sec),
@@ -3845,10 +3839,11 @@ fn analyze_signal_inner(
                 bands.envelopes.view(),
                 &beats,
                 downbeats.as_deref().unwrap_or(&[]),
-                detected_beats_per_bar(),
+                beats_per_bar,
                 bpm_confidence,
                 grid_stability.unwrap_or_else(|| crate::beatgrid::grid_stability(&beats)),
-                time_signature_confidence,
+                // No meter evidence: the bar length above is assumed, not detected.
+                None,
             )
         })
     } else {
@@ -6186,6 +6181,40 @@ mod tests {
             result.provenance.requested_features.as_deref(),
             Some(&["rhythmic_regularity".to_string()][..])
         );
+    }
+
+    // Bars and regularity are computed in 4/4 whether or not `time_signature`
+    // runs in the same pass (it always does in Full): the meter detector reads
+    // four-on-the-floor as "2/4" and does not set the bar length.
+    #[test]
+    fn beat_grid_and_regularity_do_not_follow_the_detected_meter() {
+        let y = four_on_the_floor(22050, 128.0, 16);
+        let alone = analyze_signal(
+            y.view(),
+            22050,
+            &feature_config(&["beatgrid", "rhythmic_regularity"]),
+        )
+        .unwrap();
+        assert!(alone.downbeats.as_ref().is_some_and(|d| d.len() >= 2));
+        assert!(alone.rhythmic_regularity.is_some());
+        for with_meter in [
+            feature_config(&["beatgrid", "rhythmic_regularity", "time_signature"]),
+            full(),
+        ] {
+            let r = analyze_signal(y.view(), 22050, &with_meter).unwrap();
+            assert!(r.time_signature.is_some(), "the detector must have run");
+            assert_eq!(r.downbeats, alone.downbeats);
+            assert_eq!(r.rhythmic_regularity, alone.rhythmic_regularity);
+            assert_eq!(r.rhythmic_regularity_label, alone.rhythmic_regularity_label);
+            assert_eq!(
+                r.rhythmic_regularity_confidence,
+                alone.rhythmic_regularity_confidence
+            );
+            assert_eq!(
+                r.rhythmic_regularity_candidates,
+                alone.rhythmic_regularity_candidates
+            );
+        }
     }
 
     #[test]

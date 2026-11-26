@@ -233,10 +233,10 @@ r['grid_stability']    # 0.0-1.0: how rigidly beats fit a constant grid
 The three keys appear **only** when `beatgrid` is computed (an explicit request or `full` mode); they are absent otherwise. It reuses the beats and onset envelope already computed by the pipeline, so it is O(number of beats):
 
 - **`grid_offset_sec`** — the time of the first tracked beat.
-- **`downbeats`** — assuming 4/4 (or the detected `time_signature` when that is also requested), each of the possible bar phases is scored by onset-accent energy at the candidate downbeats; the highest-scoring phase wins. Kicks and other bar-anchoring accents typically land on beat one.
+- **`downbeats`** — assuming 4 beats per bar, each of the possible bar phases is scored by onset-accent energy at the candidate downbeats; the highest-scoring phase wins. Kicks and other bar-anchoring accents typically land on beat one.
 - **`grid_stability`** — `clamp(1 - MAD / median, 0, 1)`, where the inter-beat intervals have median `median` and median absolute deviation `MAD`. A perfectly regular grid scores `1.0`; jitter lowers the score monotonically. Useful both as a confidence measure and, in future, for tempo-octave disambiguation via grid regularity.
 
-You can combine it with other features, e.g. `features=["bpm", "beatgrid"]` or `features=["beatgrid", "time_signature"]` (the latter lets the grid honour a detected non-4/4 meter). `full` mode computes both, so there `downbeats` and `rhythmic_regularity` always follow the detected `time_signature`, also when `time_signature_confidence` is low; a request without `time_signature` assumes 4/4, so the same track can give a different grid in `full` mode than on a `beatgrid`-only request.
+You can combine it with other features, e.g. `features=["bpm", "beatgrid"]`. The bar is always 4 beats long, so material in 3/4 or another meter also gets a 4-beat grid; `rhythmic_regularity` is measured against the same 4-beat bar.
 
 ### Loudness & gain (opt-in)
 
@@ -476,8 +476,7 @@ near-constant offset that pushed the distribution off the boundary.
 
 `confidence` is the geometric mean of the evidence factors: `bpm_confidence`,
 `grid_stability`, `1 - 1/sqrt(n_valid_windows)`, the mean window reliability,
-and how consistently the same accent pattern recurred across windows — plus
-`time_signature_confidence` when that was also requested. Pattern stability
+and how consistently the same accent pattern recurred across windows. Pattern stability
 feeds *confidence only*, never the score: a stable breakbeat is still a
 breakbeat, and no amount of grid rigidity makes a broken pattern straight. It
 is a measure of evidence quality, **not** a class probability.

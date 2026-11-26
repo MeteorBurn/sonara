@@ -71,10 +71,9 @@ PRESET = {
         "embedding", "aggression", "fingerprint", "loudness", "silence",
         "key_candidates", "vocalness", "mood", "instrumentalness", "tags",
     ],
-    # Second pass. Requesting `time_signature` makes rhythmic_regularity and
-    # beatgrid use the detected meter (synthetic 4/4 read as 2/4 halves the
-    # bars and zeroes the confidence), so it runs separately and its outputs
-    # are stored with the `meter_` prefix, beside the 4/4 main-pass values.
+    # Second pass: `time_signature` is requested apart from the main list.
+    # beatgrid and rhythmic_regularity do not use the detected meter, so the
+    # `meter_`-prefixed copies of their outputs equal the main-pass values.
     "meter_pass": ["time_signature", "beatgrid", "rhythmic_regularity"],
 }
 
