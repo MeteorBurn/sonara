@@ -164,6 +164,12 @@
       "reason": "the module comment and the analyze_grid doc comment name the downbeat routine the pipeline calls, detect_downbeats_low_mid (2026-11-26): comments only, no code changes"
     },
     {
+      "path": "sonara/src/genre.rs",
+      "base_sha256": "cdc667e9735bc20af1f53d3e38a1cd4ed684c97a0cdbe9609e74161e33692405",
+      "head_sha256": "139dc86ba1ae4e155aa0a5dbe85979ab0731f8b05c5f7931920910b9b4ab1534",
+      "reason": "the model-file JSON parser refuses nesting deeper than 128 levels instead of overflowing the stack (2026-11-26); a valid model nests five levels, so loading and prediction are unchanged"
+    },
+    {
       "path": "sonara/src/perceptual.rs",
       "base_sha256": "9f3ebdd59daf147129e0eb2773735ee0c8e6119bfa81212970edf8b42baed359",
       "head_sha256": "6dff2797f44646eb5a1ee6a3f0aec2e2298c17061c5ebcf896c4a1d850194d91",

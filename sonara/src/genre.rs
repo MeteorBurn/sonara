@@ -558,15 +558,21 @@ mod json {
         }
     }
 
+    /// Deepest nesting of arrays and objects accepted (serde_json's default
+    /// recursion limit). A model file needs five levels.
+    const MAX_DEPTH: usize = 128;
+
     struct Parser<'a> {
         b: &'a [u8],
         i: usize,
+        depth: usize,
     }
 
     pub fn parse(s: &str) -> Result<Value, String> {
         let mut p = Parser {
             b: s.as_bytes(),
             i: 0,
+            depth: 0,
         };
         p.skip_ws();
         let v = p.parse_value()?;
@@ -598,8 +604,24 @@ mod json {
         fn parse_value(&mut self) -> Result<Value, String> {
             self.skip_ws();
             match self.peek() {
-                Some(b'{') => self.parse_object(),
-                Some(b'[') => self.parse_array(),
+                Some(open @ (b'{' | b'[')) => {
+                    // Containers recurse: bound the depth so a file of nothing
+                    // but brackets is an error, not a stack overflow.
+                    if self.depth == MAX_DEPTH {
+                        return Err(format!(
+                            "nesting deeper than {MAX_DEPTH} levels at byte {}",
+                            self.i
+                        ));
+                    }
+                    self.depth += 1;
+                    let value = if open == b'{' {
+                        self.parse_object()
+                    } else {
+                        self.parse_array()
+                    };
+                    self.depth -= 1;
+                    value
+                }
                 Some(b'"') => Ok(Value::Str(self.parse_string()?)),
                 Some(b't') | Some(b'f') => self.parse_bool(),
                 Some(b'n') => self.parse_null(),

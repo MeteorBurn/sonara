@@ -18,7 +18,6 @@ from sonara._sonara import (  # noqa: F401 — augment lane introspection
 )
 from sonara._sonara import fingerprint_match  # noqa: F401 — duplicate detection
 from sonara._result import TrackAnalysis
-from sonara import display  # noqa: F401
 from sonara import genre  # noqa: F401 — bring-your-own genre model trainer/loader
 from sonara import vocal_model  # noqa: F401 — bring-your-own vocalness model trainer/loader
 
@@ -42,6 +41,20 @@ def _register_extension_submodules():
 
 
 _register_extension_submodules()
+
+
+def __getattr__(name):
+    # `sonara.display` pulls in matplotlib: load it on first use, not on
+    # `import sonara`. A plain import statement keeps it visible to bundlers.
+    if name == "display":
+        import sonara.display as module
+
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return [*globals(), "display"]
 
 
 def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None):
@@ -218,3 +231,8 @@ def similarity(a, b, *, profile="default"):
             "vectors from different layout versions are not comparable"
         )
     return _similarity(va, vb, profile=profile)
+
+
+# Last on purpose: `from sonara import *` exports every public name defined
+# above plus the lazily loaded `display`, as it did before the lazy load.
+__all__ = [name for name in __dir__() if not name.startswith("_")]
