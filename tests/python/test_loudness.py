@@ -49,10 +49,11 @@ LOUDNESS_FIELDS = [
 
 def test_absent_by_default():
     """Opt-in: loudness fields must NOT appear in any default mode."""
-    for mode in ("compact", "playlist", "full"):
+    for mode in ("compact", "playlist"):
         r = sonara.analyze_signal(y, sr=sr, mode=mode)
         for f in LOUDNESS_FIELDS:
             assert f not in r, f"{f} should be absent in mode={mode} (opt-in)"
+    assert "true_peak_db" in sonara.analyze_signal(y, sr=sr, mode="full")
 
 
 def test_present_when_requested():

@@ -89,11 +89,12 @@ test("fingerprint present when requested", _field_present)
 
 
 def _absent_by_default():
-    # No mode may compute it by default — strictly opt-in.
-    for mode in ("compact", "playlist", "full"):
+    # Opt-in: compact and playlist leave it out, full computes it.
+    for mode in ("compact", "playlist"):
         r = sonara.analyze_signal(_base, sr=SR, mode=mode)
         assert "fingerprint" not in r, f"fingerprint leaked into {mode} mode"
         assert "fingerprint_version" not in r
+    assert "fingerprint" in sonara.analyze_signal(_base, sr=SR, mode="full")
 
 
 test("fingerprint absent unless requested (all modes)", _absent_by_default)

@@ -72,7 +72,9 @@ sonara includes a fused analysis pipeline that extracts all features in a single
 |------|----------|-------------------|----------|
 | **`compact`** | 11 core features | ~1.2 ms | Fast scanning, metadata |
 | **`playlist`** | 30+ features incl. tonal & perceptual | ~4 ms | Playlist generation, music discovery |
-| **`full`** | All features incl. time signature | ~50 ms | Research, comprehensive analysis |
+| **`full`** | Every feature: playlist + time signature + all opt-in features | ~50 ms | Research, comprehensive analysis |
+
+Passing `features=[...]` replaces the mode: only the listed features are returned (plus the core fields every run reports), and the mode's own set is not added. To get playlist plus one more feature, list the features you want or use `full`.
 
 ### Compact mode (default)
 
@@ -156,6 +158,9 @@ r['mel_bands_std']             # log-mel spectrogram in dB (128 values each),
 r['mel_bands_floor_db']        # and its dB floor (loudest cell - 80 dB, >= -100)
 r['tuning_offset_cents']       # Tuning (fork): cents from A4 = 440 Hz, [-50, 50),
 r['tuning_confidence']         # None when this confidence (0..1) is below 0.08
+r['rhythm_level_double_ratio']        # Rhythm levels (fork): eighth-note level and
+r['rhythm_level_one_and_half_ratio']  # one-and-a-half level against the beat (>= 0,
+r['rhythm_level_confidence']          # or None), with a 0..1 confidence
 
 # Frame statistics (fork): how the per-frame values behind the _mean fields move.
 # Same frames as the means; each key comes with its base feature.
@@ -178,6 +183,10 @@ r['tempo_variability']          # Coefficient of variation of tempo
 r['time_signature']             # e.g. "4/4", "3/4"
 r['time_signature_confidence']  # Detection confidence
 ```
+
+Full mode also computes every opt-in feature: `onset_bands`, `beatgrid`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression` (only in builds with the `aggression` Cargo feature; the Python wheel has it), `fingerprint`, `loudness`, `ebur128`, `native_dynamics`, `amplitude_envelope`, `stereo_field`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness` and `tags`. Their keys are described in the sections below.
+
+Five of them are file-only: `ebur128`, `native_dynamics`, `amplitude_envelope`, `stereo_field` and `tags` need the file's own channels, sample rate or metadata, so in full mode they come only from `analyze_file` / `analyze_batch`. With `analyze_signal` their keys are absent and no error is raised. `genre` and `genre_confidence` still need a genre model (`genre_model=...`); no mode produces them on its own.
 
 ### BPM range alignment
 
@@ -211,7 +220,7 @@ tempo, beats = sonara.beat_track(y=y, sr=sr, bpm_min=79.0, bpm_max=192.0)
 
 ### Beat grid (opt-in)
 
-For DJ-style beat matching, sonara can turn the raw beat list into a *grid*: where the first beat falls, which beats begin each bar (downbeats), and how rigidly the beats fit a constant-tempo lattice. This is **opt-in only** — it is never computed by the `compact`, `playlist`, or `full` modes and adds no cost to them. Request it with `features=["beatgrid"]`:
+For DJ-style beat matching, sonara can turn the raw beat list into a *grid*: where the first beat falls, which beats begin each bar (downbeats), and how rigidly the beats fit a constant-tempo lattice. This is **opt-in** — it is computed by `full` mode or an explicit request; the `compact` and `playlist` modes do not compute it, so it adds no cost to them. Request it with `features=["beatgrid"]`:
 
 ```python
 r = sonara.analyze_file("track.mp3", features=["beatgrid"])
@@ -221,20 +230,20 @@ r['downbeats']         # Frame indices of bar-starting beats (subset of beats)
 r['grid_stability']    # 0.0-1.0: how rigidly beats fit a constant grid
 ```
 
-The three keys appear **only** when `beatgrid` is requested; they are absent otherwise. It reuses the beats and onset envelope already computed by the pipeline, so it is O(number of beats):
+The three keys appear **only** when `beatgrid` is computed (an explicit request or `full` mode); they are absent otherwise. It reuses the beats and onset envelope already computed by the pipeline, so it is O(number of beats):
 
 - **`grid_offset_sec`** — the time of the first tracked beat.
 - **`downbeats`** — assuming 4/4 (or the detected `time_signature` when that is also requested), each of the possible bar phases is scored by onset-accent energy at the candidate downbeats; the highest-scoring phase wins. Kicks and other bar-anchoring accents typically land on beat one.
 - **`grid_stability`** — `clamp(1 - MAD / median, 0, 1)`, where the inter-beat intervals have median `median` and median absolute deviation `MAD`. A perfectly regular grid scores `1.0`; jitter lowers the score monotonically. Useful both as a confidence measure and, in future, for tempo-octave disambiguation via grid regularity.
 
-You can combine it with other features, e.g. `features=["bpm", "beatgrid"]` or `features=["beatgrid", "time_signature"]` (the latter lets the grid honour a detected non-4/4 meter).
+You can combine it with other features, e.g. `features=["bpm", "beatgrid"]` or `features=["beatgrid", "time_signature"]` (the latter lets the grid honour a detected non-4/4 meter). `full` mode computes both, so there `downbeats` and `rhythmic_regularity` always follow the detected `time_signature`, also when `time_signature_confidence` is low; a request without `time_signature` assumes 4/4, so the same track can give a different grid in `full` mode than on a `beatgrid`-only request.
 
 ### Loudness & gain (opt-in)
 
 Broadcast-standard loudness and gain metrics — what players and mix software
-consume for auto-gain and clip protection. These are **opt-in**: they are never
-computed by any mode's defaults (for performance), only when you explicitly
-request the `loudness` feature group. They extend the always-on
+consume for auto-gain and clip protection. These are **opt-in**: the `compact`
+and `playlist` modes do not compute them (for performance); `full` mode or an
+explicit request for the `loudness` feature group does. They extend the always-on
 `loudness_lufs` (integrated LUFS, ITU-R BS.1770-4) and `dynamic_range_db`.
 
 ```python
@@ -309,7 +318,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature` — plus the **opt-in-only** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `rhythm_levels`, `stereo_field`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which are never computed by any mode and must be requested explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `rhythm_levels` — plus the **opt-in** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `stereo_field`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `ebur128`, `native_dynamics`, `amplitude_envelope`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which the `compact` and `playlist` modes do not compute: use `full` mode or request them explicitly (see their sections below).
 
 ### Multiband onset strength (opt-in)
 
@@ -384,7 +393,8 @@ center; invalid definitions raise `ValueError`.
 How *straight* the percussive pattern sits inside the metric grid: `1.0` is a
 regular pattern locked to the pulse lattice (house, techno), `0.0` a syncopated,
 polyrhythmic or breakbeat-driven one (garage, 2-step, breakbeat, drum & bass).
-It is **opt-in only** — no mode computes it — and it is a deterministic DSP
+It is **opt-in** — computed by `full` mode or an explicit request, not by
+`compact` or `playlist` — and it is a deterministic DSP
 measure: no model, no training data, no bundled artifact.
 
 ```python
@@ -528,7 +538,8 @@ Three known limitations, all measured:
 
 How much of the track's energy is percussive, by median-filter
 harmonic/percussive separation (HPSS) of the main-pass magnitude spectrogram.
-It is **opt-in only** — no mode computes it — and works with `analyze_file`,
+It is **opt-in** — computed by `full` mode or an explicit request, not by
+`compact` or `playlist` — and works with `analyze_file`,
 `analyze_batch` and `analyze_signal`:
 
 ```python
@@ -559,12 +570,13 @@ at the analysis sample rate; that keeps the order of tracks (rank correlation
 readings above are for the default 22050 Hz. Digital silence reads `0.0`;
 there is no abstention and no confidence field.
 
-### Rhythmic level ratios (opt-in)
+### Rhythmic level ratios
 
 How strong the eighth-note level and the one-and-a-half level (triplets,
 shuffle, three against two) are next to the beat, read from the
 autocorrelation of the onset curve at fractions of the beat period. It is
-**opt-in only** — no mode computes it — and works with `analyze_file` and
+part of the `playlist` and `full` modes (`compact` does not compute it), can
+be requested on its own, and works with `analyze_file` and
 `analyze_signal`:
 
 ```python
@@ -582,7 +594,7 @@ value at lag zero, is read at the lags `T/2`, `2T/3` and `T`, where `T` is the
 beat period at the track's final `bpm`, and averaged over the frames. The two
 ratios divide the readings at `T/2` and at `2T/3` by the one at `T`, which is
 itself the confidence. Neither ratio has an upper bound. No parameter was
-fitted to data. When the feature is requested all three keys are present: the
+fitted to data. When the feature is computed all three keys are present: the
 confidence is always a number (`0` when nothing can be measured), and the two
 ratios are `None` when the feature abstains (no tempo, a track shorter than
 8 s, or nothing repeating at the beat period). On synthetic drum patterns a
@@ -608,7 +620,8 @@ Limitations (the sources of every parameter and all measured numbers are in
 
 How much of the energy lies in the difference between the left and the right
 channel, overall and below 150 Hz, and how the two channels correlate over
-time. It is **opt-in only** — no mode computes it — and, like the file-level
+time. It is **opt-in** — computed by `full` mode or an explicit request, not by
+`compact` or `playlist` — and, like the file-level
 loudness features above, it is measured on the file's own channels at the
 file's own sample rate, so only `analyze_file` / `analyze_batch` compute it;
 `analyze_signal` has no channels and never emits the keys.
@@ -677,9 +690,9 @@ Limitations (the sources of every parameter are in
 
 Where things happen in a track — a time-resolved energy curve, section
 boundaries, intro/outro, and a coarse 1-10 energy level. This is **opt-in**:
-it is *not* part of any mode (compact/playlist/full) and is only computed when
-you explicitly request `features=["structure"]`, so the default pipelines pay
-nothing for it.
+it is *not* part of the `compact` or `playlist` modes and is only computed by
+`full` mode or when you explicitly request `features=["structure"]`, so those
+two pipelines pay nothing for it.
 
 ```python
 r = sonara.analyze_file("track.mp3", features=["structure"])
@@ -728,16 +741,16 @@ clustering at 5-6.
 
 ### Opt-in extras
 
-Three lightweight extras are **opt-in only** — they are never computed by any
-mode (performance-first policy) and appear in the result dict only when you
-request them explicitly via `features=[...]`. Request them alone or alongside a
-mode's features.
+Three lightweight extras are **opt-in** — the `compact` and `playlist` modes
+never compute them (performance-first policy), and they appear in the result
+dict only in `full` mode or when you request them explicitly via
+`features=[...]`. Request them alone or alongside other features.
 
 #### Silence offsets — `features=["silence"]`
 
 Leading/trailing silence duration in seconds, derived from the per-frame RMS the
-pipeline already computes (pure arithmetic, effectively free — kept opt-in only
-so default modes stay byte-for-byte unchanged).
+pipeline already computes (pure arithmetic, effectively free — kept opt-in
+so the `compact` and `playlist` results stay byte-for-byte unchanged).
 
 ```python
 r = sonara.analyze_file("track.mp3", features=["silence"])
@@ -995,8 +1008,8 @@ recording* across different encodings, bitrates and playback gains — the class
 level normalization and a little extra leading silence, but is not meant to match
 tempo- or pitch-shifted versions.
 
-The fingerprint is **opt-in** (performance-first: no analysis mode computes it by
-default). Request it with `features=["fingerprint"]`; the result then carries a
+The fingerprint is **opt-in** (performance-first: the `compact` and `playlist`
+modes do not compute it; `full` mode does). Request it with `features=["fingerprint"]`; the result then carries a
 base64 `fingerprint` string and an integer `fingerprint_version`:
 
 ```python
@@ -1051,7 +1064,7 @@ first (e.g. by rounded `duration_sec`) and only fingerprint-match within a bucke
 
 sonara can produce a fixed-length **similarity vector** (a hand-crafted, 48-dimension embedding) for nearest-neighbor search over a music library — no ML dependency. It is assembled from features the pipeline already computes (MFCC timbre, chroma harmony, spectral shape, rhythm, dynamics, and tonal descriptors), each with **fixed, documented normalization** so vectors are comparable across tracks, machines, and library runs.
 
-The vector is **opt-in** — it is never produced by a bare mode. Request it explicitly with `features=["embedding"]` (this also pulls in the playlist-level features it is built from):
+The vector is **opt-in** — the `compact` and `playlist` modes do not produce it; `full` mode does. Request it explicitly with `features=["embedding"]` (this also pulls in the playlist-level features it is built from):
 
 ```python
 import sonara
@@ -1174,7 +1187,7 @@ r = sonara.analyze_file("track.mp3", genre_model="genre_model.json")
 print(r["genre"], r["genre_confidence"])   # e.g. "techno" 0.87
 ```
 
-`model.predict(x)` runs the same inference numpy-side (label + confidence) for parity with the Rust analysis. The embedding is computed internally whenever a model is set; the `embedding`/`embedding_version` fields are only added to the result if you *also* pass `features=["embedding"]`.
+`model.predict(x)` runs the same inference numpy-side (label + confidence) for parity with the Rust analysis. The embedding is computed internally whenever a model is set; the `embedding`/`embedding_version` fields are only added to the result if you *also* pass `features=["embedding"]` or analyze in `full` mode.
 
 The model is a small feed-forward net stored as JSON — **hand-writable** as well as numpy-exportable:
 

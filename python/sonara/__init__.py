@@ -47,9 +47,10 @@ _register_extension_submodules()
 def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None):
     """Analyze an audio file and return a `TrackAnalysis` (dict subclass with `.print()`).
 
-    ``features`` selects features explicitly (overriding ``mode``) and is the
-    only way to enable the opt-in features: ``beatgrid``, ``onset_bands``,
-    ``rhythmic_regularity``, ``hpss``, ``rhythm_levels``, ``stereo_field``,
+    ``features`` selects features explicitly (overriding ``mode``). The opt-in
+    features are computed by ``mode="full"`` or by naming them in ``features``;
+    ``compact`` and ``playlist`` leave them out: ``beatgrid``, ``onset_bands``,
+    ``rhythmic_regularity``, ``hpss``, ``stereo_field``,
     ``structure``, ``embedding``, ``aggression``,
     ``fingerprint``, ``loudness``, ``silence``, ``key_candidates``,
     ``vocalness``. See the README for the full list.

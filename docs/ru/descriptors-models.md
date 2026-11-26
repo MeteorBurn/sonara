@@ -56,7 +56,7 @@ README отстаёт от кода, это отмечено явно в кон�
 
 ### 2.2 Опциональный набор `features=["loudness"]`
 
-Все функции чистые и считаются только по запросу. `loudness_metrics`
+Все функции чистые и считаются по запросу или в режиме `full`. `loudness_metrics`
 K-взвешивает сигнал один раз, строит f64-префиксную сумму квадратов и из неё
 получает три величины за один проход.
 
@@ -198,8 +198,9 @@ sad        = 0.35·minor + 0.25·slow       + 0.20·darkness   + 0.20·(1-energy
 
 ## 5. Структура трека (`features=["structure"]`)
 
-Источник: [structure.rs](../../sonara/src/structure.rs). Модуль опционален и
-никогда не считается режимами `compact`/`playlist`/`full`. Все входы уже
+Источник: [structure.rs](../../sonara/src/structure.rs). Модуль опционален:
+режимы `compact` и `playlist` его не считают, считает режим `full` или явный
+запрос. Все входы уже
 посчитаны слитным проходом: покадровые RMS, центроид, полоса, мел-dB
 спектрограмма и матрица DCT.
 
@@ -625,7 +626,7 @@ Apple M4 и не переносится на другое железо.
 | `AGGRESSION_MODEL_VERSION` / `AGGRESSION_MODEL_ID` | 3 / `aggression-rank-v3-sr22050` | хранимые `aggression_*` |
 | `provenance.vocalness_model_id` | `sonara-vocalness-v2` или свой `id`, `None` для эвристики | `vocalness`, `instrumentalness` |
 | `provenance.genre_model_id` | `id` модели или `None` | `genre`, `genre_confidence` |
-| `provenance.aggression_model_id` | `aggression-rank-v3-sr22050` при запросе агрессии | `aggression_*` |
+| `provenance.aggression_model_id` | `aggression-rank-v3-sr22050` при запросе агрессии или в режиме `full` | `aggression_*` |
 
 `augment_analysis` использует эти поля как ворота: несовпадение
 `embedding_version` записи с текущей сборкой отклоняет любой пересчёт,

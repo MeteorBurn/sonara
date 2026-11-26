@@ -247,7 +247,7 @@ class TrackAnalysis(Dict[str, Any]):
 #                                      # "bpm_raw" stays comparable.
 #     "genre_model_id":     str        # id of the genre_model used; absent otherwise
 #     "vocalness_model_id": str        # id of the vocalness_model used; absent otherwise
-#     "aggression_model_id": str       # with features=["aggression"]
+#     "aggression_model_id": str       # with features=["aggression"] or full mode
 #   }
 #
 # When chords are computed (playlist/full modes or features=["chords"]), the
@@ -302,27 +302,29 @@ def augment_blocker(cached: Dict, feature: str) -> Optional[str]: ...
 #   required_evidence: List[str]  — record fields a decode-free recompute reads
 #                                 #  (non-empty exactly for scalars/embedding)
 #   needs_extended:    bool       — fresh computation needs the extended pass
-#   opt_in_only:       bool       — never enabled by any mode's defaults
+#   opt_in_only:       bool       — left out of the compact and playlist
+#                                 #  defaults; computed by full mode or an
+#                                 #  explicit features=[...]
 #   full_only:         bool       — among mode defaults, Full mode only
 def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 
 # --- beat grid ---
-# Opt-in via features=["beatgrid"]. When requested, the analyze_* result dict
-# additionally contains:
+# Opt-in via features=["beatgrid"] or full mode. When computed, the analyze_*
+# result dict additionally contains:
 #   grid_offset_sec: float        — time (sec) of the first beat (grid anchor)
 #   downbeats:       List[int]    — frame indices of bar-starting beats
 #   grid_stability:  float        — 0..1, how rigidly beats fit a constant grid
 
 # --- multiband onset strength ---
-# Opt-in via features=["onset_bands"]. When requested, the analyze_* result dict
-# additionally contains:
+# Opt-in via features=["onset_bands"] or full mode. When computed, the
+# analyze_* result dict additionally contains:
 #   onset_band_edges_hz: List[float]        — inclusive lower/upper band edges
 #   onset_strength_bands: List[List[float]] — shape (n_bands, n_frames)
 
 # --- rhythmic regularity ---
-# Opt-in via features=["rhythmic_regularity"]. A deterministic DSP measure of
-# how straight the percussive pattern sits inside the metric grid — not a model
-# and not a genre classifier. When requested, all four keys are present:
+# Opt-in via features=["rhythmic_regularity"] or full mode. A deterministic DSP
+# measure of how straight the percussive pattern sits inside the metric grid —
+# not a model and not a genre classifier. When computed, all four keys are present:
 #   rhythmic_regularity:            Optional[float] — 0..1; 1.0 a straight
 #                                          #  house/techno pattern on the pulse
 #                                          #  lattice, 0.0 a syncopated /
@@ -343,8 +345,8 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 
 # --- structure ---
 # Opt-in structural segmentation & energy curve. Requested via
-# `features=["structure"]`; absent from every default mode (compact/playlist/
-# full). When present, the result dict additionally contains:
+# `features=["structure"]` or computed by full mode; absent from compact and
+# playlist. When present, the result dict additionally contains:
 #   energy_curve:         List[float]  # per-window perceptual energy (0-1)
 #   energy_curve_hop_sec: float        # seconds between curve samples
 #   segments:             List[Dict[str, float]]
@@ -352,9 +354,9 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   intro_end_sec:        float        # end of intro / pre-first-drop region
 #   outro_start_sec:      float        # start of outro / final fade
 #   energy_level:         int          # coarse 1-10 level
-# Extended loudness / gain metrics are opt-in via features=["loudness"] (never
-# computed by any mode's defaults, for performance). When requested, the result
-# dict also carries:
+# Extended loudness / gain metrics are opt-in via features=["loudness"] or full
+# mode (not computed by compact or playlist, for performance). When computed,
+# the result dict also carries:
 #   "true_peak_db"                — true peak in dBTP (4x oversampled, ITU-R BS.1770-4)
 #   "replaygain_db"               — track gain to reach -18 LUFS (-18 - loudness_lufs)
 #   "loudness_curve"              — List[float] short-term LUFS (3 s window, 1 s hop)
@@ -362,10 +364,12 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU
 
 # --- ebur128 / native_dynamics / amplitude_envelope ---
-# File-only, opt-in via features=[...] (no mode computes them): measured by
+# File-only, opt-in via features=[...] or full mode (compact and playlist do
+# not compute them): measured by
 # analyze_file / analyze_batch on the file's own channels at its own sample
 # rate, not on the mono mix at the analysis rate. analyze_signal never emits
-# them. A key is absent when its value is undefined (digital silence, file
+# them, in full mode either.
+# A key is absent when its value is undefined (digital silence, file
 # shorter than the measurement window). The older loudness_lufs / true_peak_db
 # (mono, analysis rate, ungated) are unchanged.
 # features=["ebur128"] — ITU-R BS.1770-5 / EBU Tech 3341, 3342, all float.
@@ -394,7 +398,7 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   "amplitude_envelope_hop_sec"   — hop, seconds (512/22050)
 #   "amplitude_envelope_frame_sec" — frame length, seconds (2048/22050)
 
-# --- stereo_field --- features=["stereo_field"] (opt-in only: no mode computes it)
+# --- stereo_field --- features=["stereo_field"] (opt-in: full mode or an explicit request)
 # File-only like the family above: measured by analyze_file / analyze_batch on
 # the file's left and right channels at its own sample rate; analyze_signal
 # never emits it. All float, dimensionless. A key is absent when its value is
@@ -535,7 +539,7 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                        whenever the feature ran, also when the offset is
 #                        None: key freshness on it, not on the offset
 
-# --- hpss --- features=["hpss"] (opt-in only: no mode computes it)
+# --- hpss --- features=["hpss"] (opt-in: full mode or an explicit request)
 # Share of percussive energy in the track by median-filter harmonic/percussive
 # separation (MIR_FEATURES group 6.2). Computed in the main pass on the mono
 # analysis signal, so analyze_file, analyze_batch and analyze_signal all emit
@@ -573,7 +577,7 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                          abstention and no confidence, so key freshness on
 #                          the presence of this key
 
-# --- rhythm_levels --- features=["rhythm_levels"] (opt-in only: no mode computes it)
+# --- rhythm_levels --- features=["rhythm_levels"] (also playlist/full modes)
 # Strength of the metrical levels next to the beat, from the autocorrelation
 # of the onset envelope the tempo is estimated from. Computed in the main pass,
 # so analyze_file, analyze_batch and analyze_signal all emit it. The envelope
@@ -599,8 +603,9 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 # relative to the reported bpm: a tempo read at double or half speed moves
 # every level by one step.
 
-# Opt-in analysis keys (present only when requested via `features=[...]`; never
-# enabled by any mode). Values are plain Python types in the returned dict:
+# Opt-in analysis keys (present only in full mode or when requested via
+# `features=[...]`; never enabled by compact or playlist). Values are plain
+# Python types in the returned dict:
 # --- silence --- features=["silence"]
 #   "leading_silence_sec": float   # seconds of leading silence (>= 0, <= duration)
 #   "trailing_silence_sec": float  # seconds of trailing silence (>= 0, <= duration)
@@ -643,9 +648,10 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 # Duplicate detection (acoustic fingerprint) — fingerprint
 # ============================================================
 
-# Opt-in only: pass features=["fingerprint"] to any analyze_* call to add two
+# Opt-in: pass features=["fingerprint"] to any analyze_* call to add two
 # fields to the result dict — `fingerprint` (a base64 string) and
-# `fingerprint_version` (int). No analysis mode computes them by default.
+# `fingerprint_version` (int). Full mode computes them too; compact and
+# playlist do not.
 def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
 # Similarity in [0, 1] between two fingerprints, robust to gain / re-encoding /
 # small leading-silence differences. Accepts base64 `fingerprint` strings or
@@ -660,7 +666,7 @@ def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
 #   "genre_confidence": float  — winning softmax probability, in (0, 1]
 # The embedding is computed internally when a model is set, but the "embedding"/
 # "embedding_version" fields are only emitted if you ALSO request
-# features=["embedding"].
+# features=["embedding"] or analyze in full mode.
 #
 # Model JSON format (hand-writable and numpy-exportable):
 #   {
@@ -689,7 +695,7 @@ def fingerprint_match(a: Union[str, Dict], b: Union[str, Dict]) -> float: ...
 # ============================================================
 # The similarity vector is OPT-IN: analyze with features=["embedding"] to add
 # "embedding" (List[float], EMBEDDING_DIM long) and "embedding_version" (int) to
-# the result. It is never produced by a bare mode (compact/playlist/full).
+# the result. Full mode produces it too; compact and playlist do not.
 
 SIMILARITY_VERSION: int
 EMBEDDING_DIM: int

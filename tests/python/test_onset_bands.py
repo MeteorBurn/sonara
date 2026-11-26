@@ -40,10 +40,11 @@ def test_standalone_and_fused_analysis_are_frame_aligned() -> None:
 
 def test_onset_bands_are_opt_in_and_round_trip_through_augment() -> None:
     signal = tone_bursts()
-    for mode in ("compact", "playlist", "full"):
+    for mode in ("compact", "playlist"):
         result = sonara.analyze_signal(signal, sr=SR, mode=mode)
         assert "onset_band_edges_hz" not in result
         assert "onset_strength_bands" not in result
+    assert "onset_strength_bands" in sonara.analyze_signal(signal, sr=SR, mode="full")
 
     requested = sonara.analyze_signal(signal, sr=SR, features=["onset_bands"])
     assert sonara.augment_analysis(requested, []) == requested

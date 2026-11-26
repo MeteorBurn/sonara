@@ -58,9 +58,14 @@ print("  Testing sonara structure (opt-in)")
 print("=" * 70)
 
 # ---- Opt-in / absence ----
-print("\n--- Absent in default modes ---")
+print("\n--- Absent in compact/playlist, present in full ---")
 
-for mode in ("compact", "playlist", "full"):
+r = sonara.analyze_signal(y_struct[: 15 * sr], sr=sr, mode="full")
+test("structure present in full mode",
+     lambda r=r: None if "energy_curve" in r
+     else (_ for _ in ()).throw(AssertionError("energy_curve missing in full")))
+
+for mode in ("compact", "playlist"):
     r = sonara.analyze_signal(y_struct[: 15 * sr], sr=sr, mode=mode)
     test(f"structure absent in {mode} mode",
          lambda r=r, mode=mode: (

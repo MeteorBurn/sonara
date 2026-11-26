@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test the opt-in similarity embedding vector and the sonara.similarity helper.
 
-The embedding is OPT-IN: it is only produced when analysis is requested with
-features=["embedding"], never by a bare mode (compact/playlist/full).
+The embedding is OPT-IN: it is only produced by full mode or when analysis is
+requested with features=["embedding"], never by compact or playlist.
 
 Run as a plain script (like test_api.py): `python tests/python/test_similarity.py`.
 """

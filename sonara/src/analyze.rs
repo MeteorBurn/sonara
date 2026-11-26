@@ -841,8 +841,10 @@ pub enum AnalysisMode {
     /// flatness/contrast, MFCCs, chroma, plus perceptual features (energy,
     /// danceability, key, valence, acousticness). (~3ms per 10s track)
     Playlist,
-    /// All available features including expensive rhythm analysis
-    /// (tempo_curve, time_signature via metrogram).
+    /// Every feature: Playlist plus the expensive rhythm analysis
+    /// (tempo_curve, time_signature via metrogram) and all opt-in features.
+    /// The file-only ones (ebur128, native_dynamics, amplitude_envelope,
+    /// stereo_field, tags) need `analyze_file` / `analyze_batch`.
     Full,
 }
 
@@ -1044,7 +1046,7 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     // Reads the magnitude column every pass computes, so no extended pass.
     feature("hpss", false, true, false, C, &[]),
     // Reads the onset envelope and the tempo every pass computes.
-    feature("rhythm_levels", false, true, false, C, &[]),
+    feature("rhythm_levels", false, false, false, C, &[]),
     feature("structure", true, true, false, C, &[]),
     feature("embedding", true, true, false, E, EMBEDDING_EVIDENCE),
     #[cfg(feature = "aggression")]
@@ -1138,9 +1140,9 @@ pub struct FeatureDependency {
     /// a consumer planning a *fresh* run reads this; a consumer planning a
     /// decode-free recompute reads `class`/`required_evidence`.
     pub needs_extended: bool,
-    /// Routing: never enabled by any mode's defaults (not even `Full`); only
-    /// an explicit `features=[...]` request computes it (performance-first
-    /// policy).
+    /// Routing: left out of the `Compact` and `Playlist` defaults
+    /// (performance-first policy); computed by `Full` mode or an explicit
+    /// `features=[...]` request.
     pub opt_in_only: bool,
     /// Routing: among mode-driven defaults, computed by `Full` mode only
     /// (skipped by `Playlist`).
@@ -1223,7 +1225,7 @@ pub struct AnalysisConfig {
     /// **Rhythm analysis (Full mode or explicit request):**
     /// `tempo_curve`, `time_signature`
     ///
-    /// **Opt-in only (never enabled by any mode — see `FEATURE_REGISTRY`):**
+    /// **Opt-in (Full mode or explicit request — see `FEATURE_REGISTRY`):**
     /// `beatgrid` (grid offset, downbeats, grid stability),
     /// `rhythmic_regularity` (how straight the pattern sits in the metric grid),
     /// `structure` (energy curve, segments, intro/outro, energy level),
@@ -1349,11 +1351,10 @@ impl AnalysisConfig {
         if self.features.is_some() {
             self.emits(name)
         } else {
-            // Opt-in-only features are never enabled by a mode's defaults —
-            // not even Full — only by an explicit `features=[...]` request
-            // (performance-first policy).
+            // Opt-in features stay out of Compact and Playlist (performance-
+            // first policy); Full computes every feature.
             if spec.opt_in_only {
-                return false;
+                return self.mode == AnalysisMode::Full;
             }
             // Mode-based defaults
             match self.mode {
@@ -1376,7 +1377,7 @@ impl AnalysisConfig {
                 || (self.feature_requested("embedding") && EMBEDDING_COMPONENTS.contains(&name));
         }
         if spec.opt_in_only {
-            return false;
+            return self.mode == AnalysisMode::Full;
         }
         match self.mode {
             AnalysisMode::Compact => false,
@@ -1396,13 +1397,13 @@ impl AnalysisConfig {
 
     #[cfg(feature = "aggression")]
     fn needs_aggression(&self) -> bool {
-        self.feature_requested("aggression")
+        self.emits("aggression")
     }
 
-    /// True when `rhythmic_regularity` was explicitly requested (it is
-    /// opt-in-only, so no mode can turn it on).
+    /// True when `rhythmic_regularity` is computed: an explicit request or
+    /// Full mode (it is opt-in, so no other mode turns it on).
     fn needs_rhythmic_regularity(&self) -> bool {
-        self.feature_requested("rhythmic_regularity")
+        self.emits("rhythmic_regularity")
     }
 
     /// True if the similarity embedding must be computed: either it was
@@ -1701,7 +1702,7 @@ pub struct TrackAnalysis {
 
     // --- loudness ---
     // Extended loudness / gain metrics (opt-in via `features=["loudness"]`).
-    // `Some` only when the "loudness" group was requested; `None` otherwise.
+    // `Some` only when the "loudness" group is computed (Full mode or a request).
     /// True peak in dBTP (4x oversampled, ITU-R BS.1770-4 Annex 2). ~0 dBTP is
     /// full scale; > 0 dBTP means inter-sample overs that can clip on playback.
     pub true_peak_db: Option<Float>,
@@ -1796,7 +1797,7 @@ pub struct TrackAnalysis {
 
     // --- onset bands ---
     /// Frequency boundaries in Hz for `onset_strength_bands`. Opt-in via
-    /// `features=["onset_bands"]`; `None` in every default mode.
+    /// `features=["onset_bands"]` or Full mode; `None` in Compact and Playlist.
     pub onset_band_edges_hz: Option<Vec<Float>>,
     /// Raw mean positive log-mel flux per frequency band. Each inner vector is
     /// frame-aligned through `provenance.hop_length` and `sample_rate`.
@@ -1965,7 +1966,7 @@ pub struct TrackAnalysis {
     // --- end tuning ---
 
     // --- hpss ---
-    // Opt-in only (request via features=["hpss"]); `None` otherwise. Median
+    // Opt-in (Full mode or features=["hpss"]); `None` otherwise. Median
     // filter harmonic/percussive separation of the main pass's magnitudes |X|
     // over all bins and frames, as `librosa.decompose.hpss(S, kernel_size=
     // hpss_kernel(sr, n_fft, hop), power=2.0, margin=1.0)`:
@@ -2037,7 +2038,7 @@ pub struct TrackAnalysis {
 
     // -- Mood + instrumentalness (heuristic v1, opt-in) --
     /// Mood affinities in `[0, 1]`, **heuristic v1 (not ML)**. Opt-in via
-    /// `features=["mood"]`; all four populate together, `None` otherwise.
+    /// `features=["mood"]` or Full mode; all four populate together.
     pub mood_happy: Option<Float>,
     pub mood_aggressive: Option<Float>,
     pub mood_relaxed: Option<Float>,
@@ -2056,8 +2057,8 @@ pub struct TrackAnalysis {
     pub genre_confidence: Option<Float>,
 
     // --- beat grid ---
-    // Opt-in only (request via features=["beatgrid"]); `None` in the default
-    // compact/playlist/full modes.
+    // Opt-in (Full mode or features=["beatgrid"]); `None` in the compact
+    // and playlist modes.
     /// Time (seconds) of the first beat — the grid anchor.
     pub grid_offset_sec: Option<Float>,
     /// Frame indices of bar-starting beats (subset of `beats`).
@@ -2066,8 +2067,8 @@ pub struct TrackAnalysis {
     pub grid_stability: Option<Float>,
 
     // --- rhythmic regularity ---
-    // Opt-in only (request via features=["rhythmic_regularity"]). All four
-    // fields populate together, and are `None` both in the default modes and
+    // Opt-in (Full mode or features=["rhythmic_regularity"]). All four fields
+    // populate together, and are `None` both in Compact and Playlist and
     // when the track carries no metric grid to measure against (see
     // [`crate::rhythmic_regularity::analyze`]).
     /// How straight the percussive pattern sits inside the metric grid, in
@@ -2090,7 +2091,7 @@ pub struct TrackAnalysis {
     pub rhythmic_regularity_candidates: Option<Vec<(String, Float)>>,
 
     // --- rhythm levels ---
-    // Opt-in only (request via features=["rhythm_levels"]); all three `None`
+    // Playlist, Full or features=["rhythm_levels"]; all three `None`
     // otherwise. The onset envelope the tempo is estimated from is cut into
     // frames of 8 s every 0.5 s (Peeters 2011); each frame has its mean
     // removed and is autocorrelated (biased, rectangular window), the result
@@ -2126,10 +2127,10 @@ pub struct TrackAnalysis {
     // --- silence ---
     /// Leading silence duration in seconds — audio below the silence threshold
     /// (-60 dBFS relative to full scale) at the very start. Opt-in via
-    /// `features=["silence"]`. `None` unless requested.
+    /// `features=["silence"]` or Full mode; `None` otherwise.
     pub leading_silence_sec: Option<Float>,
     /// Trailing silence duration in seconds — audio below the silence threshold
-    /// at the very end. Opt-in via `features=["silence"]`. `None` unless requested.
+    /// at the very end. Opt-in via `features=["silence"]` or Full mode; `None` otherwise.
     pub trailing_silence_sec: Option<Float>,
 
     // --- key candidates ---
@@ -2146,7 +2147,7 @@ pub struct TrackAnalysis {
     /// tonal+syllabic heuristic that inverted on distorted vocals). Known ambiguous
     /// cases: sparse voice+piano ballads read mid-low; a voice-mimicking solo violin
     /// reads borderline. Opt-in via `features=["vocalness"]`; requires the extended
-    /// pass (mid-band spectral contrast). `None` unless requested.
+    /// pass (mid-band spectral contrast). `None` unless computed.
     pub vocalness: Option<Float>,
     // --- fingerprint ---
     /// Acoustic fingerprint (raw sub-fingerprint sequence, ~8 `u32`/sec) for
@@ -2320,6 +2321,10 @@ fn analyze_native_mono(
     sr: u32,
     config: &AnalysisConfig,
 ) -> Result<TrackAnalysis> {
+    // The resampler panics on non-finite samples: reject them before it runs.
+    if !native.is_empty() {
+        validated_zero_crossing_rate(native.view())?;
+    }
     let caller_sr = if sr == 0 { native_sr } else { sr };
     #[cfg(feature = "aggression")]
     if config.needs_aggression() {
@@ -2425,6 +2430,8 @@ fn analyze_signal_with_canonical_aggression(
     sr: u32,
     config: &AnalysisConfig,
 ) -> Result<TrackAnalysis> {
+    // The resampler panics on non-finite samples: reject them before it runs.
+    validated_zero_crossing_rate(y)?;
     // Normal API inputs are contiguous, so resample directly and allocate only
     // the canonical lane. Materialize unusual strided views only when needed by
     // the optimized 2:1 resampler.
@@ -2459,11 +2466,19 @@ fn analyze_signal_with_precomputed_aggression(
     // remove the opt-in aggression request so its trained DSP dependencies do
     // not force an unnecessary native-rate extended pass.
     let mut native_config = config.clone();
-    native_config
-        .features
-        .as_mut()
-        .expect("aggression is only enabled by an explicit feature request")
-        .retain(|feature| !feature.eq_ignore_ascii_case("aggression"));
+    match native_config.features.as_mut() {
+        Some(features) => features.retain(|feature| !feature.eq_ignore_ascii_case("aggression")),
+        // No list means Full mode turned aggression on: Full emits every
+        // feature, so the same run without aggression is the full list minus it.
+        None => {
+            native_config.features = Some(
+                analysis_feature_names()
+                    .filter(|name| *name != "aggression")
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        }
+    }
     let native_zcr = validated_zero_crossing_rate(y)?;
     let mut result = analyze_signal_inner(
         y,
@@ -2829,7 +2844,7 @@ fn analyze_signal_inner(
     let mut tuning_sum = [0.0_f64; 3];
     let mut tuning_frames = 0_usize;
 
-    // Request-only and not gated on `extended`: it reads the magnitude column.
+    // Opt-in and not gated on `extended`: it reads the magnitude column.
     let wants_hpss = config.wants("hpss");
     let (hpss_frames, hpss_bins) = hpss_kernel(sr, n_fft, hop_length);
     let mut hpss_stream = wants_hpss.then(|| HpssStream::new(n_bins, n_frames, hpss_frames));
@@ -3444,8 +3459,8 @@ fn analyze_signal_inner(
     let loudness_lufs = perceptual::loudness_lufs(y, sr);
 
     // --- loudness ---
-    // Extended loudness / gain metrics — strictly opt-in via `features=["loudness"]`.
-    // Default modes (compact/playlist/full) skip this entirely, so they pay nothing.
+    // Extended loudness / gain metrics — opt-in (Full mode or `features=["loudness"]`).
+    // Compact and Playlist skip this entirely, so they pay nothing.
     let (true_peak_db, replaygain_db, loudness_curve, loudness_momentary_max_db, loudness_range_lu) =
         if config.wants("loudness") {
             let tp = crate::loudness_ext::true_peak_db(y);
@@ -3783,13 +3798,13 @@ fn analyze_signal_inner(
 
     // ================================================================
     // BEAT GRID: offset, downbeats, stability (opt-in via features)
-    // Reuses the already-computed beats + onset envelope (O(n_beats)),
-    // so it never runs in the default modes — only when explicitly
-    // requested via features=["beatgrid"].
+    // Reuses the already-computed beats + onset envelope (O(n_beats)).
+    // Runs in Full mode or when requested via features=["beatgrid"].
     // ================================================================
 
-    // Prefer the detected meter (full mode) when it was also requested;
-    // otherwise assume 4/4. Lazy so the default modes pay nothing.
+    // Prefer the detected meter when time_signature was computed too (always
+    // in Full mode, whatever its confidence); otherwise assume 4/4. Lazy so
+    // Compact and Playlist pay nothing.
     let detected_beats_per_bar = || {
         time_signature
             .as_deref()
@@ -3864,7 +3879,7 @@ fn analyze_signal_inner(
 
     // ================================================================
     // RHYTHM LEVELS: strength of the eighth-note and one-and-a-half
-    // levels relative to the beat (opt-in via features). Reuses the onset
+    // levels relative to the beat (Playlist, Full or a request). Reuses the onset
     // envelope the tempo was estimated from and the reported tempo.
     // ================================================================
 
@@ -4132,8 +4147,8 @@ fn analyze_signal_inner(
     };
 
     // --- fingerprint ---
-    // Strictly opt-in (see FEATURE_REGISTRY): never runs unless
-    // the caller explicitly requested the "fingerprint" feature, so default modes
+    // Opt-in (see FEATURE_REGISTRY): runs only in Full mode or when the caller
+    // requested the "fingerprint" feature, so Compact and Playlist
     // pay exactly zero cost. Operates on its own downsampled mono copy of `y`.
     let fingerprint = if config.wants("fingerprint") {
         let fp = crate::fingerprint::compute(y, sr);
@@ -4191,13 +4206,13 @@ fn analyze_signal_inner(
     };
 
     // ================================================================
-    // OPT-IN FEATURES (only computed when explicitly requested via
-    // `features=[...]`; never enabled by mode — performance-first policy)
+    // OPT-IN FEATURES (computed by Full mode or an explicit `features=[...]`
+    // request; never by Compact or Playlist — performance-first policy)
     // ================================================================
 
     // --- silence ---
     // Nearly free: pure arithmetic over the RMS frames already computed above.
-    // Kept opt-in per the performance-first policy so default modes are unchanged.
+    // Kept opt-in per the performance-first policy so Compact and Playlist are unchanged.
     let (leading_silence_sec, trailing_silence_sec) = if config.wants("silence") {
         let rms_slice = rms_frames.as_slice().unwrap();
         let (lead, trail) = silence_offsets(rms_slice, sr, hop_length, -60.0);
@@ -4262,7 +4277,7 @@ fn analyze_signal_inner(
             vocalness_model_id: config.vocalness_model.as_ref().map(|m| m.id().to_string()),
             #[cfg(feature = "aggression")]
             aggression_model_id: config
-                .feature_requested("aggression")
+                .needs_aggression()
                 .then(|| crate::aggression::AGGRESSION_MODEL_ID.to_owned()),
         },
         duration_sec,
@@ -4390,7 +4405,7 @@ fn analyze_signal_inner(
             .map(|analysis| analysis.tension),
         #[cfg(feature = "aggression")]
         aggression_rhythm: aggression_analysis.as_ref().map(|analysis| analysis.rhythm),
-        // Mood + instrumentalness: heuristic v1 (opt-in), None unless requested.
+        // Mood + instrumentalness: heuristic v1 (opt-in), None unless computed.
         mood_happy: mood.as_ref().map(|m| m.happy),
         mood_aggressive: mood.as_ref().map(|m| m.aggressive),
         mood_relaxed: mood.as_ref().map(|m| m.relaxed),
@@ -4437,8 +4452,8 @@ fn analyze_signal_inner(
     };
 
     // --- similarity ---
-    // Populate the hand-crafted similarity vector only when explicitly opted in
-    // via `features=["embedding"]`. This keeps compact/playlist/full unchanged
+    // Populate the hand-crafted similarity vector only when opted in (Full mode
+    // or `features=["embedding"]`). This keeps compact/playlist unchanged
     // and adds near-zero cost (the vector is assembled from features already
     // computed above). A future ML embedding can replace `embed` behind the same
     // version field.
@@ -5706,8 +5721,18 @@ pub fn augment_analysis(
                     mode: cached.provenance.mode,
                     ..Default::default()
                 };
+                // Only a record measured from a file (it then carries
+                // `native_sample_rate`) holds the file-only groups.
+                const FILE_ONLY: [&str; 5] = [
+                    "ebur128",
+                    "native_dynamics",
+                    "amplitude_envelope",
+                    "stereo_field",
+                    "tags",
+                ];
+                let from_file = cached.native_sample_rate.is_some();
                 analysis_feature_names()
-                    .filter(|name| probe.emits(name))
+                    .filter(|name| probe.emits(name) && (from_file || !FILE_ONLY.contains(name)))
                     .map(str::to_owned)
                     .collect()
             }
@@ -5940,7 +5965,7 @@ mod tests {
                 && !dep_of("rhythmic_regularity").full_only
         );
         assert!(
-            dep_of("rhythm_levels").opt_in_only
+            !dep_of("rhythm_levels").opt_in_only
                 && !dep_of("rhythm_levels").needs_extended
                 && !dep_of("rhythm_levels").full_only
         );
@@ -6056,7 +6081,7 @@ mod tests {
     #[test]
     fn onset_bands_are_absent_by_default_and_aligned_when_requested() {
         let y = sine(440.0, 22050, 2.0);
-        for config in [compact(), playlist(), full()] {
+        for config in [compact(), playlist()] {
             let result = analyze_signal(y.view(), 22050, &config).unwrap();
             assert!(result.onset_band_edges_hz.is_none());
             assert!(result.onset_strength_bands.is_none());
@@ -6119,7 +6144,7 @@ mod tests {
     #[test]
     fn rhythmic_regularity_is_absent_by_default_and_complete_when_requested() {
         let y = four_on_the_floor(22050, 128.0, 16);
-        for config in [compact(), playlist(), full()] {
+        for config in [compact(), playlist()] {
             let result = analyze_signal(y.view(), 22050, &config).unwrap();
             assert!(result.rhythmic_regularity.is_none());
             assert!(result.rhythmic_regularity_label.is_none());
@@ -6280,6 +6305,10 @@ mod tests {
     fn test_analyze_file_default_no_tags() {
         let result = analyze_file(&fixture("tagged.flac"), 22050, &compact()).unwrap();
         assert!(result.tags.is_none(), "tags not requested → None");
+        // Full reads them, along with the other file-only groups.
+        let result = analyze_file(&fixture("tagged.flac"), 22050, &full()).unwrap();
+        assert_eq!(result.tags.unwrap().title.as_deref(), Some("Test Title"));
+        assert!(result.native_sample_rate.is_some());
     }
 
     fn tiny_vocalness_model(id: &str, ev: u32) -> crate::vocal_model::VocalnessModel {
@@ -7111,9 +7140,58 @@ mod tests {
     }
 
     #[test]
+    fn test_full_mode_computes_every_feature() {
+        let y = sine(440.0, SR, 15.0);
+        let r = analyze_signal(y.view(), SR, &full()).unwrap();
+        assert!(r.leading_silence_sec.is_some(), "silence");
+        assert!(r.key_candidates.is_some(), "key_candidates");
+        assert!(r.vocalness.is_some(), "vocalness");
+        assert!(r.instrumentalness.is_some(), "instrumentalness");
+        assert!(r.mood_happy.is_some(), "mood");
+        assert!(r.energy_curve.is_some(), "structure");
+        assert!(r.embedding.is_some(), "embedding");
+        assert!(r.fingerprint.is_some(), "fingerprint");
+        assert!(r.true_peak_db.is_some(), "loudness");
+        assert!(r.onset_strength_bands.is_some(), "onset_bands");
+        assert!(r.hpss_percussive_ratio.is_some(), "hpss");
+        assert!(r.rhythm_level_confidence.is_some(), "rhythm_levels");
+        assert!(
+            r.rhythmic_regularity_confidence.is_some(),
+            "rhythmic_regularity"
+        );
+        // A mode-driven run records no feature list.
+        assert!(r.provenance.requested_features.is_none());
+
+        // Playlist gains rhythm_levels; the opt-in features stay out of it.
+        let p = analyze_signal(y.view(), SR, &playlist()).unwrap();
+        assert!(p.rhythm_level_confidence.is_some());
+        assert!(p.hpss_percussive_ratio.is_none());
+        assert!(analyze_signal(y.view(), SR, &compact())
+            .unwrap()
+            .rhythm_level_confidence
+            .is_none());
+    }
+
+    // Full turns aggression on without a feature list: in the fused pass at
+    // the model's rate, through the separate 22.05 kHz lane off it.
+    #[cfg(feature = "aggression")]
+    #[test]
+    fn test_full_mode_computes_aggression_at_any_rate() {
+        for sr in [SR, 44100] {
+            let y = sine(440.0, sr, 15.0);
+            let r = analyze_signal(y.view(), sr, &full()).unwrap();
+            assert!(r.aggression_confidence.is_some(), "{sr}");
+            assert!(r.provenance.aggression_model_id.is_some(), "{sr}");
+            assert!(r.provenance.requested_features.is_none(), "{sr}");
+            assert!(r.time_signature_confidence.is_some(), "full-only kept");
+            assert!(r.embedding.is_some(), "opt-in kept");
+        }
+    }
+
+    #[test]
     fn test_optin_absent_by_default() {
         let y = sine(440.0, SR, 3.0);
-        for cfg in [compact(), playlist(), full()] {
+        for cfg in [compact(), playlist()] {
             let r = analyze_signal(y.view(), SR, &cfg).unwrap();
             assert!(r.leading_silence_sec.is_none(), "silence must be opt-in");
             assert!(r.trailing_silence_sec.is_none());
@@ -7180,16 +7258,14 @@ mod tests {
     #[test]
     fn test_structure_is_opt_in() {
         let y = sine(440.0, 22050, 15.0);
-        // Default playlist/full modes must NOT compute structure.
-        for cfg in [playlist(), full()] {
-            let r = analyze_signal(y.view(), 22050, &cfg).unwrap();
-            assert!(
-                r.energy_curve.is_none(),
-                "structure must be absent by default"
-            );
-            assert!(r.segments.is_none());
-            assert!(r.energy_level.is_none());
-        }
+        // Playlist mode must NOT compute structure (Full computes everything).
+        let r = analyze_signal(y.view(), 22050, &playlist()).unwrap();
+        assert!(
+            r.energy_curve.is_none(),
+            "structure must be absent by default"
+        );
+        assert!(r.segments.is_none());
+        assert!(r.energy_level.is_none());
         // Compact obviously not.
         let rc = analyze_signal(y.view(), 22050, &compact()).unwrap();
         assert!(rc.energy_curve.is_none());
@@ -7974,6 +8050,31 @@ mod tests {
             aug.provenance.requested_features.as_deref(),
             Some(&["onset_density".to_string()][..])
         );
+        // A Full record from a signal expands to every feature it could hold:
+        // the opt-in ones, but not the file-only groups it never measured.
+        let full_record = analyze_signal(y.view(), SR, &full()).unwrap();
+        let aug = augment_analysis(
+            &full_record,
+            &["onset_density"],
+            None,
+            &AnalysisConfig::default(),
+        )
+        .unwrap();
+        let names = aug.provenance.requested_features.unwrap();
+        assert!(names.contains(&"hpss".to_string()));
+        for file_only in ["ebur128", "native_dynamics", "amplitude_envelope", "stereo_field", "tags"] {
+            assert!(!names.contains(&file_only.to_string()), "{file_only}");
+        }
+    }
+
+    #[test]
+    fn test_non_finite_audio_is_an_error_before_resampling() {
+        let mut y = sine(440.0, 48000, 1.0);
+        y[1000] = Float::NAN;
+        // Full computes aggression in a separate 22.05 kHz lane off its rate.
+        assert!(analyze_signal(y.view(), 48000, &full()).is_err());
+        // A file decoded at 48 kHz and analyzed at the default rate.
+        assert!(analyze_native_mono(y, 48000, 22050, &playlist()).is_err());
     }
 
     #[cfg(feature = "aggression")]
@@ -8806,8 +8907,8 @@ mod tests {
     #[test]
     fn test_hpss_presence_follows_requests() {
         let y = hpss_mix(3);
-        // Request-only: no preset mode computes it.
-        for config in [compact(), playlist(), full()] {
+        // Opt-in: Compact and Playlist leave it out, Full computes it.
+        for config in [compact(), playlist()] {
             assert_eq!(hpss_of(&y, &config), None);
         }
         assert_eq!(hpss_of(&y, &feature_config(&["mfcc"])), None);
@@ -8816,6 +8917,7 @@ mod tests {
         assert!(!only.needs_extended());
         let r = hpss_of(&y, &only).unwrap();
         assert!(r > 0.0 && r < 1.0, "{r}");
+        assert_eq!(hpss_of(&y, &full()), Some(r));
         assert_eq!(hpss_of(&y, &feature_config(&["hpss", "mfcc"])), Some(r));
     }
 
@@ -9099,10 +9201,8 @@ mod tests {
     fn test_rhythm_levels_presence_follows_requests() {
         // A click every half second: 12 s hold a full frame.
         let y = hpss_mix(12);
-        // Request-only: no preset mode computes it.
-        for config in [compact(), playlist(), full()] {
-            assert_eq!(rhythm_levels_of(&y, &config), (None, None, None));
-        }
+        // Playlist and Full compute it; Compact does not.
+        assert_eq!(rhythm_levels_of(&y, &compact()), (None, None, None));
         assert_eq!(
             rhythm_levels_of(&y, &feature_config(&["mfcc"])),
             (None, None, None)
@@ -9113,6 +9213,9 @@ mod tests {
         let got = rhythm_levels_of(&y, &only);
         assert!(got.0.is_some() && got.1.is_some(), "{got:?}");
         assert!(got.2.unwrap() > 0.0 && got.2.unwrap() <= 1.0, "{got:?}");
+        for config in [playlist(), full()] {
+            assert_eq!(rhythm_levels_of(&y, &config), got);
+        }
         assert_eq!(
             rhythm_levels_of(&y, &feature_config(&["rhythm_levels", "mfcc"])),
             got

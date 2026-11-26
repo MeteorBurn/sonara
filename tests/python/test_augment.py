@@ -163,12 +163,12 @@ HPSS = "hpss_percussive_ratio"
 
 
 def _hpss_keys():
-    # Request-only: no mode computes it.
-    full = sonara.analyze_signal(_y, sr=SR, mode="full")
-    for rec in (REC_COMPACT, REC_PLAYLIST, full):
+    # Opt-in: compact and playlist leave it out, full computes it.
+    for rec in (REC_COMPACT, REC_PLAYLIST):
         assert HPSS not in rec, rec["provenance"]["mode"]
     only = sonara.analyze_signal(_y, sr=SR, features=["hpss"])
     assert 0.0 <= only[HPSS] <= 1.0, only[HPSS]
+    assert sonara.analyze_signal(_y, sr=SR, mode="full")[HPSS] == only[HPSS]
     # A steady tone is all horizontal structure, a click train all vertical.
     tone = (0.5 * np.sin(2 * np.pi * 440.0 * _t)).astype(np.float32)
     clicks = np.zeros(_t.size, dtype=np.float32)
@@ -185,7 +185,7 @@ def _hpss_keys():
     assert sonara.augment_blocker(REC_PLAYLIST, "hpss") == "needs audio (frame_curves-class feature)"
 
 
-test("hpss is request-only, reads ~0 on a tone and ~1 on clicks", _hpss_keys)
+test("hpss is opt-in (full or on request), reads ~0 on a tone and ~1 on clicks", _hpss_keys)
 
 RHYTHM_LEVELS = {
     "rhythm_level_double_ratio", "rhythm_level_one_and_half_ratio", "rhythm_level_confidence",
@@ -193,10 +193,11 @@ RHYTHM_LEVELS = {
 
 
 def _rhythm_levels_keys():
-    # Request-only: no mode computes it.
+    # Playlist and full compute it; compact does not.
+    assert not RHYTHM_LEVELS & set(REC_COMPACT)
     full = sonara.analyze_signal(_y, sr=SR, mode="full")
-    for rec in (REC_COMPACT, REC_PLAYLIST, full):
-        assert not RHYTHM_LEVELS & set(rec), rec["provenance"]["mode"]
+    for rec in (REC_PLAYLIST, full):
+        assert RHYTHM_LEVELS <= set(rec), rec["provenance"]["mode"]
     # Abstention: 5 s hold no 8 s frame, so both ratios are a present None
     # next to a zero confidence, and that survives the dict round trip.
     short = sonara.analyze_signal(_y, sr=SR, features=["rhythm_levels"])
@@ -214,10 +215,10 @@ def _rhythm_levels_keys():
     assert 0.0 < only["rhythm_level_confidence"] <= 1.0, only["rhythm_level_confidence"]
     assert only["rhythm_level_double_ratio"] >= 0.0, only["rhythm_level_double_ratio"]
     assert only["rhythm_level_one_and_half_ratio"] >= 0.0, only["rhythm_level_one_and_half_ratio"]
-    # Class C, opt-in: stored values survive the dict round trip, and a refill
+    # Class C: stored values survive the dict round trip, and a refill
     # needs the audio again.
     row = next(r for r in sonara.feature_dependencies() if r["name"] == "rhythm_levels")
-    assert row["class"] == "frame_curves" and row["opt_in_only"] is True, row
+    assert row["class"] == "frame_curves" and row["opt_in_only"] is False, row
     assert sonara.augment_analysis(only, []) == only
     assert (
         sonara.augment_blocker(REC_PLAYLIST, "rhythm_levels")
@@ -225,7 +226,7 @@ def _rhythm_levels_keys():
     )
 
 
-test("rhythm_levels is request-only, abstains below 8 s and round-trips", _rhythm_levels_keys)
+test("rhythm_levels ships in playlist mode, abstains below 8 s and round-trips", _rhythm_levels_keys)
 
 STEREO_FIELD = {
     "stereo_side_ratio", "stereo_side_ratio_low",
@@ -267,13 +268,14 @@ def _stereo_field_keys():
         # Antiphase (R = -L): all Side, correlation -1.
         anti_path, anti = measure("anti", tone, -tone)
         expect(anti, 1.0, -1.0)
-        # Request-only: no mode computes it.
+        # Opt-in: compact and playlist leave it out, full measures a file.
         by_mode = {
             mode: sonara.analyze_file(anti_path, mode=mode)
             for mode in ("compact", "playlist", "full")
         }
-        for mode, rec in by_mode.items():
-            assert not STEREO_FIELD & set(rec), mode
+        for mode in ("compact", "playlist"):
+            assert not STEREO_FIELD & set(by_mode[mode]), mode
+        expect(by_mode["full"], 1.0, -1.0)
         # Identical channels and a mono file (measured as L = R): no Side, +1.
         expect(measure("same", tone, tone)[1], 0.0, 1.0)
         expect(measure("mono", tone)[1], 0.0, 1.0)
@@ -306,7 +308,7 @@ def _stereo_field_keys():
         assert aug["bpm"] == rec["bpm"]
 
 
-test("stereo_field is request-only and file-only, exact on synthetic stereo", _stereo_field_keys)
+test("stereo_field is opt-in (full or on request) and file-only, exact on synthetic stereo", _stereo_field_keys)
 
 
 def _roundtrip_optin():

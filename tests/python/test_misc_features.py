@@ -3,8 +3,8 @@
 (heuristic v2, contrast-based, changed semantics in 0.2.4), mood (heuristic v1),
 instrumentalness.
 
-These features are opt-in only (never enabled by any mode) and must appear in
-the result dict only when requested via `features=[...]`. Runs as a standalone
+These features are opt-in (compact and playlist never enable them) and must
+appear in the result dict only in full mode or when requested via `features=[...]`. Runs as a standalone
 script (exits nonzero on failure), matching the repo's test convention.
 """
 
@@ -57,7 +57,7 @@ def signal_with_silence(lead=1.5, mid=3.0, trail=2.25):
 
 
 # ------------------------------------------------------------
-# Opt-in: absent by default in every mode
+# Opt-in: absent in compact and playlist, present in full
 # ------------------------------------------------------------
 
 OPTIN_KEYS = [
@@ -69,13 +69,16 @@ MOOD_KEYS = ["mood_happy", "mood_aggressive", "mood_relaxed", "mood_sad"]
 
 def test_absent_by_default():
     y = a_minor_triad()
-    for mode in ("compact", "playlist", "full"):
+    for mode in ("compact", "playlist"):
         r = sonara.analyze_signal(y, sr=SR, mode=mode)
         for k in OPTIN_KEYS:
             assert k not in r, f"{k} must be absent in mode={mode}"
+    r = sonara.analyze_signal(y, sr=SR, mode="full")
+    for k in OPTIN_KEYS:
+        assert k in r, f"{k} must be present in mode=full"
 
 
-test("opt-in keys absent by default (compact/playlist/full)", test_absent_by_default)
+test("opt-in keys absent in compact/playlist, present in full", test_absent_by_default)
 
 
 # ------------------------------------------------------------

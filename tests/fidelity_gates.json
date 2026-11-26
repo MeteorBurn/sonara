@@ -69,9 +69,9 @@
     },
     {
       "path": "tests/python/test_onset_bands.py",
-      "base_sha256": "cd6df58aca17a1d0b56beb30a4a38cdf7aaf38d8ba9341e634ba0275d32993bb",
-      "head_sha256": "d1bb486a4718886f863883300be7f771e0793d448d4f68d031b59df211984dac",
-      "reason": "add the __main__ driver the canonical runner needs; the registered suite previously exited 0 without executing a single test, and no analysis behavior changes"
+      "base_sha256": "d1bb486a4718886f863883300be7f771e0793d448d4f68d031b59df211984dac",
+      "head_sha256": "3c7a98a7497d33bc6236a4255d8b1eae564ceb3c27df3ff01326db94942e737d",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
     },
     {
       "path": "sonara/src/core/audio.rs",
@@ -88,8 +88,44 @@
     {
       "path": "tests/python/test_native_dynamics.py",
       "base_sha256": null,
-      "head_sha256": "d6b041f863c55b1795e1462af4c79010ce4e2817271e1be60696483d84fc418c",
-      "reason": "tests for the new opt-in file-only features only; no existing analysis behavior changes"
+      "head_sha256": "bad229a21bf7ae34a2b54dd2d8dd105ce3a1aa3a7e27c4c2866670e9fc03882d",
+      "reason": "tests for the file-only features ebur128, native_dynamics and amplitude_envelope (new on this branch); since 2026-11-26 full mode computes them, so the absence check covers compact and playlist and full is checked for every key; no existing analysis value changes"
+    },
+    {
+      "path": "tests/python/test_beatgrid.py",
+      "base_sha256": "b4e42c50ee37205d0aad816c092c9f5a17a50a15981ada5dabd395a1f88dd01d",
+      "head_sha256": "ecff16731da8166bc1c7b72d655fb7b5252e64c4e65b86d63d8ec50d04753274",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+    },
+    {
+      "path": "tests/python/test_rhythmic_regularity.py",
+      "base_sha256": "b0111a42313a72e771638d011e5dfb6b818dc2e3b50a0b6660ada88c7e83a965",
+      "head_sha256": "1d244c6c3030f7db4f140f6a04e6f3cc3a401ee9ad6de480c050f39f30da16cc",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+    },
+    {
+      "path": "tests/python/test_fingerprint.py",
+      "base_sha256": "925cb8019cabe962d8ca0ebdbcfc9238ad247cb85f65fe11c89aad3d6e364bbc",
+      "head_sha256": "cdaf7694164b06060312f67b44ab67a2af53c9c30d3f776160b584b7b9fa176e",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+    },
+    {
+      "path": "tests/python/test_misc_features.py",
+      "base_sha256": "314542a5b08b173e93a92e88ecbbf222549aeb537fe2290029ed3ea6ee656909",
+      "head_sha256": "20e76a7ade164087b9e2d9942d0ae6708c49bf13cc96935a77f6a41f85f9a2a3",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+    },
+    {
+      "path": "tests/python/test_loudness.py",
+      "base_sha256": "9ec9f8342f1ce606dd56dbd5876882da407d7ee1a8cc65c19993d8243a425beb",
+      "head_sha256": "5ba591e0ccee72ad45ceefd6c53a5f6d796d4239a963bdf5073dfb32852c447e",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+    },
+    {
+      "path": "tests/python/test_structure.py",
+      "base_sha256": "e8ae6194b9922a331f909f9634edd7a5234eb5769b69ca4d0d84d5b79112a224",
+      "head_sha256": "7648a9e361b2a0b281ef8be884fb1190dddaa711c812bf47fa0c9dbbd751b4c1",
+      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
     }
   ],
   "domains": {

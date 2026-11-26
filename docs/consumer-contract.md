@@ -153,7 +153,8 @@ recompute reads (`augment_analysis` / `can_augment` consume the same map, so a
 missing feature can often be filled in without re-decoding the audio).
 Presence fails for one group: `tags` is an absent key, not an empty map, when the
 container carries none (WAV always), so key it on
-`provenance.requested_features` instead. The Python module exports
+`provenance.requested_features` instead (a `full`-mode file record has no
+feature list: there `provenance.mode` equal to `full` says tags were read). The Python module exports
 `ANALYSIS_SCHEMA_VERSION` and `FINGERPRINT_VERSION` for these comparisons, and
 `fingerprint_match` refuses a record whose `fingerprint_version` differs from
 this build's.
@@ -273,8 +274,9 @@ The two keys travel with `tuning`: present exactly when it is, refilled by
 embedding evidence.
 
 HPSS percussive ratio (2026-11-22, MeteorBurn fork, no schema bump: additive
-key, existing values unchanged). The opt-in `hpss` feature (`features=["hpss"]`
-only; no mode computes it) adds `hpss_percussive_ratio` (dimensionless, 0..1):
+key, existing values unchanged). The opt-in `hpss` feature (`full` mode or
+`features=["hpss"]`; `compact` and `playlist` do not compute it) adds
+`hpss_percussive_ratio` (dimensionless, 0..1):
 the share of percussive energy in the track by median-filter
 harmonic/percussive separation. `0` means all energy is in sustained,
 horizontal (tonal) structure of the spectrogram; `1` means all energy is in
@@ -317,8 +319,9 @@ needs the audio (class `C`), is not embedding evidence and is not an input to
 any model.
 
 Rhythmic level ratios (2026-11-25, MeteorBurn fork, no schema bump: additive
-keys, existing values unchanged). The opt-in `rhythm_levels` feature
-(`features=["rhythm_levels"]` only; no mode computes it) adds three
+keys, existing values unchanged). The `rhythm_levels` feature (part of the
+`playlist` and `full` modes, or `features=["rhythm_levels"]`; `compact` does
+not compute it) adds three
 dimensionless keys, emitted by `analyze_file` and `analyze_signal` alike:
 `rhythm_level_double_ratio` (≥ 0, no upper bound), the strength of the
 eighth-note (double-tempo) level against the beat — `0` means nothing regular
@@ -400,10 +403,12 @@ better there (+0.472, interval +0.373 to +0.557, 313 tracks) but has no second
 set labelled by listeners to confirm it, so it is not shipped.
 
 File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
-additive keys, existing values unchanged). Three opt-in features, never computed
-by a mode, measure the file's own channels at its own sample rate instead of the
+additive keys, existing values unchanged). Three opt-in features, computed by
+`full` mode or an explicit request and never by `compact` or `playlist`,
+measure the file's own channels at its own sample rate instead of the
 mono mix at the analysis rate, so only `analyze_file` / `analyze_batch` emit
-them; `analyze_signal` never does, even when they are requested.
+them; `analyze_signal` never does, even when they are requested or the mode is
+`full`.
 `features=["ebur128"]` adds `ebur128_integrated_lufs`,
 `ebur128_momentary_max_lufs`, `ebur128_short_term_max_lufs` (LUFS),
 `ebur128_range_lu` (LU) and `ebur128_true_peak_dbtp` (dBTP): ITU-R BS.1770-5 /
@@ -421,7 +426,8 @@ when its value is undefined — digital silence, a file shorter than the
 400 ms / 3 s window, or (loudness only; the true peak is still reported) a file
 with more than six channels, whose layout the channel count does not determine
 (up to six are read in WAV order L R C LFE Ls Rs, LFE excluded) — so with the
-feature listed in `provenance.requested_features` and `native_sample_rate`
+feature listed in `provenance.requested_features` (or `provenance.mode` equal
+to `full` on a record without a feature list) and `native_sample_rate`
 present, a missing key means "measured, undefined", not "pending". Any of the
 three features (and `stereo_field` below) sets `native_sample_rate` (Hz, int) when it measured a file, so
 a record without it (an `analyze_signal` result) was never measured. The
@@ -433,10 +439,12 @@ embedding evidence.
 
 Stereo field (2026-11-25, MeteorBurn fork, no schema bump: additive keys,
 existing values unchanged). The opt-in `stereo_field` feature
-(`features=["stereo_field"]` only; no mode computes it) belongs to the
+(`full` mode or `features=["stereo_field"]`; `compact` and `playlist` do not
+compute it) belongs to the
 file-level family above: it is measured on the file's left and right channels
 at the file's own sample rate, so only `analyze_file` / `analyze_batch` emit
-it; `analyze_signal` never does, even when it is requested. It adds four
+it; `analyze_signal` never does, even when it is requested or the mode is
+`full`. It adds four
 dimensionless keys. `stereo_side_ratio` (0..1) is the share of the Side signal
 in the energy of the whole file: with Mid `(L + R)/2` and Side `(L − R)/2` it
 is `E_S / (E_M + E_S)` = `½·(1 − 2·cov(L,R) / (var L + var R))`. The variances
@@ -463,7 +471,8 @@ in which one channel has zero variance counts as `0`; the correlation is
 undefined when no frame is left. Abstention follows the family: a key is
 absent (`None` in Rust) when its value is undefined, and `stereo_field` sets
 `native_sample_rate` like the three features above, so with the feature
-listed in `provenance.requested_features` and `native_sample_rate` present, a
+listed in `provenance.requested_features` (or `provenance.mode` equal to
+`full` on a record without a feature list) and `native_sample_rate` present, a
 missing key means "measured, undefined", not "pending". Sources of the
 parameters. The width measure is Tardieu, Deruty, Charbuillet and Peeters,
 "Production Effect: Audio Features for Recording Techniques Description and
@@ -513,7 +522,8 @@ but it carries a shape consumers must handle explicitly: it **abstains**. When
 a track has no measurable rhythmic evidence (silence, ambient, drumless), the
 result carries `rhythmic_regularity_confidence` while `rhythmic_regularity`,
 `rhythmic_regularity_label` and `rhythmic_regularity_candidates` are all
-`None` together (the Python result includes all four keys when requested).
+`None` together (the Python result includes all four keys when the feature is
+computed).
 A stored `None` therefore means "measured, could not
 tell", not "not yet computed" — key freshness on the presence of the
 *confidence*, not of the score. The confidence is evidence quality, never a

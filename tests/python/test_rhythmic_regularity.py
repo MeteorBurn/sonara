@@ -114,10 +114,12 @@ def _measure(signal, sr=SR, **kwargs):
 
 def test_rhythmic_regularity_is_absent_from_every_default_mode() -> None:
     signal = _render(FOUR_ON_THE_FLOOR)
-    for mode in ("compact", "playlist", "full"):
+    for mode in ("compact", "playlist"):
         result = sonara.analyze_signal(signal, sr=SR, mode=mode)
         for key in KEYS:
             assert key not in result, f"{key} must not appear in mode={mode}"
+    result = sonara.analyze_signal(signal, sr=SR, mode="full")
+    assert "rhythmic_regularity_confidence" in result
 
 
 def test_requested_result_satisfies_the_documented_contract() -> None:
@@ -275,7 +277,7 @@ def test_print_renders_both_a_score_and_an_abstention() -> None:
 
 
 TESTS = [
-    ("absent from every default mode", test_rhythmic_regularity_is_absent_from_every_default_mode),
+    ("absent from compact and playlist, present in full",test_rhythmic_regularity_is_absent_from_every_default_mode),
     ("requested result matches the contract", test_requested_result_satisfies_the_documented_contract),
     ("straight vs broken patterns separate", test_straight_reads_regular_and_broken_patterns_read_irregular),
     ("silence and drumless abstain", test_silence_and_drumless_audio_abstain_with_confidence_reported),

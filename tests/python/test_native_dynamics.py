@@ -84,11 +84,14 @@ _write_wav(SILENT_WAV, 0.0)
 
 
 def test_absent_by_default():
-    """Opt-in: no mode computes these keys."""
-    for mode in ("compact", "playlist", "full"):
+    """Opt-in: compact and playlist leave these keys out, full measures a file."""
+    for mode in ("compact", "playlist"):
         r = sonara.analyze_file(WAV, mode=mode)
         for key in ALL_KEYS:
             assert key not in r, f"{key} should be absent in mode={mode} (opt-in)"
+    full = sonara.analyze_file(WAV, mode="full")
+    missing = [key for key in ALL_KEYS + ["native_sample_rate"] if key not in full]
+    assert not missing, f"mode=full misses {missing}"
 
 
 def test_reference_tone_values():

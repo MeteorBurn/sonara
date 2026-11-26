@@ -58,11 +58,22 @@ print("  Testing sonara beat grid (opt-in)")
 print("=" * 70)
 
 # ============================================================
-# Opt-in: absent by default in every mode
+# Opt-in: absent in compact and playlist, present in full
 # ============================================================
-print("\n--- Default modes must NOT contain beat-grid keys ---")
+print("\n--- compact/playlist must NOT contain beat-grid keys ---")
 
-for mode in ("compact", "playlist", "full"):
+r = sonara.analyze_signal(y, sr=sr, mode="full")
+test(
+    "full: beat-grid keys present",
+    lambda r=r: (
+        None
+        if all(k in r for k in GRID_KEYS)
+        else (_ for _ in ()).throw(AssertionError(
+            f"missing keys: {[k for k in GRID_KEYS if k not in r]}"))
+    ),
+)
+
+for mode in ("compact", "playlist"):
     r = sonara.analyze_signal(y, sr=sr, mode=mode)
     test(
         f"{mode}: no beat-grid keys",
