@@ -791,7 +791,12 @@ fn stereo_field(channels: ArrayView2<Float>, sr: u32) -> StereoField {
 }
 
 #[inline]
-fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
+pub(crate) fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Result<Float> {
+    if y.is_empty() {
+        return Err(SonaraError::InvalidAudio(
+            "signal must contain at least one sample".into(),
+        ));
+    }
     let mut non_finite = false;
     let mut crossings = 0_usize;
     if let Some(samples) = y.as_slice() {
@@ -2239,8 +2244,27 @@ struct FrameResult {
 // Public API
 // ============================================================
 
+/// Run one analysis and report a panic inside it as that call's error, so a
+/// single input cannot abort a batch or reach a binding as a panic.
+// The closure only reads its inputs, and the thread-local caches hold no
+// borrow and no half-written entry after an unwind, so resuming is sound.
+pub(crate) fn catch_analysis_panic<T>(run: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|payload| {
+        let reason = payload
+            .downcast_ref::<&str>()
+            .map(|message| message.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_owned());
+        Err(SonaraError::Numerical(format!("analysis panicked: {reason}")))
+    })
+}
+
 /// Analyze a track from a file path with the given configuration.
 pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
+    catch_analysis_panic(|| analyze_file_unguarded(path, sr, config))
+}
+
+fn analyze_file_unguarded(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
     config.validate_features()?;
     // Tags are file-only metadata (see `TrackTags`): read them during load when
     // requested, then post-fill the result. When not requested, `load_with_tags`
@@ -2299,16 +2323,10 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
         }
         return Ok(result);
     }
-    #[cfg(feature = "aggression")]
-    if config.needs_aggression() {
-        let (native, native_sr, tags) = audio::load_with_tags(path, 0, true, 0.0, 0.0, want_tags)?;
-        let mut result = analyze_native_mono(native, native_sr, sr, config)?;
-        result.tags = tags;
-        return Ok(result);
-    }
-
-    let (y, actual_sr, tags) = audio::load_with_tags(path, sr, true, 0.0, 0.0, want_tags)?;
-    let mut result = analyze_signal(y.view(), actual_sr, config)?;
+    // Decode at the file's own rate: `analyze_native_mono` rejects non-finite
+    // samples before it resamples.
+    let (native, native_sr, tags) = audio::load_with_tags(path, 0, true, 0.0, 0.0, want_tags)?;
+    let mut result = analyze_native_mono(native, native_sr, sr, config)?;
     result.tags = tags;
     Ok(result)
 }
@@ -2370,7 +2388,10 @@ fn analyze_native_mono(
         );
     }
     let y = if caller_sr != native_sr {
-        audio::resample(native.view(), native_sr, caller_sr)?
+        let resampled = audio::resample(native.view(), native_sr, caller_sr)?;
+        // The analysis reads only the resampled copy: free the native one first.
+        drop(native);
+        resampled
     } else {
         native
     };
@@ -2396,6 +2417,14 @@ pub fn analyze_file_with_rhythm_envelopes(
 
 /// Analyze a pre-loaded audio signal with the given configuration.
 pub fn analyze_signal(
+    y: ndarray::ArrayView1<Float>,
+    sr: u32,
+    config: &AnalysisConfig,
+) -> Result<TrackAnalysis> {
+    catch_analysis_panic(|| analyze_signal_unguarded(y, sr, config))
+}
+
+fn analyze_signal_unguarded(
     y: ndarray::ArrayView1<Float>,
     sr: u32,
     config: &AnalysisConfig,
@@ -8101,9 +8130,117 @@ mod tests {
         let mut y = sine(440.0, 48000, 1.0);
         y[1000] = Float::NAN;
         // Full computes aggression in a separate 22.05 kHz lane off its rate.
-        assert!(analyze_signal(y.view(), 48000, &full()).is_err());
+        assert!(matches!(
+            analyze_signal(y.view(), 48000, &full()),
+            Err(SonaraError::InvalidAudio(_))
+        ));
         // A file decoded at 48 kHz and analyzed at the default rate.
-        assert!(analyze_native_mono(y, 48000, 22050, &playlist()).is_err());
+        assert!(matches!(
+            analyze_native_mono(y, 48000, 22050, &playlist()),
+            Err(SonaraError::InvalidAudio(_))
+        ));
+    }
+
+    /// 1 s float WAV at 48 kHz; `nan_at` plants one non-finite sample.
+    fn write_float_wav(path: &Path, nan_at: Option<usize>) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for (index, &sample) in sine(440.0, 48000, 1.0).iter().enumerate() {
+            let sample = if Some(index) == nan_at { Float::NAN } else { sample };
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    // A file the analysis cannot process is that file's error: the rest of the
+    // batch keeps its results, in input order.
+    #[test]
+    fn test_batch_isolates_a_file_with_non_finite_samples() {
+        let dir = std::env::temp_dir();
+        let good = dir.join(format!("sonara-batch-good-{}.wav", std::process::id()));
+        let bad = dir.join(format!("sonara-batch-nan-{}.wav", std::process::id()));
+        write_float_wav(&good, None);
+        write_float_wav(&bad, Some(1000));
+        let paths: Vec<&Path> = vec![good.as_path(), bad.as_path(), good.as_path()];
+        let results = analyze_batch(&paths, 22050, &playlist());
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_file(&bad);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok() && results[2].is_ok());
+        let err = results[1].as_ref().unwrap_err();
+        assert!(matches!(err, SonaraError::InvalidAudio(_)), "{err}");
+    }
+
+    #[test]
+    fn test_panic_inside_analysis_is_reported_as_an_error() {
+        let err = catch_analysis_panic(|| -> Result<()> { panic!("boom") }).unwrap_err();
+        assert!(
+            matches!(&err, SonaraError::Numerical(reason) if reason.contains("boom")),
+            "{err}"
+        );
+        // A formatted panic carries a `String` payload, not a `&str`.
+        let frame = std::hint::black_box(3);
+        let err =
+            catch_analysis_panic(|| -> Result<()> { panic!("boom at frame {frame}") }).unwrap_err();
+        assert!(
+            matches!(&err, SonaraError::Numerical(reason) if reason.contains("frame 3")),
+            "{err}"
+        );
+    }
+
+    // The standalone model lane resamples inside the loader, so the file with
+    // a non-finite sample panics in the resampler: the batch still returns one
+    // entry per path and keeps the results of the other files.
+    #[cfg(feature = "aggression")]
+    #[test]
+    fn test_batch_survives_a_panic_inside_one_file() {
+        let dir = std::env::temp_dir();
+        let good = dir.join(format!("sonara-panic-good-{}.wav", std::process::id()));
+        let bad = dir.join(format!("sonara-panic-nan-{}.wav", std::process::id()));
+        write_float_wav(&good, None);
+        write_float_wav(&bad, Some(1000));
+        let paths: Vec<&Path> = vec![good.as_path(), bad.as_path(), good.as_path()];
+        let results = crate::aggression::analyze_batch(&paths, 22050);
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_file(&bad);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok() && results[2].is_ok());
+        assert!(results[1].is_err());
+    }
+
+    // The file route (decode at the file's rate, validate, resample) gives the
+    // same analysis as the loader's own resampling followed by the signal entry.
+    #[test]
+    fn test_file_route_matches_loader_resampling() {
+        let dir = std::env::temp_dir();
+        let at_44k = dir.join(format!("sonara-route-44k-{}.wav", std::process::id()));
+        let at_48k = dir.join(format!("sonara-route-48k-{}.wav", std::process::id()));
+        write_augment_wav(&at_44k);
+        write_float_wav(&at_48k, None);
+        for path in [&at_44k, &at_48k] {
+            for sr in [0, 22050] {
+                let (y, loaded_sr) = audio::load(path, sr, true, 0.0, 0.0).unwrap();
+                let from_signal = analyze_signal(y.view(), loaded_sr, &playlist()).unwrap();
+                let from_file = analyze_file(path, sr, &playlist()).unwrap();
+                assert!(from_file == from_signal, "{} sr={sr}", path.display());
+            }
+        }
+        let _ = std::fs::remove_file(&at_44k);
+        let _ = std::fs::remove_file(&at_48k);
+    }
+
+    #[test]
+    fn test_empty_signal_is_an_error_not_a_panic() {
+        let empty = Array1::<Float>::zeros(0);
+        assert!(matches!(
+            validated_zero_crossing_rate(empty.view()),
+            Err(SonaraError::InvalidAudio(_))
+        ));
     }
 
     #[cfg(feature = "aggression")]

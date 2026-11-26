@@ -531,10 +531,12 @@ pub fn analyze_file(path: &Path, sample_rate: u32) -> Result<AggressionAnalysis>
     // the model lane. Keep accepting the historical argument for API
     // compatibility; the bundled model's rate is the effective contract.
     let _ = sample_rate;
-    let (signal, actual_rate) =
-        crate::core::audio::load(path, AGGRESSION_SAMPLE_RATE, true, 0.0, 0.0)?;
-    debug_assert_eq!(actual_rate, AGGRESSION_SAMPLE_RATE);
-    analyze::analyze_canonical_aggression(signal.view())
+    analyze::catch_analysis_panic(|| {
+        let (signal, actual_rate) =
+            crate::core::audio::load(path, AGGRESSION_SAMPLE_RATE, true, 0.0, 0.0)?;
+        debug_assert_eq!(actual_rate, AGGRESSION_SAMPLE_RATE);
+        analyze::analyze_canonical_aggression(signal.view())
+    })
 }
 
 /// Analyze a mono signal with the current fused rank model.
@@ -548,14 +550,18 @@ pub fn analyze_signal(
             reason: "sample rate must be greater than zero".to_owned(),
         });
     }
-    let canonical = (sample_rate != AGGRESSION_SAMPLE_RATE)
-        .then(|| crate::core::audio::resample(signal, sample_rate, AGGRESSION_SAMPLE_RATE))
-        .transpose()?;
-    let signal = canonical
-        .as_ref()
-        .map(|audio| audio.view())
-        .unwrap_or(signal);
-    analyze::analyze_canonical_aggression(signal)
+    analyze::catch_analysis_panic(|| {
+        // The resampler panics on non-finite samples: reject them before it runs.
+        analyze::validated_zero_crossing_rate(signal)?;
+        let canonical = (sample_rate != AGGRESSION_SAMPLE_RATE)
+            .then(|| crate::core::audio::resample(signal, sample_rate, AGGRESSION_SAMPLE_RATE))
+            .transpose()?;
+        let signal = canonical
+            .as_ref()
+            .map(|audio| audio.view())
+            .unwrap_or(signal);
+        analyze::analyze_canonical_aggression(signal)
+    })
 }
 
 /// Analyze audio files in parallel while isolating failures per path.
@@ -589,6 +595,16 @@ mod tests {
             };
             0.28 * carrier + 0.08 * edge + 0.22 * pulse
         }))
+    }
+
+    #[test]
+    fn non_finite_signal_is_an_error_off_the_model_rate() {
+        let mut signal = aggression_fixture(48_000);
+        signal[1000] = Float::NAN;
+        assert!(matches!(
+            analyze_signal(signal.view(), 48_000),
+            Err(SonaraError::InvalidAudio(_))
+        ));
     }
 
     #[test]
