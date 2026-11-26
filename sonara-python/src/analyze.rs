@@ -1,4 +1,4 @@
-use crate::array::ArrayIn1;
+use crate::array::AudioIn1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
@@ -517,7 +517,10 @@ pub fn py_analyze_file<'py>(
         genre_model,
         vocalness_model,
     )?;
-    let result = rs::analyze_file(&path, sr, &config).into_pyresult()?;
+    // The analysis never touches Python: release the GIL while it runs.
+    let result = py
+        .detach(|| rs::analyze_file(&path, sr, &config))
+        .into_pyresult()?;
     result_to_dict(py, &result)
 }
 
@@ -526,7 +529,7 @@ pub fn py_analyze_file<'py>(
 #[allow(clippy::too_many_arguments)]
 pub fn py_analyze_signal<'py>(
     py: Python<'py>,
-    y: ArrayIn1<'py, f32>,
+    y: AudioIn1<'py>,
     sr: u32,
     mode: &str,
     features: Option<Vec<String>>,
@@ -543,7 +546,10 @@ pub fn py_analyze_signal<'py>(
         genre_model,
         vocalness_model,
     )?;
-    let result = rs::analyze_signal(y.as_array(), sr, &config).into_pyresult()?;
+    let signal = y.as_array();
+    let result = py
+        .detach(|| rs::analyze_signal(signal, sr, &config))
+        .into_pyresult()?;
     result_to_dict(py, &result)
 }
 
@@ -1328,7 +1334,8 @@ pub fn py_augment_analysis<'py>(
     )?;
     let names = features.unwrap_or_default();
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let result = rs::augment_analysis(&record, &name_refs, audio_path.as_deref(), &config)
+    let result = py
+        .detach(|| rs::augment_analysis(&record, &name_refs, audio_path.as_deref(), &config))
         .into_pyresult()?;
     result_to_dict(py, &result)
 }

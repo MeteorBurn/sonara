@@ -22,12 +22,32 @@ fn parse_profile(name: &str) -> PyResult<rs::SimilarityProfile> {
     })
 }
 
+/// Refuse vectors the metric cannot compare. The core scores different lengths
+/// on their shared prefix and counts a non-finite component as zero, which
+/// returns a plausible number for input that has no meaning.
+fn check_vectors(a: &[Float], b: &[Float]) -> PyResult<()> {
+    if a.len() != b.len() {
+        return Err(PyValueError::new_err(format!(
+            "embedding lengths differ ({} != {}); the vectors are not comparable",
+            a.len(),
+            b.len()
+        )));
+    }
+    if a.iter().chain(b).any(|v| !v.is_finite()) {
+        return Err(PyValueError::new_err(
+            "embedding contains a non-finite value (NaN or infinity)",
+        ));
+    }
+    Ok(())
+}
+
 /// Weighted cosine-free similarity between two embedding vectors, in `[0, 1]`
 /// (higher = more similar). `profile` selects the weight table ("default" or
 /// "timbre"); see `sonara::similarity` for the metric definition.
 #[pyfunction]
 #[pyo3(name = "similarity", signature = (a, b, *, profile = "default"))]
 pub fn py_similarity(a: Vec<Float>, b: Vec<Float>, profile: &str) -> PyResult<Float> {
+    check_vectors(&a, &b)?;
     Ok(rs::similarity_with_profile(&a, &b, parse_profile(profile)?))
 }
 
@@ -36,6 +56,7 @@ pub fn py_similarity(a: Vec<Float>, b: Vec<Float>, profile: &str) -> PyResult<Fl
 #[pyfunction]
 #[pyo3(name = "embedding_distance", signature = (a, b, *, profile = "default"))]
 pub fn py_embedding_distance(a: Vec<Float>, b: Vec<Float>, profile: &str) -> PyResult<Float> {
+    check_vectors(&a, &b)?;
     Ok(rs::distance_with_profile(&a, &b, parse_profile(profile)?))
 }
 

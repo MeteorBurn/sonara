@@ -16,7 +16,10 @@ pub fn py_load<'py>(
     offset: f32,
     duration: f32,
 ) -> PyResult<(Bound<'py, PyArray1<f32>>, u32)> {
-    let (y, sr_out) = rs::load(&path, sr, mono, offset, duration).into_pyresult()?;
+    // Decoding never touches Python: release the GIL while it runs.
+    let (y, sr_out) = py
+        .detach(|| rs::load(&path, sr, mono, offset, duration))
+        .into_pyresult()?;
     Ok((y.into_pyarray(py), sr_out))
 }
 

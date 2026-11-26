@@ -76,8 +76,8 @@
     {
       "path": "sonara/src/core/audio.rs",
       "base_sha256": "7b4b842e696069edf452ccf3dbcbab62137d32352eed9451f47ebfc0e80297b6",
-      "head_sha256": "e4aac3c14df81d694e1a0752ff2e66b8464b61962e63117c4a7f01f8569ef357",
-      "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19)"
+      "head_sha256": "666636a883949336dd3009f99c419efef5950246c798169636bc579340d6af02",
+      "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19); since 2026-11-26 load with mono=false on a multi-channel file is an error instead of the first channel alone, every analysis path loads with mono=true and the 60 tracks stay identical"
     },
     {
       "path": "sonara/src/native_dynamics.rs",
@@ -138,6 +138,18 @@
       "base_sha256": "095a8bc7d86a8f354f60e5a8ebafae1e802799f613b06f6e78bf95a492c8499e",
       "head_sha256": "fb5de659bee1c008a7c422c9bf82c26fe11eef4edf031c65fe385e8d474da5a1",
       "reason": "align_tempo_to_bpm_range becomes pub(crate) so AnalysisConfig::validate reuses its range check before any audio is read (2026-11-26): visibility only, no tempo arithmetic changes and no analysis value changes"
+    },
+    {
+      "path": "sonara-python/src/array.rs",
+      "base_sha256": "54029f13218432853717c99c327ad885e41537ee1cc0afa28ed3b08a40cdf5b8",
+      "head_sha256": "7843e3e64dcbe252f3796d05bb0f61e02746dcc2d7043b035b5f90295981b1f6",
+      "reason": "add AudioIn1, an audio argument that accepts floating-point samples only, for analyze_signal and analyze_aggression_signal (2026-11-26); ArrayIn is untouched and floating-point input converts exactly as before"
+    },
+    {
+      "path": "sonara-python/src/core/audio.rs",
+      "base_sha256": "16b71b92a031f0bf3e6f0a7708d167fd6e31bcf8e46d5f7f738c4c6fd7a86a4e",
+      "head_sha256": "c4cbfd9f0d62bd68cd350535fade033f275e64560ba0bee8f5efc78bfc1e1f79",
+      "reason": "load releases the GIL while decoding (2026-11-26); the same core call with the same arguments, no value changes"
     }
   ],
   "domains": {

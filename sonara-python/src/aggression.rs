@@ -1,6 +1,6 @@
 //! Python bindings for the bundled aggression model.
 
-use crate::array::ArrayIn1;
+use crate::array::AudioIn1;
 use std::path::PathBuf;
 
 use pyo3::prelude::*;
@@ -40,7 +40,9 @@ pub fn py_analyze_aggression_file<'py>(
     path: PathBuf,
     sr: u32,
 ) -> PyResult<Bound<'py, PyDict>> {
-    analysis_dict(py, rs::analyze_file(&path, sr).into_pyresult()?)
+    // The analysis never touches Python: release the GIL while it runs.
+    let analysis = py.detach(|| rs::analyze_file(&path, sr)).into_pyresult()?;
+    analysis_dict(py, analysis)
 }
 
 /// Analyze a mono signal and return its aggression rank record.
@@ -48,10 +50,14 @@ pub fn py_analyze_aggression_file<'py>(
 #[pyo3(name = "analyze_aggression_signal", signature = (y, *, sr=22050))]
 pub fn py_analyze_aggression_signal<'py>(
     py: Python<'py>,
-    y: ArrayIn1<'py, Float>,
+    y: AudioIn1<'py>,
     sr: u32,
 ) -> PyResult<Bound<'py, PyDict>> {
-    analysis_dict(py, rs::analyze_signal(y.as_array(), sr).into_pyresult()?)
+    let signal = y.as_array();
+    let analysis = py
+        .detach(|| rs::analyze_signal(signal, sr))
+        .into_pyresult()?;
+    analysis_dict(py, analysis)
 }
 
 /// Analyze audio files in parallel, preserving input order and isolating errors.

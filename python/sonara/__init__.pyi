@@ -11,7 +11,9 @@ AudioArray = NDArray[np.float32]
 SpectrogramArray = NDArray[np.float32]
 ComplexArray = NDArray[np.complex64]
 # Array arguments take any numeric array or sequence; sonara casts it to float32
-# (complex64), borrowing a float32 array without a copy.
+# (complex64), borrowing a float32 array without a copy. analyze_signal and
+# analyze_aggression_signal refuse integer samples with TypeError: audio is
+# floating point in [-1, 1].
 AudioInput = ArrayLike
 SpectrogramInput = ArrayLike
 ComplexInput = ArrayLike
@@ -22,6 +24,9 @@ PathArg = Union[str, "os.PathLike[str]"]
 # Core: Audio I/O
 # ============================================================
 
+# load and stream_with_resample: mono=False on a multi-channel file raises
+# ValueError (multi-channel output is not supported); a single-channel file
+# loads either way.
 def load(path: PathArg, *, sr: int = 22050, mono: bool = True, offset: float = 0.0, duration: float = 0.0) -> Tuple[AudioArray, int]: ...
 def to_mono(y: ArrayLike) -> AudioArray: ...
 def resample(y: AudioInput, *, orig_sr: int, target_sr: int) -> AudioArray: ...

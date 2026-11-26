@@ -70,7 +70,8 @@ pub struct TrackTags {
 ///
 /// - `path`: Path to audio file (WAV, FLAC, OGG, MP3, etc.)
 /// - `sr`: Target sample rate. 0 means use native.
-/// - `mono`: Convert to mono if true.
+/// - `mono`: Convert to mono if true. False is an error for a file with more
+///   than one channel: multi-channel output is not supported.
 /// - `offset`: Start reading after this many seconds.
 /// - `duration`: Only read this many seconds (0 = all).
 pub fn load(
@@ -100,6 +101,17 @@ pub fn load_with_tags(
     want_tags: bool,
 ) -> Result<(Array1<Float>, u32, Option<TrackTags>)> {
     let (samples, native_sr, n_channels, tags) = decode_interleaved(path, want_tags)?;
+    // Multi-channel output is not implemented: refuse it rather than return
+    // one channel as if it were the whole file.
+    if n_channels > 1 && !mono {
+        return Err(SonaraError::InvalidParameter {
+            param: "mono",
+            reason: format!(
+                "the file has {n_channels} channels and multi-channel output is not supported; \
+                 use mono=true"
+            ),
+        });
+    }
 
     let native_sr = native_sr;
 
@@ -135,12 +147,7 @@ pub fn load_with_tags(
                 channel_data[(ch, i)] = samples[(offset_samples + i) * n_channels + ch];
             }
         }
-        if mono {
-            to_mono(channel_data.view())
-        } else {
-            // Return first channel for now (multi-channel support in later phases)
-            channel_data.row(0).to_owned()
-        }
+        to_mono(channel_data.view())
     };
 
     // Resample if needed

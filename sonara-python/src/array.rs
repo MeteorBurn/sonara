@@ -62,3 +62,38 @@ where
         ))
     }
 }
+
+/// A mono audio argument: an [`ArrayIn1<f32>`] that accepts floating-point
+/// samples only. Cast to `f32` as they are, 16-bit PCM values would be read as
+/// samples up to ±32768 instead of ±1, about 90 dB too loud, with no error.
+pub struct AudioIn1<'py>(ArrayIn1<'py, f32>);
+
+impl<'py> Deref for AudioIn1<'py> {
+    type Target = PyReadonlyArray<'py, f32, Ix1>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for AudioIn1<'py> {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if ob.cast::<PyArray<f32, Ix1>>().is_err() {
+            let py = ob.py();
+            let dtype = get_array_module(py)?
+                .getattr(intern!(py, "asarray"))?
+                .call1((ob,))?
+                .getattr(intern!(py, "dtype"))?;
+            let kind: String = dtype.getattr(intern!(py, "kind"))?.extract()?;
+            if kind != "f" {
+                return Err(PyTypeError::new_err(format!(
+                    "audio must be floating-point samples in [-1, 1], got dtype {dtype}; \
+                     scale integer PCM first, e.g. y / 32768.0 for 16-bit"
+                )));
+            }
+        }
+        ArrayIn1::extract(ob).map(Self)
+    }
+}

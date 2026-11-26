@@ -77,6 +77,9 @@ def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None,
 def analyze_signal(y, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None):
     """Analyze a signal array and return a `TrackAnalysis` (dict subclass with `.print()`).
 
+    ``y`` is mono audio as floating-point samples in ``[-1, 1]``; integer
+    samples (such as 16-bit PCM) raise ``TypeError``.
+
     ``genre_model`` (path to a user-trained model JSON) adds ``genre`` and
     ``genre_confidence`` to the result. See ``sonara.genre``.
     """
@@ -203,7 +206,8 @@ def similarity(a, b, *, profile="default"):
     name → weight-table-version map. Unknown names raise ``ValueError``.
 
     Raises ``ValueError`` if two dict inputs carry different
-    ``embedding_version`` values (their vectors are not comparable).
+    ``embedding_version`` values (their vectors are not comparable), if the
+    two vectors differ in length, or if either holds a non-finite value.
     """
     va, ver_a = _as_embedding(a)
     vb, ver_b = _as_embedding(b)
