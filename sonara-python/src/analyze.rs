@@ -468,7 +468,6 @@ fn parse_config(
     let features = features.map(|f| f.into_iter().collect::<HashSet<_>>());
     // Load the bring-your-own genre model once per call (path → validated model),
     // mapping a load/validation failure to the standard SonaraError → PyErr path.
-    // The embedding_version match is enforced later, at analysis time.
     let genre_model = match genre_model {
         Some(path) => Some(std::sync::Arc::new(
             sonara::genre::load(&path).into_pyresult()?,
@@ -482,14 +481,18 @@ fn parse_config(
         )),
         None => None,
     };
-    Ok(rs::AnalysisConfig {
+    let config = rs::AnalysisConfig {
         mode,
         features,
         bpm_min,
         bpm_max,
         genre_model,
         vocalness_model,
-    })
+    };
+    // A bad setting applies to every input: raise once here, before a batch
+    // starts, instead of returning it as an error entry per file.
+    config.validate().into_pyresult()?;
+    Ok(config)
 }
 
 #[pyfunction]
@@ -594,8 +597,10 @@ fn batch_results_to_dicts<'py>(
 /// - failure → `{ "path", "error", "error_kind" }`.
 ///
 /// A single bad file therefore cannot abort analysis of a large library.
-/// `ValueError` is still raised only for whole-call configuration errors
-/// (e.g. an invalid `mode`), which apply to every path.
+/// `ValueError` is raised only for whole-call configuration errors, which
+/// apply to every path and are checked before any file is read: an invalid
+/// `mode`, an unknown feature name, an incomplete or invalid `bpm_min` /
+/// `bpm_max` range, or a model built for another embedding version.
 ///
 /// `progress`, if given, must be callable and is invoked as `progress(done,
 /// total)` after **each** file finishes (success or failure), where `done`

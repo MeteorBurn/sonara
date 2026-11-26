@@ -891,6 +891,10 @@ container/codec and underlying cause) and `error_kind` — a short stable catego
 `"io"`, `"decode"`, `"unsupported_format"`, `"invalid_audio"`, `"insufficient_data"`,
 or `"compute"`. (`analyze_file` on a single path still raises as before.)
 
+Settings that apply to the whole call are checked before any file is read and
+raise `ValueError`: an unknown `mode` or feature name, `bpm_min` without
+`bpm_max` (or an invalid range), and a model built for another embedding version.
+
 ### Augmenting a cached analysis
 
 `sonara.augment_analysis` recomputes named features onto a **copy** of a cached

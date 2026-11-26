@@ -132,6 +132,12 @@
       "base_sha256": "fa117e91244a5b95cadde6aa71be473b7cae848d8452f81197b23acc6e7f0694",
       "head_sha256": "e1d6e0853adedd2cc8a1ca6d6b13649152773def2abb389ac53405282c09f184",
       "reason": "metrogram locates each bin's subharmonic once per ratio instead of once per frame (2026-11-26): the same arithmetic in the same order, pinned by a unit test that requires exact equality with the per-frame formula; tempo code is untouched and no analysis value changes"
+    },
+    {
+      "path": "sonara/src/beat.rs",
+      "base_sha256": "095a8bc7d86a8f354f60e5a8ebafae1e802799f613b06f6e78bf95a492c8499e",
+      "head_sha256": "fb5de659bee1c008a7c422c9bf82c26fe11eef4edf031c65fe385e8d474da5a1",
+      "reason": "align_tempo_to_bpm_range becomes pub(crate) so AnalysisConfig::validate reuses its range check before any audio is read (2026-11-26): visibility only, no tempo arithmetic changes and no analysis value changes"
     }
   ],
   "domains": {

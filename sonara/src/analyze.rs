@@ -1285,6 +1285,39 @@ impl Default for AnalysisConfig {
 }
 
 impl AnalysisConfig {
+    /// Check the settings that apply to every input, without reading audio:
+    /// feature names, the tempo range and the embedding layout of supplied
+    /// models. Every analysis entry point runs it first; call it once before
+    /// [`analyze_batch`] to get one error instead of one per file.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_features()?;
+        // Only the range check is wanted here; the tempo is a placeholder.
+        crate::beat::align_tempo_to_bpm_range(120.0, self.bpm_min, self.bpm_max)?;
+        // Classifying on a mismatched embedding is silently wrong, so refuse
+        // rather than produce a bogus label.
+        if let Some(ref model) = self.genre_model {
+            if model.embedding_version != crate::similarity::SIMILARITY_VERSION {
+                return Err(SonaraError::ModelError(format!(
+                    "genre model embedding_version {} does not match this build's embedding version {}; \
+                     re-export the model against the current embedding",
+                    model.embedding_version,
+                    crate::similarity::SIMILARITY_VERSION
+                )));
+            }
+        }
+        if let Some(ref model) = self.vocalness_model {
+            if model.embedding_version() != crate::similarity::SIMILARITY_VERSION {
+                return Err(SonaraError::ModelError(format!(
+                    "vocalness model embedding_version {} does not match this build's embedding version {}; \
+                     re-export the model against the current embedding",
+                    model.embedding_version(),
+                    crate::similarity::SIMILARITY_VERSION
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_features(&self) -> Result<()> {
         let Some(features) = self.features.as_ref() else {
             return Ok(());
@@ -2264,7 +2297,7 @@ pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<Tra
 }
 
 fn analyze_file_unguarded(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
-    config.validate_features()?;
+    config.validate()?;
     // Tags are file-only metadata (see `TrackTags`): read them during load when
     // requested, then post-fill the result. When not requested, `load_with_tags`
     // does zero extra work — identical to the plain `load` fast path.
@@ -2428,7 +2461,7 @@ fn analyze_signal_unguarded(
     sr: u32,
     config: &AnalysisConfig,
 ) -> Result<TrackAnalysis> {
-    config.validate_features()?;
+    config.validate()?;
     if sr == 0 {
         return Err(SonaraError::InvalidParameter {
             param: "sr",
@@ -2598,29 +2631,6 @@ fn analyze_signal_inner(
 ) -> Result<TrackAnalysis> {
     #[cfg(feature = "aggression")]
     let wants_aggression = config.needs_aggression();
-    // Fail fast (before any heavy DSP) if a supplied genre model was trained
-    // against a different embedding layout — classifying on a mismatched
-    // embedding is silently wrong, so refuse rather than produce a bogus label.
-    if let Some(ref model) = config.genre_model {
-        if model.embedding_version != crate::similarity::SIMILARITY_VERSION {
-            return Err(SonaraError::ModelError(format!(
-                "genre model embedding_version {} does not match this build's embedding version {}; \
-                 re-export the model against the current embedding",
-                model.embedding_version,
-                crate::similarity::SIMILARITY_VERSION
-            )));
-        }
-    }
-    if let Some(ref model) = config.vocalness_model {
-        if model.embedding_version() != crate::similarity::SIMILARITY_VERSION {
-            return Err(SonaraError::ModelError(format!(
-                "vocalness model embedding_version {} does not match this build's embedding version {}; \
-                 re-export the model against the current embedding",
-                model.embedding_version(),
-                crate::similarity::SIMILARITY_VERSION
-            )));
-        }
-    }
 
     let sr_f = sr as Float;
     let n_fft = 2048;
@@ -5572,27 +5582,8 @@ pub fn augment_analysis(
         })
         .collect();
 
-    // Fail fast on model layout mismatches, exactly like the pipeline.
-    if let Some(ref model) = config.genre_model {
-        if model.embedding_version != crate::similarity::SIMILARITY_VERSION {
-            return Err(SonaraError::ModelError(format!(
-                "genre model embedding_version {} does not match this build's embedding version {}; \
-                 re-export the model against the current embedding",
-                model.embedding_version,
-                crate::similarity::SIMILARITY_VERSION
-            )));
-        }
-    }
-    if let Some(ref model) = config.vocalness_model {
-        if model.embedding_version() != crate::similarity::SIMILARITY_VERSION {
-            return Err(SonaraError::ModelError(format!(
-                "vocalness model embedding_version {} does not match this build's embedding version {}; \
-                 re-export the model against the current embedding",
-                model.embedding_version(),
-                crate::similarity::SIMILARITY_VERSION
-            )));
-        }
-    }
+    // Fail fast on a bad tempo range or model layout, exactly like the pipeline.
+    config.validate()?;
     if cached.provenance.schema_version != ANALYSIS_SCHEMA_VERSION {
         return Err(SonaraError::InvalidParameter {
             param: "cached",

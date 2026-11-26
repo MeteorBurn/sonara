@@ -1020,7 +1020,7 @@ const RANGE_EDGE_TOLERANCE: Float = 0.001;
 /// [`RANGE_EDGE_TOLERANCE`]. A tempo halved from above `bpm_max` can land in
 /// the small gap below `bpm_min` of a one-octave range; it stays there, inside
 /// `(bpm_max / 2, bpm_max]`, the window Rekordbox itself shows.
-fn align_tempo_to_bpm_range(
+pub(crate) fn align_tempo_to_bpm_range(
     mut tempo: Float,
     bpm_min: Option<Float>,
     bpm_max: Option<Float>,

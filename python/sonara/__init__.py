@@ -99,6 +99,11 @@ def analyze_batch(paths, *, sr=22050, mode="compact", features=None, bpm_min=Non
     ``error_kind`` (a short stable category such as ``"decode"``, ``"io"`` or
     ``"unsupported_format"``). Use ``result.failed`` to distinguish them.
 
+    Settings that apply to every file are checked before any file is read and
+    raise ``ValueError``: an unknown ``mode`` or feature name, ``bpm_min``
+    without ``bpm_max`` (or an invalid range), a model built for another
+    embedding version.
+
     ``progress``, if given, must be callable and is invoked as
     ``progress(done, total)`` after **each** file finishes (success or failure).
     ``done`` counts completions in *completion order* (not input order) and

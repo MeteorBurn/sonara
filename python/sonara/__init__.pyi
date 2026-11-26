@@ -263,6 +263,8 @@ def analyze_batch(paths: Sequence[PathArg], *, sr: int = 22050, mode: str = "com
 # exactly one entry in input order, and every entry carries its input `path`.
 # A failed file's entry has `path`, `error`, and `error_kind` (e.g. "decode",
 # "io", "unsupported_format") instead of feature fields.
+# A bad whole-call setting (mode, feature name, bpm range, model version) raises
+# ValueError before any file is read.
 # `progress`, if given, is called as progress(done, total) after each completed
 # file — `done` counts completions in COMPLETION order (not input order),
 # `total == len(paths)`. Callback exceptions are ignored (never abort the batch).
