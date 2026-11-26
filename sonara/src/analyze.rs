@@ -10,8 +10,10 @@
 //! - **Playlist**: everything needed for playlist generation — adds spectral
 //!   features, MFCCs, chroma, plus perceptual features (energy, danceability,
 //!   key, valence, acousticness). ~3ms per 10s track.
-//! - **Full**: same features as Playlist (currently identical, reserved for
-//!   future additions like per-frame arrays or segment-level analysis).
+//! - **Full**: every registered feature — Playlist plus `tempo_curve`,
+//!   `time_signature` and all opt-in families (see `FEATURE_REGISTRY`). The
+//!   file-only ones (`ebur128`, `native_dynamics`, `amplitude_envelope`,
+//!   `stereo_field`, `tags`) are measured by `analyze_file` / `analyze_batch`.
 //!
 //! ## Algorithms
 //!
@@ -1213,33 +1215,47 @@ pub struct AnalysisConfig {
     /// requested feature, such as the spectral summaries behind `energy`, are not.
     /// One exception: `valence` also returns the key it is derived from
     /// (`key`, `key_confidence`, `key_camelot`), and so does augmenting it.
-    /// Valid feature names (case-insensitive):
+    /// Valid feature names (case-insensitive; `FEATURE_REGISTRY` is the
+    /// authoritative list):
     ///
     /// **Core signal:**
     /// `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`
     ///
     /// **Spectral:**
-    /// `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`
+    /// `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`,
+    /// `spectral_shape`, `spectral_texture`, `mel_bands`
     ///
     /// **Tonal:**
-    /// `chords`, `dissonance`
+    /// `chords`, `dissonance`, `tuning`
     ///
     /// **Perceptual:**
     /// `energy`, `danceability`, `key`, `valence`, `acousticness`
     ///
+    /// **Rhythm levels (Playlist and Full):**
+    /// `rhythm_levels`
+    ///
     /// **Rhythm analysis (Full mode or explicit request):**
     /// `tempo_curve`, `time_signature`
     ///
-    /// **Opt-in (Full mode or explicit request — see `FEATURE_REGISTRY`):**
+    /// **Opt-in (Full mode or explicit request):**
     /// `beatgrid` (grid offset, downbeats, grid stability),
     /// `rhythmic_regularity` (how straight the pattern sits in the metric grid),
+    /// `onset_bands` (onset strength per frequency band),
+    /// `hpss` (percussive share of the energy),
     /// `structure` (energy curve, segments, intro/outro, energy level),
     /// `embedding` (similarity vector; auto-pulls the features it is built from),
     /// `aggression` (bundled model score; available with the `aggression` Cargo feature),
     /// `fingerprint` (duplicate-detection fingerprint),
     /// `loudness` (true peak, ReplayGain, loudness curve, momentary max, LRA),
     /// `silence` (leading/trailing silence offsets),
-    /// `key_candidates` (top-3 keys), `vocalness` (vocal-presence heuristic)
+    /// `key_candidates` (top-3 keys), `vocalness` and `instrumentalness`
+    /// (vocal presence and its inverse), `mood` (four mood affinities)
+    ///
+    /// **Opt-in, files only (`analyze_file` / `analyze_batch`):**
+    /// `ebur128` (EBU R128 loudness of the file's own channels),
+    /// `native_dynamics` (sample peak and crest factors),
+    /// `amplitude_envelope`, `stereo_field` (Side share and L/R correlation),
+    /// `tags` (file metadata)
     ///
     /// Note: `duration` is always included. Some features depend on others
     /// (e.g., `key` requires `chroma`, `valence` requires `key`); dependencies
@@ -1443,11 +1459,11 @@ impl AnalysisConfig {
         self.emits("rhythmic_regularity")
     }
 
-    /// True if the similarity embedding must be computed: either it was
-    /// explicitly requested (`features=["embedding"]`) or an embedding model is
-    /// set (genre/vocalness classify over the embedding). Only the
-    /// explicit-request case emits the `embedding`/`embedding_version` fields —
-    /// a model computes the vector without leaking it (mirrors how mood
+    /// True if the similarity embedding must be computed: either the feature
+    /// is wanted (`features=["embedding"]` or Full mode) or an embedding model
+    /// is set (genre/vocalness classify over the embedding). The
+    /// `embedding`/`embedding_version` fields are emitted only in the first
+    /// case — a model computes the vector without leaking it (mirrors how mood
     /// computes key silently).
     fn needs_embedding(&self) -> bool {
         self.wants("embedding") || self.has_internal_embedding_consumer()
@@ -2051,8 +2067,10 @@ pub struct TrackAnalysis {
     pub valence: Option<Float>,
     pub acousticness: Option<Float>,
 
-    // -- Embedding (future ML models) --
-    /// Learned audio embedding vector (future ONNX integration).
+    // -- Similarity embedding --
+    /// Hand-crafted similarity vector ([`crate::similarity::EMBEDDING_DIM`]
+    /// values in `[0, 1]`, not a learned embedding); see [`crate::similarity`].
+    /// Opt-in via `features=["embedding"]` or Full mode.
     pub embedding: Option<Vec<Float>>,
 
     /// Bundled perceptual rank in `[0, 1]`, opt-in via
@@ -2081,8 +2099,11 @@ pub struct TrackAnalysis {
     pub mood_relaxed: Option<Float>,
     pub mood_sad: Option<Float>,
     /// Inverse of the vocalness heuristic (`1 - vocalness`, clamped `[0, 1]`),
-    /// **heuristic v2 (not ML)**. Opt-in via `features=["instrumentalness"]`;
-    /// requires the extended pass (shares `vocalness`'s contrast/flatness inputs).
+    /// **heuristic v2 (not ML)**. Opt-in via `features=["instrumentalness"]` or
+    /// Full mode; requires the extended pass (shares `vocalness`'s
+    /// contrast/flatness inputs). With `AnalysisConfig::vocalness_model` set it
+    /// is `1 - P(vocal)` from that model instead, filled in every mode whether
+    /// requested or not.
     /// Semantics changed in 0.2.4 — see [`vocalness`](Self::vocalness).
     pub instrumentalness: Option<Float>,
     /// Predicted genre label — populated only when a user-supplied genre model
@@ -2172,7 +2193,8 @@ pub struct TrackAnalysis {
 
     // --- key candidates ---
     /// Top-3 ranked key candidates as `(key string, Camelot code, score)`.
-    /// Opt-in via `features=["key_candidates"]`. The first entry equals `key`.
+    /// Opt-in via `features=["key_candidates"]` or Full mode. The first entry
+    /// equals `key`.
     pub key_candidates: Option<Vec<(String, String, Float)>>,
 
     // --- vocalness ---
@@ -2183,28 +2205,32 @@ pub struct TrackAnalysis {
     /// mid, solo sax/flute/violin low). Semantics changed in 0.2.4 (was a mel-based
     /// tonal+syllabic heuristic that inverted on distorted vocals). Known ambiguous
     /// cases: sparse voice+piano ballads read mid-low; a voice-mimicking solo violin
-    /// reads borderline. Opt-in via `features=["vocalness"]`; requires the extended
-    /// pass (mid-band spectral contrast). `None` unless computed.
+    /// reads borderline. Opt-in via `features=["vocalness"]` or Full mode; requires
+    /// the extended pass (mid-band spectral contrast). `None` unless computed.
+    /// With `AnalysisConfig::vocalness_model` set, the value is that model's
+    /// calibrated P(vocal), filled in every mode whether requested or not; the
+    /// heuristic is not consulted.
     pub vocalness: Option<Float>,
     // --- fingerprint ---
     /// Acoustic fingerprint (raw sub-fingerprint sequence, ~8 `u32`/sec) for
-    /// duplicate detection. `Some` only when the `"fingerprint"` feature is
-    /// explicitly requested; `None` in every mode by default. See
+    /// duplicate detection. Opt-in: `Some` when the `"fingerprint"` feature is
+    /// requested or in Full mode; `None` otherwise, and for audio too short to
+    /// yield a fingerprint. See
     /// [`crate::fingerprint`]. Compare two with [`crate::fingerprint::match_score`].
     pub fingerprint: Option<Vec<u32>>,
     // --- similarity ---
     /// Version of the `embedding` layout + normalization (see
     /// `crate::similarity::SIMILARITY_VERSION`). `Some` iff `embedding` is `Some`.
-    /// Present only when the `"embedding"` feature is explicitly requested.
+    /// Present when the `"embedding"` feature is requested or in Full mode.
     pub embedding_version: Option<u32>,
     // --- tags ---
     /// Container/stream metadata tags (title, artist, album, genre, year,
     /// track number) read from the file. `Some` only when the `"tags"` feature
-    /// is requested via `analyze_file`/`analyze_batch`; always `None` for
-    /// `analyze_signal` (no container) and when not requested. WAV inputs yield
-    /// `Some(TrackTags::default())`-style empty fields at most, since the hound
-    /// fast path carries no tags. See [`TrackTags`]. Note: `TrackTags::genre`
-    /// (file metadata) is distinct from the `genre` placeholder field above.
+    /// is requested, or Full mode is used, via `analyze_file`/`analyze_batch`;
+    /// always `None` for `analyze_signal` (no container) and when not
+    /// requested. WAV inputs yield `None`: the WAV path reads no tags. See
+    /// [`TrackTags`]. Note: `TrackTags::genre` (file metadata) is distinct from
+    /// the `genre` field above, which a user-supplied genre model fills.
     pub tags: Option<TrackTags>,
 }
 
@@ -4408,7 +4434,7 @@ fn analyze_signal_inner(
         key_camelot,
         valence,
         acousticness,
-        // Embedding placeholder — future ONNX integration
+        // Filled below when the similarity embedding is wanted.
         embedding: None,
         #[cfg(feature = "aggression")]
         aggression_score: aggression_analysis
@@ -4502,7 +4528,7 @@ fn analyze_signal_inner(
             result.vocalness = Some(v);
             result.instrumentalness = Some((1.0 - v).clamp(0.0, 1.0));
         }
-        // Only surface the embedding fields when explicitly requested — a genre
+        // Surface the embedding fields only when the feature is wanted — a
         // model uses the vector internally without leaking it.
         if config.wants("embedding") {
             result.embedding = Some(emb);
@@ -6339,7 +6365,7 @@ mod tests {
         );
         assert!(result.energy.is_none());
         assert!(result.chroma_mean.is_none());
-        // The computed `genre` placeholder is distinct from the tag genre.
+        // The model-predicted `genre` field is distinct from the tag genre.
         assert!(result.genre.is_none());
     }
 

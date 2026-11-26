@@ -50,10 +50,11 @@ def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None,
     ``features`` selects features explicitly (overriding ``mode``). The opt-in
     features are computed by ``mode="full"`` or by naming them in ``features``;
     ``compact`` and ``playlist`` leave them out: ``beatgrid``, ``onset_bands``,
-    ``rhythmic_regularity``, ``hpss``, ``stereo_field``,
-    ``structure``, ``embedding``, ``aggression``,
-    ``fingerprint``, ``loudness``, ``silence``, ``key_candidates``,
-    ``vocalness``. See the README for the full list.
+    ``rhythmic_regularity``, ``hpss``, ``structure``, ``embedding``,
+    ``aggression``, ``fingerprint``, ``loudness``, ``silence``,
+    ``key_candidates``, ``vocalness``, ``instrumentalness``, ``mood``, and the
+    file-only ``ebur128``, ``native_dynamics``, ``amplitude_envelope``,
+    ``stereo_field``, ``tags``. See the README for what each one returns.
 
     ``genre_model`` is a path to a user-trained genre model (JSON). When given,
     the result carries ``genre`` and ``genre_confidence``. See ``sonara.genre``

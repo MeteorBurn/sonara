@@ -15,8 +15,9 @@
 //!   with the tempo this anchors the metric grid.
 //! - **downbeats**: the subset of beats that begin a bar. Assuming a meter of
 //!   `beats_per_bar` (4 by default), there are `beats_per_bar` possible phase
-//!   alignments; the one whose beats carry the most onset/accent energy is
-//!   chosen.
+//!   alignments. The analysis pipeline picks one by the kick, from the low
+//!   and low-mid onset envelopes ([`detect_downbeats_low_mid`]);
+//!   [`detect_downbeats`] picks the one with the most broadband accent energy.
 //! - **grid stability**: a 0..1 score describing how close the inter-beat
 //!   intervals are to a single constant value (a rigid grid).
 
@@ -279,8 +280,8 @@ pub fn analyze_grid_low_mid(
 ///
 /// `beats` are frame indices (as returned by beat tracking), `onset_env` is the
 /// onset-strength envelope in the same frame space, and `beats_per_bar` is the
-/// meter numerator (pass 4 for 4/4). This is a standalone entry point; the
-/// analysis pipeline calls it after beat tracking.
+/// meter numerator (pass 4 for 4/4). This is a standalone entry point with
+/// broadband downbeats; the analysis pipeline calls [`analyze_grid_low_mid`].
 pub fn analyze_grid(
     beats: &[usize],
     onset_env: ArrayView1<Float>,

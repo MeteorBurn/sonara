@@ -6,11 +6,11 @@
 //! Tier 0 (standardized): LUFS integrated loudness (ITU-R BS.1770-4)
 //! Tier 1 (signal-grounded): energy, danceability, key detection
 //! Tier 2 (heuristic approximations): valence, acousticness, mood_*, instrumentalness
-//! Tier 3 (requires ML, future): genre
+//! Tier 3 (needs a model): genre
 //!
 //! `mood_*` and `instrumentalness` ship as **heuristic v1** (rough hints in the
-//! same spirit as valence/acousticness), not ML classifiers. `genre` remains a
-//! future-ML placeholder.
+//! same spirit as valence/acousticness), not ML classifiers. `genre` is filled
+//! only by a user-supplied genre model (see `crate::genre`); none is bundled.
 
 use ndarray::ArrayView1;
 

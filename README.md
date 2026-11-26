@@ -230,10 +230,10 @@ r['downbeats']         # Frame indices of bar-starting beats (subset of beats)
 r['grid_stability']    # 0.0-1.0: how rigidly beats fit a constant grid
 ```
 
-The three keys appear **only** when `beatgrid` is computed (an explicit request or `full` mode); they are absent otherwise. It reuses the beats and onset envelope already computed by the pipeline, so it is O(number of beats):
+The three keys appear **only** when `beatgrid` is computed (an explicit request or `full` mode); they are absent otherwise. It reuses the beats and onset envelopes already computed by the pipeline, so it is O(number of beats):
 
 - **`grid_offset_sec`** — the time of the first tracked beat.
-- **`downbeats`** — assuming 4 beats per bar, each of the possible bar phases is scored by onset-accent energy at the candidate downbeats; the highest-scoring phase wins. Kicks and other bar-anchoring accents typically land on beat one.
+- **`downbeats`** — assuming 4 beats per bar, the bar phase is chosen by the kick. Two onset envelopes are read at the beats: below 200 Hz (kick) and 200–800 Hz (snare body). Of the two phase pairs that lie two beats apart, the pair with the larger low-minus-mid accent wins; within it, the phase with the stronger low accent starts the bar. A loud snare on beats two and four is therefore not taken for beat one.
 - **`grid_stability`** — `clamp(1 - MAD / median, 0, 1)`, where the inter-beat intervals have median `median` and median absolute deviation `MAD`. A perfectly regular grid scores `1.0`; jitter lowers the score monotonically. Useful both as a confidence measure and, in future, for tempo-octave disambiguation via grid regularity.
 
 You can combine it with other features, e.g. `features=["bpm", "beatgrid"]`. The bar is always 4 beats long, so material in 3/4 or another meter also gets a 4-beat grid; `rhythmic_regularity` is measured against the same 4-beat bar.
@@ -853,8 +853,8 @@ original release year, so prefer `original_year` for era reasoning when present.
 `track_no` is the leading integer of a `"3/12"`-style value. Tags come from **symphonia**-decoded containers
 (FLAC/Vorbis, MP3/AAC ID3v2, MP4, …); **WAV** goes through a separate fast path
 that carries no tags, so `.wav` inputs yield no `tags` values. Note that
-`tags['genre']` is the *file's* metadata genre and is unrelated to the reserved
-top-level `genre` placeholder (a future computed field).
+`tags['genre']` is the *file's* metadata genre and is unrelated to the
+top-level `genre`, which a genre model you supply predicts.
 
 ### Batch analysis
 
@@ -1065,7 +1065,7 @@ first (e.g. by rounded `duration_sec`) and only fingerprint-match within a bucke
 
 ## Similarity & embeddings
 
-sonara can produce a fixed-length **similarity vector** (a hand-crafted, 48-dimension embedding) for nearest-neighbor search over a music library — no ML dependency. It is assembled from features the pipeline already computes (MFCC timbre, chroma harmony, spectral shape, rhythm, dynamics, and tonal descriptors), each with **fixed, documented normalization** so vectors are comparable across tracks, machines, and library runs.
+sonara can produce a fixed-length **similarity vector** (a hand-crafted, 48-dimension embedding) for nearest-neighbor search over a music library — no ML dependency. It is assembled from features the pipeline already computes (MFCC timbre, chroma harmony, spectral shape, rhythm, dynamics, and tonal descriptors), each with **fixed, documented normalization** so vectors are comparable across tracks, machines, and library runs, provided the tracks were analysed at the same sample rate and with the same `bpm_min` / `bpm_max` range.
 
 The vector is **opt-in** — the `compact` and `playlist` modes do not produce it; `full` mode does. Request it explicitly with `features=["embedding"]` (this also pulls in the playlist-level features it is built from):
 

@@ -650,7 +650,7 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #                 # release year (ID3 TDOR/TORY/TXXX:originalyear, Vorbis
 #                 # ORIGINALDATE) — prefer it for era reasoning on reissues.
 #                 # NOTE: tags["genre"] is the file's metadata genre, distinct
-#                 # from the reserved top-level "genre" placeholder.
+#                 # from the top-level "genre" a supplied genre model predicts.
 # ============================================================
 # Duplicate detection (acoustic fingerprint) — fingerprint
 # ============================================================

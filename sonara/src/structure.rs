@@ -8,10 +8,9 @@
 //! computed (per-frame RMS, spectral centroid, spectral bandwidth, and the mel
 //! dB spectrogram). No second decode or FFT pass is required.
 //!
-//! This module is **opt-in**: it is only run when the caller explicitly
-//! requests `features=["structure"]`. It is never computed by the compact,
-//! playlist, or full modes on their own, so it adds zero cost to the default
-//! pipelines.
+//! This module is **opt-in**: it runs when the caller requests
+//! `features=["structure"]` or uses the full mode. The compact and playlist
+//! modes never compute it, so it adds zero cost to the default pipelines.
 //!
 //! ## Energy curve
 //!

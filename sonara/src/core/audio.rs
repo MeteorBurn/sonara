@@ -22,7 +22,7 @@ use crate::types::{AudioBuffer, Float};
 /// from an audio file.
 ///
 /// Populated only by `analyze_file`/`analyze_batch` when the `"tags"` feature is
-/// requested (`features=["tags"]`); always `None` otherwise and for
+/// requested (`features=["tags"]` or Full mode); always `None` otherwise and for
 /// `analyze_signal` (a bare signal has no container to read). Each field is
 /// `Some` only when the file actually carries that tag.
 ///
@@ -32,8 +32,8 @@ use crate::types::{AudioBuffer, Float};
 /// Neither WAV path exposes tags, so a `.wav` input always yields `None` here.
 ///
 /// Note: `genre` here is the *file's* metadata genre string (e.g. "Electronic"),
-/// which is distinct from `TrackAnalysis::genre` — the latter is a reserved
-/// placeholder for a future computed/ML genre and is unrelated to this tag.
+/// which is distinct from `TrackAnalysis::genre` — the latter is the label a
+/// user-supplied genre model predicts and is unrelated to this tag.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrackTags {
     /// Track title (`TrackTitle`).

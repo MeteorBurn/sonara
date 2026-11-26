@@ -12,7 +12,10 @@
 //!   with *constant* bounds/scales chosen from typical music ranges — never with
 //!   per-track or per-batch adaptive statistics. Two vectors computed on
 //!   different days, on different machines, in different library runs are
-//!   directly comparable.
+//!   directly comparable, provided both tracks were analysed at the same
+//!   sample rate and with the same tempo range (`bpm_min` / `bpm_max`): the
+//!   spectral inputs depend on the rate, and the tempo dimension is built
+//!   from the range-folded `bpm`.
 //! - **Bounded & finite.** Every dimension is squashed into `[0, 1]` (via a
 //!   clamped linear map or a `tanh` sigmoid). Even for degenerate inputs
 //!   (silence, white noise, pure sine, NaN-producing edge cases) the vector is
@@ -286,11 +289,14 @@ fn tanh01(x: Float, center: Float, scale: Float) -> Float {
     0.5 + 0.5 * z.tanh()
 }
 
-/// Fold a BPM into the `[60, 180)` octave, then log-normalize to `[0, 1)`.
+/// Fold a BPM into `[60, 180)` by octaves, then log-normalize to `[0, 1)`.
 ///
-/// Tempo is octave-ambiguous (a 75 BPM detection and its 150 BPM double describe
-/// the same groove), so we fold onto a single octave before comparing. Within
-/// the octave we use a *log* scale (perceived tempo distance is multiplicative):
+/// The window spans a factor of 3, more than one octave, so the fold only
+/// moves tempos that lie outside it: 50 BPM becomes 100, 200 becomes 100. Two
+/// octave-related tempos that both lie inside the window stay apart (75 and
+/// 150 BPM map to about 0.20 and 0.83), and the value jumps at the upper edge
+/// (179 BPM maps to about 0.99, 180 to about 0.37). Within the window the
+/// scale is logarithmic (perceived tempo distance is multiplicative):
 /// `log2(bpm / 60) / log2(180 / 60)`.
 fn fold_bpm(bpm: Float) -> Float {
     if !bpm.is_finite() || bpm <= 0.0 {
@@ -426,7 +432,7 @@ pub fn embed(a: &TrackAnalysis) -> Vec<Float> {
     v.push(lin01(a.spectral_flatness_mean.unwrap_or(0.0), 0.0, 0.25));
 
     // ---- Rhythm (dims 35..39) ----
-    // Tempo: octave-folded log scale (see fold_bpm).
+    // Tempo: folded into [60, 180) on a log scale (see fold_bpm).
     v.push(fold_bpm(a.bpm));
     // Onset density: 0..12 onsets/sec covers most music.
     v.push(lin01(a.onset_density, 0.0, 12.0));

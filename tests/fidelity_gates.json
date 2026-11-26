@@ -76,7 +76,7 @@
     {
       "path": "sonara/src/core/audio.rs",
       "base_sha256": "7b4b842e696069edf452ccf3dbcbab62137d32352eed9451f47ebfc0e80297b6",
-      "head_sha256": "52fd2013bf95ac84549a87f043ac5a72b0f733e8594803da329d2ec67c16d950",
+      "head_sha256": "d44274bb3282bbf21187f238aced0e90ce6629006ced42e65c5ff7dff4c0fe4e",
       "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19); since 2026-11-26 load with mono=false on a multi-channel file is an error instead of the first channel alone, every analysis path loads with mono=true and the 60 tracks stay identical; the same day the mono loader downmixes inside the decoded buffer with the same channel-order sum and the WAV reader reserves its buffer once: no value changes, 60 tracks identical"
     },
     {
@@ -154,8 +154,20 @@
     {
       "path": "sonara/src/structure.rs",
       "base_sha256": "8ed12ab716a5cd2008d1964fe4e6ffabbfe3445435e2994009f693a14324546a",
-      "head_sha256": "6c04ea4e56c73bf9ee9feda14f1292a1af6f1ed039cf3c76b94223369d1a4acd",
-      "reason": "the checkerboard kernel computes each self-similarity value it reads from the normalised descriptors instead of reading a full n-by-n matrix (2026-11-26): the same dot products in the same order, structure fields identical on 60 real tracks and on 30- and 60-minute signals"
+      "head_sha256": "f63a409b5a9d2501dbb47c92a19dc63f29502e127aa64be7a65e9c5d14d25eed",
+      "reason": "the checkerboard kernel computes each self-similarity value it reads from the normalised descriptors instead of reading a full n-by-n matrix (2026-11-26): the same dot products in the same order, structure fields identical on 60 real tracks and on 30- and 60-minute signals; the module comment now says that full mode computes the structure (comment only)"
+    },
+    {
+      "path": "sonara/src/beatgrid.rs",
+      "base_sha256": "b27d3057ad3db6a4e2bda01c4021bd8895aea931d0aa2a37acc83cda68fbe723",
+      "head_sha256": "3c035cd724fb0556dd63f707dcb139bdc1c3acc41f59e083b01db13092e90fcb",
+      "reason": "the module comment and the analyze_grid doc comment name the downbeat routine the pipeline calls, detect_downbeats_low_mid (2026-11-26): comments only, no code changes"
+    },
+    {
+      "path": "sonara/src/perceptual.rs",
+      "base_sha256": "9f3ebdd59daf147129e0eb2773735ee0c8e6119bfa81212970edf8b42baed359",
+      "head_sha256": "6dff2797f44646eb5a1ee6a3f0aec2e2298c17061c5ebcf896c4a1d850194d91",
+      "reason": "the module comment says that genre is filled by a user-supplied model instead of calling it a future placeholder (2026-11-26): comment only, no code changes"
     },
     {
       "path": "sonara/src/loudness_ext.rs",

@@ -276,7 +276,7 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         d.set_item("acousticness", v)?;
     }
 
-    // Embedding (future)
+    // Similarity embedding
     if let Some(ref v) = r.embedding {
         d.set_item("embedding", v.clone())?;
     }
@@ -293,7 +293,7 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
         d.set_item("aggression_rhythm", r.aggression_rhythm)?;
     }
 
-    // Tier 3 placeholders (only included when not None)
+    // Mood and instrumentalness (only included when not None)
     if let Some(v) = r.mood_happy {
         d.set_item("mood_happy", v)?;
     }
