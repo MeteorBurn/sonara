@@ -138,8 +138,10 @@ r['dissonance']            # Sensory dissonance (0 = consonant, 1 = rough)
 # Spectral features
 r['spectral_bandwidth_mean']   # Frequency spread
 r['spectral_rolloff_mean']     # Frequency below which 85% of energy sits
-r['spectral_flatness_mean']    # Tonal (0) vs noise-like (1)
-r['spectral_contrast_mean']    # Peak-valley ratio per band (7 values)
+r['spectral_flatness_mean']    # Tonal (0) vs noise-like (1); like the contrast,
+r['spectral_contrast_mean']    # peak-valley ratio per band (7 values), a mean
+                               # over sounding frames: within 60 dB of the
+                               # loudest frame, so silence and fades stay out
 r['mfcc_mean']                 # Timbre fingerprint (13 coefficients)
 r['chroma_mean']               # Pitch class distribution (12 values)
 r['spectral_skewness_mean']    # Spectral shape (fork): skewness, also
@@ -933,7 +935,10 @@ record.
 `ANALYSIS_SCHEMA_VERSION` is `8`, so `augment_analysis` rejects a record
 written with schema 7 or earlier (`schema version mismatch`). A schema-7
 record's stored chords, `loudness_lufs`, `replaygain_db` and the two
-`embedding` dimensions built from them differ from a fresh run; a schema-6 record (0.3.6 or the
+`embedding` dimensions built from them differ from a fresh run, and on a track
+with silence or a fade so do `spectral_flatness_*`, `spectral_contrast_*`,
+`acousticness`, the built-in `vocalness` and the `embedding` dimensions built
+from the two spectral fields; a schema-6 record (0.3.6 or the
 `v0.3.7-meteorburn.1` wheel) also differs in `bpm`, `beats` and `downbeats`.
 Re-analyse such tracks, adding `onset_bands` and `rhythmic_regularity` to the
 request if you want them.

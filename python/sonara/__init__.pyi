@@ -443,7 +443,10 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 
 # --- frame statistics ---
 # Spread, frame-to-frame change and quantiles of the per-frame values behind the
-# `_mean` fields, over the same frames (all main-pass frames, silence included).
+# `_mean` fields, over the same frames as that `_mean`: all main-pass frames,
+# silence included, except flatness and contrast, whose mean and statistics
+# cover only the sounding frames (RMS above zero and within 60 dB of the
+# track's loudest frame; 0.0 when no frame counts).
 # Each key is present exactly when its base feature is:
 #   rms      → rms_std, rms_delta_mean, rms_iqr, rms_p10, rms_p90          (float)
 #   zcr      → zero_crossing_rate_std                                      (float)

@@ -1587,8 +1587,11 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// `time_signature` differs. `loudness_lufs` no longer reads long signals as
 /// quieter (the mean square is summed in f64): stored values are low by a few
 /// hundredths of a dB on a track and by about a dB on an hour-long mix, and
-/// `replaygain_db` and dimension 39 of `embedding` follow. Same meaning and
-/// units.
+/// `replaygain_db` and dimension 39 of `embedding` follow. `spectral_flatness_*`
+/// and `spectral_contrast_*` cover only the sounding frames, so on a track
+/// with silence, a fade or a quiet tail they differ, and with them
+/// `acousticness`, the heuristic `vocalness`/`instrumentalness` and dimensions
+/// 25-30 and 34 of `embedding`. Same meaning and units.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
@@ -1870,15 +1873,20 @@ pub struct TrackAnalysis {
     // -- Extended (extended or full) --
     pub spectral_bandwidth_mean: Option<Float>,
     pub spectral_rolloff_mean: Option<Float>,
+    /// Mean over the sounding frames only: a frame counts when its RMS is
+    /// above zero and within 60 dB of the track's loudest frame. 0.0 when no
+    /// frame counts.
     pub spectral_flatness_mean: Option<Float>,
+    /// 7 values, over the same sounding frames as `spectral_flatness_mean`.
     pub spectral_contrast_mean: Option<Vec<Float>>,
     pub mfcc_mean: Option<Vec<Float>>,
     pub chroma_mean: Option<Vec<Float>>,
 
     // --- frame statistics ---
     // Spread, frame-to-frame change and quantiles of the per-frame values behind
-    // the `_mean` fields, over the same frames (all main-pass frames, silence
-    // included). Each is computed with its base feature: `Some` exactly when
+    // the `_mean` fields, over the same frames as that `_mean` (all main-pass
+    // frames, silence included; for flatness and contrast the sounding frames
+    // only). Each is computed with its base feature: `Some` exactly when
     // that feature is (`rms`, `centroid`, `zcr` in every mode; the rest with
     // their playlist/full feature). `_std` is the population standard
     // deviation; `_delta_mean` the mean absolute difference between consecutive
@@ -1918,9 +1926,9 @@ pub struct TrackAnalysis {
     // --- spectral shape ---
     // Track means of per-frame spectral-shape descriptors (MIR_FEATURES group
     // 3.1), computed with `spectral_shape` (playlist/full, or
-    // `features=["spectral_shape"]`). Unlike the `_mean` fields above, each is
-    // the mean over only the frames where that descriptor is defined: silent
-    // frames (and, for the moments, zero-bandwidth frames) are skipped; with
+    // `features=["spectral_shape"]`). Each is the mean over only the frames
+    // where that descriptor is defined: all-zero frames (and, for the moments,
+    // zero-bandwidth frames) are skipped, by a rule of their own; with
     // no defined frame the value is 0.0. Frames are the main pass's
     // (|X_k| magnitudes, f_k = k·sr/n_fft over every bin, DC included).
     /// Dimensionless. Magnitude-weighted third standardized moment about the
@@ -2862,7 +2870,7 @@ fn analyze_signal_inner(
     } else {
         Array2::zeros((0, 0))
     };
-    // Per-frame contrast, kept for `spectral_contrast_std` (the mean uses `contrast_acc`).
+    // Per-frame contrast, for `spectral_contrast_mean` and `spectral_contrast_std`.
     let mut contrast_frames = if extended {
         Array2::<Float>::zeros((N_CONTRAST_BANDS + 1, n_frames))
     } else {
@@ -3298,12 +3306,10 @@ fn analyze_signal_inner(
 
     // Scatter frame results into arrays, in frame order. Accumulators run
     // across chunks so every sum adds in the same order as one pass.
-    let mut contrast_acc = [0.0_f32; N_CONTRAST_BANDS + 1];
     let mut dissonance_acc = 0.0_f32;
     let mut scatter_results = |base: usize,
                                frame_results: Vec<FrameResult>,
                                fluxes: Vec<Option<f64>>| {
-        let c_acc = &mut contrast_acc;
         let d_acc = &mut dissonance_acc;
 
         for (i, fr) in frame_results.into_iter().enumerate() {
@@ -3318,7 +3324,6 @@ fn analyze_signal_inner(
                     chroma_raw[(c, t)] = fr.chroma_col[c];
                 }
                 for b in 0..N_CONTRAST_BANDS + 1 {
-                    c_acc[b] += fr.contrast_bands[b];
                     contrast_frames[(b, t)] = fr.contrast_bands[b];
                 }
                 for c in 0..12 {
@@ -3618,16 +3623,35 @@ fn analyze_signal_inner(
         None
     };
 
+    // Frames that count for the flatness and contrast statistics: RMS above
+    // zero and within 60 dB of the loudest frame (the non-silent rule of
+    // `effects::split`, librosa's default `top_db`). Flatness and contrast are
+    // undefined on silence (the floors make them 1.0 and 0.0 there) and read
+    // the noise floor on near-silence.
+    let sounding: Vec<usize> = if extended {
+        let floor = rms_frames.iter().copied().fold(0.0_f32, Float::max) * 1e-3;
+        (0..n_frames)
+            .filter(|&t| rms_frames[t] > 0.0 && rms_frames[t] >= floor)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // ================================================================
     // SPECTRAL CONTRAST: aggregated from fused frame loop
     // ================================================================
 
     let spectral_contrast_mean = if extended && n_frames > 0 {
-        let mut contrast_avg = contrast_acc.to_vec();
-        for v in contrast_avg.iter_mut() {
-            *v /= n_frames as Float;
-        }
-        Some(contrast_avg)
+        Some(
+            contrast_frames
+                .rows()
+                .into_iter()
+                .map(|row| {
+                    sounding.iter().fold(0.0_f32, |sum, &t| sum + row[t])
+                        / sounding.len().max(1) as Float
+                })
+                .collect::<Vec<Float>>(),
+        )
     } else {
         None
     };
@@ -3692,8 +3716,13 @@ fn analyze_signal_inner(
         None
     };
 
+    let flatness_sounding: Vec<Float> = sounding.iter().map(|&t| flatnesses[t]).collect();
     let spectral_flatness_mean = if extended {
-        Some(flatnesses.iter().sum::<Float>() / flatnesses.len().max(1) as Float)
+        Some(if flatness_sounding.is_empty() {
+            0.0
+        } else {
+            flatness_sounding.iter().sum::<Float>() / flatness_sounding.len() as Float
+        })
     } else {
         None
     };
@@ -3790,7 +3819,7 @@ fn analyze_signal_inner(
     let spectral_rolloff_p10 = extended.then(|| sorted_quantile(&rolloff_sorted, 0.10));
     let spectral_rolloff_p90 = extended.then(|| sorted_quantile(&rolloff_sorted, 0.90));
 
-    let flatness_slice = flatnesses.as_slice().unwrap();
+    let flatness_slice = flatness_sounding.as_slice();
     let flatness_sorted = sorted_series(flatness_slice);
     let spectral_flatness_std = extended.then(|| series_std(flatness_slice));
     let spectral_flatness_iqr = extended.then(|| sorted_iqr(&flatness_sorted));
@@ -3802,7 +3831,7 @@ fn analyze_signal_inner(
         contrast_frames
             .rows()
             .into_iter()
-            .map(|row| series_std(row.as_slice().unwrap()))
+            .map(|row| series_std(&sounding.iter().map(|&t| row[t]).collect::<Vec<Float>>()))
             .collect::<Vec<Float>>()
     });
     let mfcc_std = mfcc_mean.as_ref().map(|_| {
@@ -4159,7 +4188,13 @@ fn analyze_signal_inner(
             hop_length,
         );
         let mfcc = mfcc_mean.as_deref().unwrap_or(&[]);
-        let contrast = spectral_contrast_mean.as_deref().unwrap_or(&[]);
+        // The model input is the contrast mean over every frame, as
+        // `aggression_dsp` computes it, not `spectral_contrast_mean`.
+        let contrast: Vec<Float> = contrast_frames
+            .rows()
+            .into_iter()
+            .map(|row| row.iter().fold(0.0_f32, |sum, &v| sum + v) / n_frames as Float)
+            .collect();
         // With a range, read the tempo and beats a range-free call reports, as the
         // canonical lane does; without one they are the pipeline's own.
         let (aggression_bpm, aggression_beats, aggression_danceability) =

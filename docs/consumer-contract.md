@@ -112,7 +112,19 @@ from a fresh run:
   length of the signal; a stored schema-7 value is too low, the more so the
   longer the signal: about 0.05 dB at 5 minutes and 0.9 dB at one hour on a
   steady test signal.
-- `embedding`, dimensions 39 (loudness) and 42 (the chord change rate) only,
+- `spectral_flatness_mean`, `spectral_flatness_{std,iqr,p10,p90}`,
+  `spectral_contrast_mean` and `spectral_contrast_std`, on a track with
+  silence, a fade or a quiet tail. They cover the sounding frames only: a
+  frame counts when its RMS is above zero and within 60 dB of the track's
+  loudest frame (the non-silent rule of `effects.split`, librosa's default
+  `top_db`); each is 0.0 when no frame counts. A stored schema-7 value counts
+  every frame, where a silent frame enters as flatness 1.0 and contrast 0.
+  `acousticness` and the built-in `vocalness` / `instrumentalness` are
+  computed from the two means and differ with them. The aggression model
+  keeps its own contrast input over every frame, so `aggression_score` is
+  unchanged.
+- `embedding`, dimensions 25-30 (contrast), 34 (flatness), 39 (loudness) and
+  42 (the chord change rate) only,
   and what a supplied genre or vocalness model derives from the embedding.
   `SIMILARITY_VERSION` stays 2: the layout and the meaning of every dimension
   are unchanged.
@@ -211,8 +223,8 @@ Spectral shape (2026-11-17, MeteorBurn fork, no schema bump: additive keys,
 existing values unchanged). The `spectral_shape` group (playlist/full, or
 `features=["spectral_shape"]`) adds `spectral_skewness_mean`,
 `spectral_kurtosis_excess_mean`, `spectral_slope_db_per_octave_mean` (dB/octave)
-and `spectral_decrease_mean`. Unlike the other `_mean` fields, each averages only
-the frames where it is defined (silent frames skipped; 0.0 when none is). The four
+and `spectral_decrease_mean`. Each averages only
+the frames where it is defined (all-zero frames skipped; 0.0 when none is). The four
 keys travel with `spectral_shape`: present exactly when it is, refilled by
 `augment_analysis` with it. They need the audio (class `C`) and are not embedding
 evidence.
