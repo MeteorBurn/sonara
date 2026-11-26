@@ -209,25 +209,68 @@ fn block_loudness(mean_sq: Float) -> Float {
     }
 }
 
-/// f64 prefix sum of squares for numerically stable window energy over long signals.
-fn prefix_sq(kw: &[Float]) -> Vec<f64> {
-    let mut p = vec![0.0f64; kw.len() + 1];
-    for (i, &v) in kw.iter().enumerate() {
-        let v = v as f64;
-        p[i + 1] = p[i] + v * v;
+/// f64 prefix sum of squares for numerically stable window energy over long
+/// signals, kept only where the block measurements read it: at every multiple
+/// of `step` samples and at the end of the signal. The running sum itself is
+/// accumulated sample by sample, so each kept value is the full prefix sum.
+struct PrefixSq {
+    step: usize,
+    n: usize,
+    sums: Vec<f64>,
+    total: f64,
+}
+
+impl PrefixSq {
+    /// `step` is the greatest common divisor of the window and hop lengths the
+    /// caller will read with, so every block edge falls on a kept value.
+    fn new(kw: &[Float], lengths: &[usize]) -> Self {
+        let step = lengths
+            .iter()
+            .fold(0, |mut a, &b| {
+                let mut b = b;
+                while b != 0 {
+                    (a, b) = (b, a % b);
+                }
+                a
+            })
+            .max(1);
+        let mut sums = Vec::with_capacity(kw.len() / step + 1);
+        let mut acc = 0.0f64;
+        for chunk in kw.chunks(step) {
+            sums.push(acc);
+            for &v in chunk {
+                let v = v as f64;
+                acc += v * v;
+            }
+        }
+        Self {
+            step,
+            n: kw.len(),
+            sums,
+            total: acc,
+        }
     }
-    p
+
+    /// Sum of squares of the first `i` samples; `i` is a block edge.
+    fn at(&self, i: usize) -> f64 {
+        if i == self.n {
+            self.total
+        } else {
+            assert!(i % self.step == 0, "block edge off the prefix grid");
+            self.sums[i / self.step]
+        }
+    }
 }
 
 /// Short-term curve from a precomputed prefix-of-squares (win/hop in samples).
-fn curve_from_prefix(prefix: &[f64], n: usize, win: usize, hop: usize) -> Vec<Float> {
+fn curve_from_prefix(prefix: &PrefixSq, n: usize, win: usize, hop: usize) -> Vec<Float> {
     if win == 0 || n < win {
         return Vec::new();
     }
     let mut out = Vec::new();
     let mut start = 0;
     while start + win <= n {
-        let mean_sq = ((prefix[start + win] - prefix[start]) / win as f64) as Float;
+        let mean_sq = ((prefix.at(start + win) - prefix.at(start)) / win as f64) as Float;
         out.push(block_loudness(mean_sq));
         start += hop;
     }
@@ -235,7 +278,7 @@ fn curve_from_prefix(prefix: &[f64], n: usize, win: usize, hop: usize) -> Vec<Fl
 }
 
 /// Max momentary loudness from a precomputed prefix-of-squares (win/hop in samples).
-fn momentary_from_prefix(prefix: &[f64], n: usize, win: usize, hop: usize) -> Float {
+fn momentary_from_prefix(prefix: &PrefixSq, n: usize, win: usize, hop: usize) -> Float {
     if n == 0 {
         return ABS_GATE_LUFS;
     }
@@ -245,7 +288,7 @@ fn momentary_from_prefix(prefix: &[f64], n: usize, win: usize, hop: usize) -> Fl
     let mut start = 0;
     loop {
         let end = (start + win).min(n);
-        let mean_sq = ((prefix[end] - prefix[start]) / (end - start) as f64) as Float;
+        let mean_sq = ((prefix.at(end) - prefix.at(start)) / (end - start) as f64) as Float;
         let l = block_loudness(mean_sq);
         if l > max_l {
             max_l = l;
@@ -293,7 +336,7 @@ pub fn loudness_metrics(
         };
     }
     let kw = perceptual::k_weighted_signal(y, sr);
-    let prefix = prefix_sq(&kw);
+    let prefix = PrefixSq::new(&kw, &[st_win, hop, mom_win, mom_hop]);
 
     let curve = curve_from_prefix(&prefix, n, st_win, hop);
     let momentary_max_db = momentary_from_prefix(&prefix, n, mom_win, mom_hop);
@@ -333,7 +376,7 @@ pub fn loudness_curve(
         return Vec::new();
     }
     let kw = perceptual::k_weighted_signal(y, sr);
-    let prefix = prefix_sq(&kw);
+    let prefix = PrefixSq::new(&kw, &[win, hop]);
     curve_from_prefix(&prefix, n, win, hop)
 }
 
@@ -350,7 +393,7 @@ pub fn loudness_momentary_max_db(y: ArrayView1<Float>, sr: u32) -> Float {
     let win = ((0.4 * sr as Float).round() as usize).max(1);
     let hop = ((0.1 * sr as Float).round() as usize).max(1);
     let kw = perceptual::k_weighted_signal(y, sr);
-    let prefix = prefix_sq(&kw);
+    let prefix = PrefixSq::new(&kw, &[win, hop]);
     momentary_from_prefix(&prefix, n, win, hop)
 }
 

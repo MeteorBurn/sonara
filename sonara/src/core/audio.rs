@@ -100,7 +100,7 @@ pub fn load_with_tags(
     duration: Float,
     want_tags: bool,
 ) -> Result<(Array1<Float>, u32, Option<TrackTags>)> {
-    let (samples, native_sr, n_channels, tags) = decode_interleaved(path, want_tags)?;
+    let (mut samples, native_sr, n_channels, tags) = decode_interleaved(path, want_tags)?;
     // Multi-channel output is not implemented: refuse it rather than return
     // one channel as if it were the whole file.
     if n_channels > 1 && !mono {
@@ -136,19 +136,24 @@ pub fn load_with_tags(
         });
     }
 
-    // Deinterleave if multi-channel
-    let mut audio = if n_channels == 1 {
-        Array1::from_vec(samples[offset_samples..end_sample].to_vec())
-    } else {
-        let n_samples = end_sample - offset_samples;
-        let mut channel_data = Array2::<Float>::zeros((n_channels, n_samples));
+    // Keep the requested frames and downmix them inside the decoded buffer, so
+    // no second copy of the file lives next to it. The channel sum starts from
+    // zero and runs in channel order, which is what `to_mono` computes.
+    samples.truncate(end_sample * n_channels);
+    samples.drain(..offset_samples * n_channels);
+    if n_channels > 1 {
+        let n_samples = samples.len() / n_channels;
         for i in 0..n_samples {
-            for ch in 0..n_channels {
-                channel_data[(ch, i)] = samples[(offset_samples + i) * n_channels + ch];
-            }
+            let sum = samples[i * n_channels..(i + 1) * n_channels]
+                .iter()
+                .fold(0.0, |acc: Float, &v| acc + v);
+            samples[i] = sum / n_channels as Float;
         }
-        to_mono(channel_data.view())
-    };
+        samples.truncate(n_samples);
+    }
+    // The array keeps the buffer's whole capacity: give back what is unused.
+    samples.shrink_to_fit();
+    let mut audio = Array1::from_vec(samples);
 
     // Resample if needed
     let target_sr = if sr == 0 { native_sr } else { sr };
@@ -214,22 +219,27 @@ fn load_wav(path: &Path) -> Result<(Vec<Float>, u32, usize)> {
     let sr = spec.sample_rate;
     let n_channels = spec.channels as usize;
 
-    let samples: Vec<Float> = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .map(|s| s.map(|v| v as Float))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| SonaraError::Decode(e.to_string()))?,
+    // Reserve the buffer once: grown by doubling, the old and the new block are
+    // alive together. The header's count is capped by what the file can hold.
+    let on_disk = std::fs::metadata(path).map_or(0, |m| m.len())
+        / u64::from(spec.bits_per_sample.div_ceil(8).max(1));
+    let mut samples: Vec<Float> =
+        Vec::with_capacity(u64::from(reader.len()).min(on_disk) as usize);
+    let decode_error = |e: hound::Error| SonaraError::Decode(e.to_string());
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for s in reader.into_samples::<f32>() {
+                samples.push(s.map_err(decode_error)? as Float);
+            }
+        }
         hound::SampleFormat::Int => {
             let bits = spec.bits_per_sample;
             let scale = 1.0 / (1u64 << (bits - 1)) as Float;
-            reader
-                .into_samples::<i32>()
-                .map(|s| s.map(|v| v as Float * scale))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| SonaraError::Decode(e.to_string()))?
+            for s in reader.into_samples::<i32>() {
+                samples.push(s.map_err(decode_error)? as Float * scale);
+            }
         }
-    };
+    }
 
     Ok((samples, sr, n_channels))
 }

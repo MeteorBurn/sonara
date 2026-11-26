@@ -2376,21 +2376,13 @@ fn analyze_native_mono(
         validated_zero_crossing_rate(native.view())?;
     }
     let caller_sr = if sr == 0 { native_sr } else { sr };
+    // At the model's own rate one lane serves both: the plain path below, which
+    // also frees the native copy once it is resampled.
     #[cfg(feature = "aggression")]
-    if config.needs_aggression() {
+    if config.needs_aggression() && caller_sr != crate::aggression::AGGRESSION_SAMPLE_RATE {
         // Decode once at the source rate, then derive the caller and model
         // lanes independently. This prevents a lossy caller-rate roundtrip,
         // preserves generic field semantics, and avoids a second file decode.
-        if caller_sr == crate::aggression::AGGRESSION_SAMPLE_RATE {
-            let canonical = (native_sr != caller_sr)
-                .then(|| audio::resample(native.view(), native_sr, caller_sr))
-                .transpose()?;
-            let canonical_view = canonical
-                .as_ref()
-                .map(|audio| audio.view())
-                .unwrap_or_else(|| native.view());
-            return analyze_signal(canonical_view, caller_sr, config);
-        }
         let caller = (caller_sr != native_sr)
             .then(|| audio::resample(native.view(), native_sr, caller_sr))
             .transpose()?;
@@ -3388,6 +3380,8 @@ fn analyze_signal_inner(
     // ================================================================
 
     let s_db = spectrum::power_to_db(mel_spec.view(), 1.0, 1e-10, Some(MEL_TOP_DB));
+    // Everything below reads the dB copy: free the power one.
+    drop(mel_spec);
 
     // Mel bands (group 4.1): per-band mean / std of the dB matrix over all
     // frames, plus the lowest value a cell can take: the `power_to_db` clamp

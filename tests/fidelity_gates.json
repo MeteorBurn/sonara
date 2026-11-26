@@ -76,8 +76,8 @@
     {
       "path": "sonara/src/core/audio.rs",
       "base_sha256": "7b4b842e696069edf452ccf3dbcbab62137d32352eed9451f47ebfc0e80297b6",
-      "head_sha256": "666636a883949336dd3009f99c419efef5950246c798169636bc579340d6af02",
-      "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19); since 2026-11-26 load with mono=false on a multi-channel file is an error instead of the first channel alone, every analysis path loads with mono=true and the 60 tracks stay identical"
+      "head_sha256": "52fd2013bf95ac84549a87f043ac5a72b0f733e8594803da329d2ec67c16d950",
+      "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19); since 2026-11-26 load with mono=false on a multi-channel file is an error instead of the first channel alone, every analysis path loads with mono=true and the 60 tracks stay identical; the same day the mono loader downmixes inside the decoded buffer with the same channel-order sum and the WAV reader reserves its buffer once: no value changes, 60 tracks identical"
     },
     {
       "path": "sonara/src/native_dynamics.rs",
@@ -150,6 +150,18 @@
       "base_sha256": "16b71b92a031f0bf3e6f0a7708d167fd6e31bcf8e46d5f7f738c4c6fd7a86a4e",
       "head_sha256": "c4cbfd9f0d62bd68cd350535fade033f275e64560ba0bee8f5efc78bfc1e1f79",
       "reason": "load releases the GIL while decoding (2026-11-26); the same core call with the same arguments, no value changes"
+    },
+    {
+      "path": "sonara/src/structure.rs",
+      "base_sha256": "8ed12ab716a5cd2008d1964fe4e6ffabbfe3445435e2994009f693a14324546a",
+      "head_sha256": "6c04ea4e56c73bf9ee9feda14f1292a1af6f1ed039cf3c76b94223369d1a4acd",
+      "reason": "the checkerboard kernel computes each self-similarity value it reads from the normalised descriptors instead of reading a full n-by-n matrix (2026-11-26): the same dot products in the same order, structure fields identical on 60 real tracks and on 30- and 60-minute signals"
+    },
+    {
+      "path": "sonara/src/loudness_ext.rs",
+      "base_sha256": "c798d52f1aeae9102244048f7ea5880d0b98380680136ca71f242a285ce9c27d",
+      "head_sha256": "1402a6e0740a13439534b869afc9c3a7bd810fcb895b812f7c938abe3b865d28",
+      "reason": "the f64 prefix sum of squares is kept only at block edges (2026-11-26): the running sum is accumulated sample by sample as before, so every value read is unchanged; loudness fields identical on 60 real tracks and on 30- and 60-minute signals"
     }
   ],
   "domains": {

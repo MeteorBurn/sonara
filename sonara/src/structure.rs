@@ -244,8 +244,7 @@ pub fn analyze_structure(
     let min_gap = ((MIN_SEGMENT_SEC / HOP_SEC).round() as usize).max(1);
 
     let boundaries: Vec<Float> = if n_win >= 4 * kernel_half && has_variation(&descriptors) {
-        let ssm = build_ssm(&descriptors);
-        let novelty = checkerboard_novelty(&ssm, kernel_half);
+        let novelty = checkerboard_novelty(&normalised_descriptors(&descriptors), kernel_half);
         pick_boundaries(&novelty, &win_start_sec, min_gap)
     } else {
         Vec::new()
@@ -347,12 +346,13 @@ fn has_variation(descriptors: &[[Float; N_MFCC]]) -> bool {
     max_dev > 1e-2 * scale.max(1e-6) && max_dev > 1e-3
 }
 
-/// Build the cosine self-similarity matrix from per-window descriptors.
+/// Prepare the per-window descriptors for the cosine self-similarity matrix.
 ///
 /// Descriptors are mean-centred per dimension (removes the constant timbral
 /// offset so the SSM reflects *relative* change) then L2-normalised per window,
-/// so `S[i,j]` is a cosine similarity in roughly [-1, 1].
-fn build_ssm(descriptors: &[[Float; N_MFCC]]) -> Vec<Vec<Float>> {
+/// so `S[i,j]`, the dot product of rows `i` and `j`, is a cosine similarity in
+/// roughly [-1, 1].
+fn normalised_descriptors(descriptors: &[[Float; N_MFCC]]) -> Vec<[Float; N_MFCC]> {
     let n = descriptors.len();
     let mean = descriptor_mean(descriptors);
     // Centre + L2 normalise.
@@ -372,23 +372,16 @@ fn build_ssm(descriptors: &[[Float; N_MFCC]]) -> Vec<Vec<Float>> {
         }
         norm.push(v);
     }
-    let mut ssm = vec![vec![0.0_f32; n]; n];
-    for i in 0..n {
-        for j in i..n {
-            let mut dot = 0.0;
-            for k in 0..N_MFCC {
-                dot += norm[i][k] * norm[j][k];
-            }
-            ssm[i][j] = dot;
-            ssm[j][i] = dot;
-        }
-    }
-    ssm
+    norm
 }
 
 /// Slide a Gaussian-tapered checkerboard kernel down the SSM diagonal.
-fn checkerboard_novelty(ssm: &[Vec<Float>], l: usize) -> Vec<Float> {
-    let n = ssm.len();
+///
+/// The kernel reads the matrix only within `2 * l` windows of the diagonal, so
+/// each `S[i,j]` it needs is computed on the spot from the normalised
+/// descriptors: the full matrix, quadratic in the track length, is never built.
+fn checkerboard_novelty(norm: &[[Float; N_MFCC]], l: usize) -> Vec<Float> {
+    let n = norm.len();
     let size = 2 * l;
     let sigma = l as Float / 2.0;
     let two_sig2 = 2.0 * sigma * sigma;
@@ -413,11 +406,15 @@ fn checkerboard_novelty(ssm: &[Vec<Float>], l: usize) -> Vec<Float> {
         }
         let mut acc = 0.0;
         for a in 0..size {
-            let ii = i + a - l;
-            let row = &ssm[ii];
+            let row = &norm[i + a - l];
             let krow = &kernel[a * size..a * size + size];
             for b in 0..size {
-                acc += krow[b] * row[i + b - l];
+                let other = &norm[i + b - l];
+                let mut dot = 0.0;
+                for k in 0..N_MFCC {
+                    dot += row[k] * other[k];
+                }
+                acc += krow[b] * dot;
             }
         }
         novelty[i] = acc;
