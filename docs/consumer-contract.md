@@ -1,7 +1,7 @@
 # Consumer contract — sonara's core Rust API
 
 **Owner:** sonara. This is the single durable copy.
-**Status:** current, `ANALYSIS_SCHEMA_VERSION = 7` since 2026-10-02; last verified
+**Status:** current, `ANALYSIS_SCHEMA_VERSION = 8` since 2026-11-26; last verified
 against sonara 0.3.7 (MeteorBurn fork, `dev`) / schema 7 on 2026-10-03.
 **Consumer of record:** sonagram (since 2026-07-18). Originally raised by
 kglite on 2026-07-15.
@@ -56,7 +56,7 @@ The original asks and what shipped. Kept for lineage; do not re-raise them.
 |---|---|
 | **Self-describing time.** `beats` / `onset_frames` / downbeats were frame indices; effective sample rate and `hop_length` were internal to `analyze.rs`. | `TrackAnalysis.provenance: AnalysisProvenance` (always present) carries effective post-resample `sample_rate` and `hop_length`, plus `frame_to_sec` / `beats_sec` / `onsets_sec` / `downbeats_sec` helpers. |
 | **Typed event records with spans.** `chord_sequence: Option<Vec<String>>` had no temporal alignment; segments were tuples. | `chord_events: Option<Vec<ChordEvent>>` (`{ label, start_sec, end_sec }`, merged runs, contiguous, covering the track); `segments` is a named `SegmentEvent { start_sec, end_sec, energy }`. |
-| **Persistable provenance** to detect stale analysis. | `AnalysisProvenance { schema_version, sample_rate, hop_length, mode, requested_features (sorted), vocalness_model_id, … }`, pinned to `ANALYSIS_SCHEMA_VERSION` (now 7), bumped whenever field meaning or units change. |
+| **Persistable provenance** to detect stale analysis. | `AnalysisProvenance { schema_version, sample_rate, hop_length, mode, requested_features (sorted), vocalness_model_id, … }`, pinned to `ANALYSIS_SCHEMA_VERSION` (now 8), bumped whenever field meaning or units change. |
 
 ## Standing boundaries — what sonara undertakes to hold
 
@@ -98,6 +98,23 @@ Downstreams pin a compatible pre-1.0 sonara release and key stored records on
 `provenance.schema_version` (plus the per-subsystem `embedding_version` /
 fingerprint version where those are consumed). sonagram's current floor is
 `sonara >= 0.2.2`. Heuristic-semantics changes bump `ANALYSIS_SCHEMA_VERSION`.
+
+### Schema 8: chords and the bar length of the beat grid (2026-11-26)
+
+Every field keeps its meaning and units; these stored schema-7 values differ
+from a fresh run:
+
+- `chord_sequence`, `chord_events`, `chord_change_rate`, `predominant_chord`.
+  The pitch-class profile behind the chords weights a spectral peak by its
+  distance to the nearest of the 12 notes, the same way for all of them: a
+  peak up to half a semitone below C counts toward C.
+- `embedding`, dimension 42 only (the chord change rate), and what a supplied
+  genre or vocalness model derives from the embedding. `SIMILARITY_VERSION`
+  stays 2: the layout and the meaning of every dimension are unchanged.
+- `downbeats` and `rhythmic_regularity*`, in a record whose request also
+  computed `time_signature`. Both always use a 4-beat bar.
+
+`augment_analysis` rejects a schema-7 record with `schema version mismatch`.
 
 ### Schema 7: beats and BPM from the beat grid (2026-10-02)
 
@@ -542,8 +559,9 @@ this section records the standing policy.
 
 ### Backfilling onset bands and regularity in 0.3.7
 
-Under schema 7 (fork release `v0.3.7-bpm-precision-20261005` and later)
-`augment_analysis` rejects a schema-6 record with `schema version mismatch`:
+`augment_analysis` rejects a record of an earlier schema (schema 7 of fork
+release `v0.3.7-bpm-precision-20261005`, schema 6 before it) with
+`schema version mismatch`:
 re-analyse such tracks, requesting these groups along with the rest. The
 backfill below applies to records of the current schema.
 

@@ -929,14 +929,16 @@ record.
 
 ### Adding the 0.3.7 rhythm features to an existing library
 
-**Records written with schema 6 need a fresh analysis.** This release's
-`ANALYSIS_SCHEMA_VERSION` is `7` (precise tempo and beats), so `augment_analysis`
-rejects a record written by 0.3.6 or by the earlier `v0.3.7-meteorburn.1` wheel
-(`schema version mismatch`), and that record's stored `bpm`, `beats` and
-`downbeats` differ from a fresh run. Re-analyse such tracks, adding
-`onset_bands` and `rhythmic_regularity` to the request if you want them.
+**Records written with an earlier schema need a fresh analysis.**
+`ANALYSIS_SCHEMA_VERSION` is `8`, so `augment_analysis` rejects a record
+written with schema 7 or earlier (`schema version mismatch`). A schema-7
+record's stored chords and the `embedding` dimension built from their change
+rate differ from a fresh run; a schema-6 record (0.3.6 or the
+`v0.3.7-meteorburn.1` wheel) also differs in `bpm`, `beats` and `downbeats`.
+Re-analyse such tracks, adding `onset_bands` and `rhythmic_regularity` to the
+request if you want them.
 
-**A schema-7 record keeps its analysis.** To get `onset_bands` and
+**A schema-8 record keeps its analysis.** To get `onset_bands` and
 `rhythmic_regularity`, Sonara must read each original audio file again, but you
 can request only those features and keep the previously stored BPM, key,
 embeddings and other results.

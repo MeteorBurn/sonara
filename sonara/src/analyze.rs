@@ -1578,7 +1578,14 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// its own tempo, whatever the caller's range. Same meaning and
 /// units; stored `bpm`, `bpm_raw` and `beats`, and what derives from them,
 /// differ.
-pub const ANALYSIS_SCHEMA_VERSION: u32 = 7;
+///
+/// v8 (2026-11-26): the chord HPCP weights a peak just below C like a peak
+/// just below any other note, so stored `chord_sequence`, `chord_events`,
+/// `chord_change_rate` and `predominant_chord` differ, and with the change
+/// rate dimension 42 of `embedding`. `downbeats` and `rhythmic_regularity*`
+/// always use a 4-beat bar, so a record computed together with
+/// `time_signature` differs. Same meaning and units.
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
 /// fields on [`TrackAnalysis`] (`beats`, `onset_frames`, `downbeats`) convert
@@ -6764,7 +6771,7 @@ mod tests {
     #[test]
     fn test_analysis_schema_version_pinned() {
         // Bump deliberately (with a changelog note), never accidentally.
-        assert_eq!(ANALYSIS_SCHEMA_VERSION, 7);
+        assert_eq!(ANALYSIS_SCHEMA_VERSION, 8);
     }
 
     #[test]
