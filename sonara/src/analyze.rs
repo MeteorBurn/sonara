@@ -1584,7 +1584,11 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// `chord_change_rate` and `predominant_chord` differ, and with the change
 /// rate dimension 42 of `embedding`. `downbeats` and `rhythmic_regularity*`
 /// always use a 4-beat bar, so a record computed together with
-/// `time_signature` differs. Same meaning and units.
+/// `time_signature` differs. `loudness_lufs` no longer reads long signals as
+/// quieter (the mean square is summed in f64): stored values are low by a few
+/// hundredths of a dB on a track and by about a dB on an hour-long mix, and
+/// `replaygain_db` and dimension 39 of `embedding` follow. Same meaning and
+/// units.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index

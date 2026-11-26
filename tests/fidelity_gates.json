@@ -172,8 +172,8 @@
     {
       "path": "sonara/src/perceptual.rs",
       "base_sha256": "9f3ebdd59daf147129e0eb2773735ee0c8e6119bfa81212970edf8b42baed359",
-      "head_sha256": "6dff2797f44646eb5a1ee6a3f0aec2e2298c17061c5ebcf896c4a1d850194d91",
-      "reason": "the module comment says that genre is filled by a user-supplied model instead of calling it a future placeholder (2026-11-26): comment only, no code changes"
+      "head_sha256": "d37f7e319b4ae984a39a35820906d437d2785525f26492e2409f5c159a34566c",
+      "reason": "two changes (2026-11-26). The module comment says that genre is filled by a user-supplied model instead of calling it a future placeholder. loudness_lufs accumulates the K-weighted sum of squares in f64 instead of f32, whose running sum stopped growing on long signals; filter coefficients and the formula are untouched. Evidence: a periodic sine and a multi-tone signal of 10 s, 5, 30, 60 and 120 min read -23.0685 and -22.5434 LUFS at every length (before: down to -28.51 and -24.37 at 120 min) and match an independent f64 scipy computation within 0.0001 dB; a real track repeated to 66 min reads the same as once (before: 0.76 dB lower). On 60 real tracks loudness_lufs rises by 0.02..0.11 dB, replaygain_db and embedding dimension 39 follow, and every other field is identical; mood and aggression fields are identical"
     },
     {
       "path": "sonara/src/loudness_ext.rs",

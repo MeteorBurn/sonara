@@ -108,9 +108,14 @@ from a fresh run:
   The pitch-class profile behind the chords weights a spectral peak by its
   distance to the nearest of the 12 notes, the same way for all of them: a
   peak up to half a semitone below C counts toward C.
-- `embedding`, dimension 42 only (the chord change rate), and what a supplied
-  genre or vocalness model derives from the embedding. `SIMILARITY_VERSION`
-  stays 2: the layout and the meaning of every dimension are unchanged.
+- `loudness_lufs` and `replaygain_db`. The loudness does not depend on the
+  length of the signal; a stored schema-7 value is too low, the more so the
+  longer the signal: about 0.05 dB at 5 minutes and 0.9 dB at one hour on a
+  steady test signal.
+- `embedding`, dimensions 39 (loudness) and 42 (the chord change rate) only,
+  and what a supplied genre or vocalness model derives from the embedding.
+  `SIMILARITY_VERSION` stays 2: the layout and the meaning of every dimension
+  are unchanged.
 - `downbeats` and `rhythmic_regularity*`, in a record whose request also
   computed `time_signature`. Both always use a 4-beat bar.
 

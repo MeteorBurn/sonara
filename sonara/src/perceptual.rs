@@ -106,7 +106,9 @@ pub fn loudness_lufs(y: ArrayView1<Float>, sr: u32) -> Float {
     let mut s1_z2: Float = 0.0;
     let mut s2_z1: Float = 0.0;
     let mut s2_z2: Float = 0.0;
-    let mut sum_sq: Float = 0.0;
+    // f64: an f32 running sum stops growing once it dwarfs a single term,
+    // which reads long signals as quieter than they are.
+    let mut sum_sq: f64 = 0.0;
 
     for i in 0..n {
         // Stage 1: high shelf
@@ -120,10 +122,10 @@ pub fn loudness_lufs(y: ArrayView1<Float>, sr: u32) -> Float {
         s2_z1 = c.s2_b[1] * y1 - c.s2_a[0] * y2 + s2_z2;
         s2_z2 = c.s2_b[2] * y1 - c.s2_a[1] * y2;
 
-        sum_sq += y2 * y2;
+        sum_sq += f64::from(y2) * f64::from(y2);
     }
 
-    let mean_sq = sum_sq / n as Float;
+    let mean_sq = (sum_sq / n as f64) as Float;
 
     if mean_sq < 1e-20 {
         -70.0 // EBU R128 absolute gate

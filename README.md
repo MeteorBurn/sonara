@@ -932,8 +932,8 @@ record.
 **Records written with an earlier schema need a fresh analysis.**
 `ANALYSIS_SCHEMA_VERSION` is `8`, so `augment_analysis` rejects a record
 written with schema 7 or earlier (`schema version mismatch`). A schema-7
-record's stored chords and the `embedding` dimension built from their change
-rate differ from a fresh run; a schema-6 record (0.3.6 or the
+record's stored chords, `loudness_lufs`, `replaygain_db` and the two
+`embedding` dimensions built from them differ from a fresh run; a schema-6 record (0.3.6 or the
 `v0.3.7-meteorburn.1` wheel) also differs in `bpm`, `beats` and `downbeats`.
 Re-analyse such tracks, adding `onset_bands` and `rhythmic_regularity` to the
 request if you want them.
