@@ -1364,8 +1364,7 @@ impl AnalysisConfig {
             // Mode-based defaults
             match self.mode {
                 AnalysisMode::Compact => false,
-                // Expensive rhythm analysis features are Full-only
-                // (metrogram is O(n³) and costs ~445ms for a 3-min track).
+                // `tempo_curve` and `time_signature` are Full-only.
                 AnalysisMode::Playlist => !spec.full_only,
                 AnalysisMode::Full => true,
             }

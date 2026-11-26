@@ -279,15 +279,16 @@ pub fn metrogram(
     let mut meter_scores = Array2::<Float>::zeros((n_ratios, n_frames));
 
     for (ri, &ratio) in ratios.iter().enumerate() {
-        for t in 0..n_frames {
-            let mut score = 0.0;
-            for b in 1..n_bins {
+        // Where each bin's subharmonic sits depends on the ratio and the bin,
+        // not on the frame: locate it once per ratio. `frac` is `None` when the
+        // subharmonic falls on or past the last bin and is read without
+        // interpolation.
+        let taps: Vec<(usize, usize, usize, Option<Float>)> = (1..n_bins)
+            .filter_map(|b| {
                 let target_freq = freqs[b] * ratio;
                 if target_freq <= 0.0 {
-                    continue;
+                    return None;
                 }
-
-                // Linear interpolation in the frequency axis
                 let mut lo = 0;
                 for k in 0..n_bins {
                     if freqs[k] <= target_freq {
@@ -295,13 +296,20 @@ pub fn metrogram(
                     }
                 }
                 let hi = (lo + 1).min(n_bins - 1);
+                let frac = (hi > lo && freqs[hi] > freqs[lo]).then(|| {
+                    ((target_freq - freqs[lo]) / (freqs[hi] - freqs[lo])).clamp(0.0, 1.0)
+                });
+                Some((b, lo, hi, frac))
+            })
+            .collect();
 
-                let interp_val = if hi > lo && freqs[hi] > freqs[lo] {
-                    let frac =
-                        ((target_freq - freqs[lo]) / (freqs[hi] - freqs[lo])).clamp(0.0, 1.0);
-                    (1.0 - frac) * ft_mag[(lo, t)] + frac * ft_mag[(hi, t)]
-                } else {
-                    ft_mag[(lo, t)]
+        for t in 0..n_frames {
+            let mut score = 0.0;
+            for &(b, lo, hi, frac) in &taps {
+                // Linear interpolation in the frequency axis
+                let interp_val = match frac {
+                    Some(frac) => (1.0 - frac) * ft_mag[(lo, t)] + frac * ft_mag[(hi, t)],
+                    None => ft_mag[(lo, t)],
                 };
 
                 // Product: original magnitude × subharmonic magnitude
@@ -444,6 +452,80 @@ mod tests {
         let mg = metrogram(None, Some(oenv.view()), 22050, 512, win, None).unwrap();
         assert_eq!(mg.nrows(), DEFAULT_METER_RATIOS.len());
         assert!(mg.ncols() > 0);
+    }
+
+    /// The metrogram formula written out frame by frame, with no shortcuts.
+    fn metrogram_per_frame(
+        envelope: ArrayView1<Float>,
+        sr: u32,
+        hop_length: usize,
+        win_length: usize,
+        ratios: &[Float],
+    ) -> Array2<Float> {
+        let magnitude = fourier_tempogram(None, Some(envelope), sr, hop_length, win_length)
+            .unwrap()
+            .mapv(|c| c.norm());
+        let freqs =
+            crate::core::convert::fourier_tempo_frequencies(sr as Float, win_length, hop_length);
+        let (n_bins, n_frames) = magnitude.dim();
+        let mut scores = Array2::<Float>::zeros((ratios.len(), n_frames));
+        for (ri, &ratio) in ratios.iter().enumerate() {
+            for t in 0..n_frames {
+                let mut score = 0.0;
+                for b in 1..n_bins {
+                    let target = freqs[b] * ratio;
+                    if target <= 0.0 {
+                        continue;
+                    }
+                    let mut lo = 0;
+                    for k in 0..n_bins {
+                        if freqs[k] <= target {
+                            lo = k;
+                        }
+                    }
+                    let hi = (lo + 1).min(n_bins - 1);
+                    let subharmonic = if hi > lo && freqs[hi] > freqs[lo] {
+                        let frac = ((target - freqs[lo]) / (freqs[hi] - freqs[lo])).clamp(0.0, 1.0);
+                        (1.0 - frac) * magnitude[(lo, t)] + frac * magnitude[(hi, t)]
+                    } else {
+                        magnitude[(lo, t)]
+                    };
+                    score += magnitude[(b, t)] * subharmonic;
+                }
+                scores[(ri, t)] = score;
+            }
+        }
+        for t in 0..n_frames {
+            let max = scores.column(t).iter().copied().fold(0.0_f32, Float::max);
+            if max > 0.0 {
+                scores.column_mut(t).mapv_inplace(|v| v / max);
+            }
+        }
+        scores
+    }
+
+    #[test]
+    fn test_metrogram_equals_the_per_frame_formula() {
+        // A deterministic envelope: accents every 11 frames over fixed noise.
+        let mut state = 0x2545_f491_u32;
+        let envelope = Array1::from_iter((0..400).map(|i| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (state >> 16) as Float / 65_536.0;
+            noise + if i % 11 == 0 { 3.0 } else { 0.0 }
+        }));
+        // 2.0 puts subharmonics past the last bin (no interpolation); 0.0 makes
+        // every bin skip.
+        for (win_length, ratios) in [
+            (96, DEFAULT_METER_RATIOS),
+            (64, &[0.5, 0.3, 0.9, 2.0, 0.0][..]),
+        ] {
+            let fast =
+                metrogram(None, Some(envelope.view()), 22050, 512, win_length, Some(ratios))
+                    .unwrap();
+            let direct = metrogram_per_frame(envelope.view(), 22050, 512, win_length, ratios);
+            assert!(fast.iter().any(|&v| v > 0.0), "scores must not be all zero");
+            assert_eq!(fast, direct, "win_length {win_length}");
+        }
     }
 
     #[test]

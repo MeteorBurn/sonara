@@ -126,6 +126,12 @@
       "base_sha256": "e8ae6194b9922a331f909f9634edd7a5234eb5769b69ca4d0d84d5b79112a224",
       "head_sha256": "7648a9e361b2a0b281ef8be884fb1190dddaa711c812bf47fa0c9dbbd751b4c1",
       "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+    },
+    {
+      "path": "sonara/src/feature/rhythm.rs",
+      "base_sha256": "fa117e91244a5b95cadde6aa71be473b7cae848d8452f81197b23acc6e7f0694",
+      "head_sha256": "e1d6e0853adedd2cc8a1ca6d6b13649152773def2abb389ac53405282c09f184",
+      "reason": "metrogram locates each bin's subharmonic once per ratio instead of once per frame (2026-11-26): the same arithmetic in the same order, pinned by a unit test that requires exact equality with the per-frame formula; tempo code is untouched and no analysis value changes"
     }
   ],
   "domains": {
