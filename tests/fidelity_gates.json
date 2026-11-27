@@ -136,8 +136,8 @@
     {
       "path": "sonara/src/beat.rs",
       "base_sha256": "095a8bc7d86a8f354f60e5a8ebafae1e802799f613b06f6e78bf95a492c8499e",
-      "head_sha256": "fb5de659bee1c008a7c422c9bf82c26fe11eef4edf031c65fe385e8d474da5a1",
-      "reason": "align_tempo_to_bpm_range becomes pub(crate) so AnalysisConfig::validate reuses its range check before any audio is read (2026-11-26): visibility only, no tempo arithmetic changes and no analysis value changes"
+      "head_sha256": "ff12be6f60ef80427f2d000781272b6cbb291ce0e7192404e0f356eda9e0a009",
+      "reason": "align_tempo_to_bpm_range becomes pub(crate) so AnalysisConfig::validate reuses its range check before any audio is read (2026-11-26): visibility only. beat_track_with_range_free_beats also returns the sub-frame positions of the beats it returns, and tempo_curve delegates to a crate-internal tempo_curve_at over fractional frame positions, so the pipeline measures tempo_curve between sub-frame positions (2026-11-27). No tempo arithmetic changes: bpm, bpm_raw, bpm_candidates, bpm_confidence, beats, downbeats and grid_offset_sec are bit-identical on 664 GiantSteps excerpts, 187 Groove MIDI recordings, 12 mshoxxDB pieces, 8 click tracks and 60 real tracks. On the tracks whose bpm matches the label, the tempo curve's median deviates from the labelled tempo by 0.56% instead of 1.56% (GiantSteps, 536), 0.18% instead of 0.74% (mshoxxDB, 11) and 0.25% instead of 1.17% (Groove MIDI, 180). The public tempo_curve returns the same values for whole-frame input below 2^24 and the exact interval above it (the f32 subtraction lost it)"
     },
     {
       "path": "sonara-python/src/array.rs",
@@ -160,8 +160,8 @@
     {
       "path": "sonara/src/beatgrid.rs",
       "base_sha256": "b27d3057ad3db6a4e2bda01c4021bd8895aea931d0aa2a37acc83cda68fbe723",
-      "head_sha256": "3c035cd724fb0556dd63f707dcb139bdc1c3acc41f59e083b01db13092e90fcb",
-      "reason": "the module comment and the analyze_grid doc comment name the downbeat routine the pipeline calls, detect_downbeats_low_mid (2026-11-26): comments only, no code changes"
+      "head_sha256": "1ffca7252c50058fd5c1603e651b6a4b2e1f09ea69923bda63276e66aea32b97",
+      "reason": "the module comment and the analyze_grid doc comment name the downbeat routine the pipeline calls, detect_downbeats_low_mid (2026-11-26): comments only. grid_stability delegates to a crate-internal grid_stability_at over fractional frame positions, which the pipeline calls with the beats' sub-frame positions (2026-11-27): same formula, grid_offset_sec and downbeats untouched and bit-identical on 871 labelled or synthetic items and 60 real tracks; the public functions return the same values for whole-frame input below 2^24. The pipeline's grid_stability becomes continuous: 181 distinct values instead of 12 on 536 GiantSteps excerpts, and it ranks sequenced music above live drumming in 84% of pairs instead of 58%"
     },
     {
       "path": "sonara/src/genre.rs",

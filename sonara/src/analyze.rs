@@ -1045,7 +1045,8 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
             "onset_density",
         ],
     ),
-    feature("tempo_curve", true, false, true, S, &["beats"]),
+    // Reads the beats' sub-frame positions, which a record does not keep.
+    feature("tempo_curve", true, false, true, C, &[]),
     feature("time_signature", true, false, true, C, &[]),
     feature("onset_bands", false, true, false, C, &[]),
     feature("beatgrid", false, true, false, C, &[]),
@@ -1591,7 +1592,11 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// and `spectral_contrast_*` cover only the sounding frames, so on a track
 /// with silence, a fade or a quiet tail they differ, and with them
 /// `acousticness`, the heuristic `vocalness`/`instrumentalness` and dimensions
-/// 25-30 and 34 of `embedding`. Same meaning and units.
+/// 25-30 and 34 of `embedding`. `tempo_curve`, `tempo_variability` and
+/// `grid_stability` are measured between the beats' sub-frame positions
+/// instead of whole frames, so all three differ, and with the grid stability
+/// `rhythmic_regularity_confidence`; `tempo_curve` is no longer recomputed
+/// from a record without the audio. Same meaning and units.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
@@ -2059,8 +2064,13 @@ pub struct TrackAnalysis {
     // -- Rhythm (extended or full) --
     /// Local BPM per inter-beat interval (median-smoothed): value `i` covers
     /// the span between `beats[i]` and `beats[i+1]`
-    /// (length = `beats.len() - 1`).
+    /// (length = `beats.len() - 1`). The intervals are measured between the
+    /// beats' sub-frame positions, not between the whole frames in `beats`,
+    /// so the curve is not `60 / (beats[i+1] - beats[i])`.
     pub tempo_curve: Option<Vec<Float>>,
+    /// Coefficient of variation (std / mean) of `tempo_curve`. A sequenced
+    /// track with one tempo still reads about 0.01: the beat positions carry
+    /// an error of a fraction of a frame.
     pub tempo_variability: Option<Float>,
     pub time_signature: Option<String>,
     pub time_signature_confidence: Option<Float>,
@@ -2140,7 +2150,9 @@ pub struct TrackAnalysis {
     pub grid_offset_sec: Option<Float>,
     /// Frame indices of bar-starting beats (subset of `beats`).
     pub downbeats: Option<Vec<usize>>,
-    /// How rigidly beats fit a constant-tempo grid, in `[0, 1]`.
+    /// How rigidly beats fit a constant-tempo grid, in `[0, 1]`:
+    /// `1 - MAD / median` of the intervals between the beats' sub-frame
+    /// positions. A sequenced track reads about 0.99, not exactly 1.
     pub grid_stability: Option<Float>,
 
     // --- rhythmic regularity ---
@@ -3494,19 +3506,22 @@ fn analyze_signal_inner(
     let want_range_free_beats = wants_aggression && config.bpm_min.is_some();
     #[cfg(not(feature = "aggression"))]
     let want_range_free_beats = false;
-    let (tempo_estimate, beats, range_free_beats) = crate::beat::beat_track_with_range_free_beats(
-        None,
-        Some(oenv_padded.view()),
-        sr,
-        hop_length,
-        120.0,
-        100.0,
-        true,
-        config.bpm_min,
-        config.bpm_max,
-        Some(beat_env_padded.view()),
-        want_range_free_beats,
-    )?;
+    // `beat_positions`: the beats at sub-frame precision, for the tempo curve
+    // and the grid stability (whole frames quantize both).
+    let (tempo_estimate, beats, range_free_beats, beat_positions) =
+        crate::beat::beat_track_with_range_free_beats(
+            None,
+            Some(oenv_padded.view()),
+            sr,
+            hop_length,
+            120.0,
+            100.0,
+            true,
+            config.bpm_min,
+            config.bpm_max,
+            Some(beat_env_padded.view()),
+            want_range_free_beats,
+        )?;
     #[cfg(not(feature = "aggression"))]
     let _ = range_free_beats;
     let bpm = tempo_estimate.tempo;
@@ -3864,7 +3879,7 @@ fn analyze_signal_inner(
     // ================================================================
 
     let (tempo_curve, tempo_variability) = if extended && config.wants("tempo_curve") {
-        let tc = crate::beat::tempo_curve(&beats, sr, hop_length, Some(5)).unwrap_or_default();
+        let tc = crate::beat::tempo_curve_at(&beat_positions, sr, hop_length, Some(5));
         let tv = crate::beat::tempo_variability(&tc);
         (Some(tc), Some(tv))
     } else {
@@ -3921,7 +3936,7 @@ fn analyze_signal_inner(
         (
             Some(grid.grid_offset_sec),
             Some(grid.downbeats),
-            Some(grid.grid_stability),
+            Some(crate::beatgrid::grid_stability_at(&beat_positions)),
         )
     } else {
         (None, None, None)
@@ -3942,7 +3957,8 @@ fn analyze_signal_inner(
                 downbeats.as_deref().unwrap_or(&[]),
                 beats_per_bar,
                 bpm_confidence,
-                grid_stability.unwrap_or_else(|| crate::beatgrid::grid_stability(&beats)),
+                grid_stability
+                    .unwrap_or_else(|| crate::beatgrid::grid_stability_at(&beat_positions)),
                 // No meter evidence: the bar length above is assumed, not detected.
                 None,
             )
@@ -5267,17 +5283,6 @@ fn recompute_decode_free(
                 out.spectral_centroid_mean,
                 out.onset_density,
             ));
-        }
-        "tempo_curve" => {
-            let tc = crate::beat::tempo_curve(
-                &out.beats,
-                out.provenance.sample_rate,
-                out.provenance.hop_length,
-                Some(5),
-            )
-            .unwrap_or_default();
-            out.tempo_variability = Some(crate::beat::tempo_variability(&tc));
-            out.tempo_curve = Some(tc);
         }
         "key_candidates" => {
             let chroma = out.chroma_mean.as_ref().expect("evidence checked");
@@ -7778,7 +7783,6 @@ mod tests {
             ("key", &["key"]),
             ("valence", &["valence"]),
             ("acousticness", &["acousticness"]),
-            ("tempo_curve", &["tempo_curve"]),
             ("key_candidates", &["key_candidates"]),
             ("vocalness", &["vocalness"]),
             ("instrumentalness", &["instrumentalness"]),
@@ -7813,13 +7817,6 @@ mod tests {
                 }
                 "valence" => check("valence", aug.valence == direct.valence),
                 "acousticness" => check("acousticness", aug.acousticness == direct.acousticness),
-                "tempo_curve" => {
-                    check("tempo_curve", aug.tempo_curve == direct.tempo_curve);
-                    check(
-                        "tempo_variability",
-                        aug.tempo_variability == direct.tempo_variability,
-                    );
-                }
                 "key_candidates" => check(
                     "key_candidates",
                     aug.key_candidates == direct.key_candidates,
@@ -8042,10 +8039,12 @@ mod tests {
         assert_eq!(record.provenance.sample_rate, 22050);
 
         // chroma is FrameCurves: decode-free impossible, audio fallback required.
+        // So is tempo_curve: it reads beat positions a record does not keep.
         assert!(!can_augment(&record, "chroma"));
+        assert!(!can_augment(&record, "tempo_curve"));
         let aug = augment_analysis(
             &record,
-            &["chroma", "bpm"],
+            &["chroma", "bpm", "tempo_curve"],
             Some(&path),
             &AnalysisConfig::default(),
         )
@@ -8056,7 +8055,11 @@ mod tests {
             &path,
             22050,
             &AnalysisConfig {
-                features: Some(HashSet::from(["chroma".to_string(), "bpm".to_string()])),
+                features: Some(HashSet::from([
+                    "chroma".to_string(),
+                    "bpm".to_string(),
+                    "tempo_curve".to_string(),
+                ])),
                 bpm_min: Some(130.0),
                 bpm_max: Some(260.0),
                 ..Default::default()
@@ -8064,6 +8067,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(aug.chroma_mean, direct.chroma_mean);
+        // One value per interval of the beats the same run reports.
+        assert!(direct.beats.len() > 1);
+        assert_eq!(
+            direct.tempo_curve.as_ref().map(Vec::len),
+            Some(direct.beats.len() - 1)
+        );
+        assert_eq!(aug.tempo_curve, direct.tempo_curve);
+        assert_eq!(aug.tempo_variability, direct.tempo_variability);
         assert_eq!(aug.bpm, direct.bpm);
         assert_eq!(aug.bpm_raw, direct.bpm_raw);
         assert_eq!(aug.bpm_candidates, direct.bpm_candidates);

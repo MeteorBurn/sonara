@@ -130,6 +130,18 @@ from a fresh run:
   are unchanged.
 - `downbeats` and `rhythmic_regularity*`, in a record whose request also
   computed `time_signature`. Both always use a 4-beat bar.
+- `tempo_curve`, `tempo_variability` and `grid_stability`. The intervals
+  between beats are measured between the beats' sub-frame positions (the
+  vertex of a parabola through the tracker's score, within half a frame), not
+  between the whole frames stored in `beats`: at 22050 Hz and hop 512 whole
+  frames allow only 123.05 or 129.2 BPM around 128. A sequenced track with one
+  tempo reads a `tempo_variability` of about 0.01 and a `grid_stability` of
+  about 0.99, not 0 and 1. `rhythmic_regularity_confidence` has the grid
+  stability as one factor and moves with it; the regularity score and label
+  do not read it. A record does not keep the sub-frame positions, so
+  `tempo_curve` is a `frame_curves` feature: `augment_analysis` recomputes it
+  only with the audio. `bpm`, `beats`, `downbeats` and `grid_offset_sec` are
+  unchanged.
 
 `augment_analysis` rejects a schema-7 record with `schema version mismatch`.
 

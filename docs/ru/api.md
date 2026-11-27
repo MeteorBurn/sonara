@@ -31,8 +31,11 @@ SONARA предлагает два уровня работы. `analyze_*` пре
 около децибела у часового микса); `spectral_flatness_*` и `spectral_contrast_*`
 считаются только по кадрам со звуком, поэтому у трека с тишиной, затуханием
 или тихим хвостом они, а с ними `acousticness`, встроенные `vocalness` /
-`instrumentalness` и координаты 25–30 и 34 вектора `embedding` отличаются.
-Смысл и единицы прежние.
+`instrumentalness` и координаты 25–30 и 34 вектора `embedding` отличаются;
+`tempo_curve`, `tempo_variability` и `grid_stability` меряют интервалы между
+уточнёнными положениями долей, а не между целыми кадрами, поэтому отличаются
+все три и с ними `rhythmic_regularity_confidence`, а `tempo_curve` из записи
+без звука больше не пересчитывается. Смысл и единицы прежние.
 Установленный пакет проверяется через `sonara.__version__`.
 
 Python-пакету нужны Python 3.10+ и NumPy `>=1.23,<3`; служебным скриптам
@@ -208,7 +211,7 @@ result = sonara.analyze_file("track.mp3", features=features)
 | `key` | `key`, `key_confidence`, `key_camelot` | Playlist | S |
 | `valence` | `valence` | Playlist | S |
 | `acousticness` | `acousticness` | Playlist | S |
-| `tempo_curve` | `tempo_curve`, `tempo_variability` | Full | S |
+| `tempo_curve` | `tempo_curve`, `tempo_variability` | Full | C |
 | `time_signature` | `time_signature`, `time_signature_confidence` | Full | C |
 | `onset_bands` | `onset_strength_bands`, `onset_band_edges_hz` | Opt-in | C |
 | `beatgrid` | `grid_offset_sec`, `downbeats`, `grid_stability` | Opt-in | C |
@@ -322,7 +325,8 @@ beat_seconds = [
 
 Кривая энергии имеет собственный `energy_curve_hop_sec`, громкость — окна 3 с
 с шагом 1 с, а `tempo_curve[i]` относится к интервалу между `beats[i]` и
-`beats[i+1]`. Эти массивы нельзя соединять простым совпадением индексов.
+`beats[i+1]` (сам интервал измерен точнее кадра, поэтому значение не равно
+`60 / (beats[i+1] − beats[i])` в секундах). Эти массивы нельзя соединять простым совпадением индексов.
 `chord_events` и `segments` уже содержат `start_sec`/`end_sec`; события аккордов
 объединяют соседние одинаковые метки. `N` — отсутствие определённого аккорда.
 

@@ -276,7 +276,7 @@ pub fn beat_track_detailed_with_dp_envelope(
     bpm_max: Option<Float>,
     dp_envelope: Option<ArrayView1<Float>>,
 ) -> Result<(TempoEstimate, Vec<usize>)> {
-    let (estimate, beats, _) = beat_track_with_range_free_beats(
+    let (estimate, beats, _, _) = beat_track_with_range_free_beats(
         y,
         onset_envelope,
         sr,
@@ -295,8 +295,9 @@ pub fn beat_track_detailed_with_dp_envelope(
 /// [`beat_track_detailed_with_dp_envelope`], plus, when `range_free_beats` is
 /// set, the beats a call without a BPM range would return (bit-identical to
 /// one). `tempo_raw` is that call's tempo. The aggression model reads both, so
-/// its score does not move with the caller's display range.
-#[allow(clippy::too_many_arguments)]
+/// its score does not move with the caller's display range. The last value is
+/// the sub-frame positions of the returned beats ([`refine_beats`]).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn beat_track_with_range_free_beats(
     y: Option<ArrayView1<Float>>,
     onset_envelope: Option<ArrayView1<Float>>,
@@ -309,7 +310,7 @@ pub(crate) fn beat_track_with_range_free_beats(
     bpm_max: Option<Float>,
     dp_envelope: Option<ArrayView1<Float>>,
     range_free_beats: bool,
-) -> Result<(TempoEstimate, Vec<usize>, Option<Vec<usize>>)> {
+) -> Result<(TempoEstimate, Vec<usize>, Option<Vec<usize>>, Vec<f64>)> {
     let sr_f = sr as Float;
     let frame_rate = sr_f / hop_length as Float;
 
@@ -342,6 +343,7 @@ pub(crate) fn beat_track_with_range_free_beats(
             TempoEstimate::fallback(start_bpm),
             vec![],
             range_free_beats.then(Vec::new),
+            vec![],
         ));
     }
 
@@ -360,6 +362,7 @@ pub(crate) fn beat_track_with_range_free_beats(
             TempoEstimate::fallback(start_bpm),
             vec![],
             range_free_beats.then(Vec::new),
+            vec![],
         ));
     }
 
@@ -396,7 +399,7 @@ pub(crate) fn beat_track_with_range_free_beats(
         let mut estimate = TempoEstimate::fallback(start_bpm);
         let frames_per_beat = frames_per_beat_of(start_bpm);
         if frames_per_beat == 0 {
-            return Ok((estimate, vec![], range_free_beats.then(Vec::new)));
+            return Ok((estimate, vec![], range_free_beats.then(Vec::new), vec![]));
         }
         let (beats, local_score) = track(frames_per_beat);
         let (times, strength) = refine_beats(&beats, local_score.view());
@@ -408,7 +411,7 @@ pub(crate) fn beat_track_with_range_free_beats(
         }
         // Tracked at start_bpm whatever the range: the range-free beats are these.
         let range_free = range_free_beats.then(|| beats.clone());
-        return Ok((estimate, beats, range_free));
+        return Ok((estimate, beats, range_free, times));
     };
     let candidates = acf.ranked();
 
@@ -447,7 +450,7 @@ pub(crate) fn beat_track_with_range_free_beats(
                     tempo_raw: refined.clamp(30.0, 320.0),
                     candidates,
                 };
-                return Ok((estimate, vec![], range_free_beats.then(Vec::new)));
+                return Ok((estimate, vec![], range_free_beats.then(Vec::new), vec![]));
             }
             continue;
         }
@@ -520,15 +523,17 @@ pub(crate) fn beat_track_with_range_free_beats(
     // only when that changes the integer beat period.
     let beats_at = |frames_per_beat: usize| {
         if frames_per_beat == level.frames_per_beat {
-            level.beats.clone()
+            (level.beats.clone(), level.times.clone())
         } else if frames_per_beat == 0 {
-            vec![]
+            (vec![], vec![])
         } else {
-            track(frames_per_beat).0
+            let (beats, local_score) = track(frames_per_beat);
+            let times = refine_beats(&beats, local_score.view()).0;
+            (beats, times)
         }
     };
     let frames_per_beat = frames_per_beat_of(acf_tempo);
-    let beats = beats_at(frames_per_beat);
+    let (beats, positions) = beats_at(frames_per_beat);
     // The same level's beats as a call without a range tracks them (`raw` is
     // `acf_tempo` unfolded); the level choice itself never depends on the range.
     let range_free_beats = range_free_beats.then(|| {
@@ -536,7 +541,7 @@ pub(crate) fn beat_track_with_range_free_beats(
         if raw_frames_per_beat == frames_per_beat {
             beats.clone()
         } else {
-            beats_at(raw_frames_per_beat)
+            beats_at(raw_frames_per_beat).0
         }
     });
 
@@ -548,6 +553,7 @@ pub(crate) fn beat_track_with_range_free_beats(
         },
         beats,
         range_free_beats,
+        positions,
     ))
 }
 
@@ -1255,24 +1261,41 @@ pub fn plp(
 ///
 /// - `smooth`: optional median filter window size for smoothing.
 ///   Use an odd number (e.g., 5) to reduce jitter.
+///
+/// The analysis result's `tempo_curve` is measured between sub-frame beat
+/// positions, so calling this on the result's `beats` does not reproduce it.
 pub fn tempo_curve(
     beat_frames: &[usize],
     sr: u32,
     hop_length: usize,
     smooth: Option<usize>,
 ) -> Result<Vec<Float>> {
-    if beat_frames.len() < 2 {
-        return Ok(vec![]);
+    let positions: Vec<f64> = beat_frames.iter().map(|&b| b as f64).collect();
+    Ok(tempo_curve_at(&positions, sr, hop_length, smooth))
+}
+
+/// [`tempo_curve`] from beat positions in fractional frames: the analysis
+/// pipeline passes the beats' sub-frame positions, because whole frames allow
+/// only a few tempo values (at 22050 Hz and hop 512, 123.05 or 129.2 BPM
+/// around 128).
+pub(crate) fn tempo_curve_at(
+    positions: &[f64],
+    sr: u32,
+    hop_length: usize,
+    smooth: Option<usize>,
+) -> Vec<Float> {
+    if positions.len() < 2 {
+        return vec![];
     }
 
     let sr_f = sr as Float;
     let hop_f = hop_length as Float;
 
     // Convert frame intervals to BPM
-    let mut bpms: Vec<Float> = beat_frames
+    let mut bpms: Vec<Float> = positions
         .windows(2)
         .map(|w| {
-            let dt = (w[1] as Float - w[0] as Float) * hop_f / sr_f;
+            let dt = (w[1] - w[0]) as Float * hop_f / sr_f;
             if dt > 0.0 {
                 60.0 / dt
             } else {
@@ -1294,7 +1317,7 @@ pub fn tempo_curve(
         }
     }
 
-    Ok(bpms)
+    bpms
 }
 
 /// Compute the coefficient of variation (std/mean) of the tempo curve.

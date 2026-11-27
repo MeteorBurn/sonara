@@ -95,13 +95,25 @@ pub fn grid_offset(beats: &[usize], sr: u32, hop_length: usize) -> Float {
 ///
 /// Returns `0.0` when there are fewer than two intervals (i.e. fewer than three
 /// beats), or when the median interval is non-positive.
+///
+/// The analysis result's `grid_stability` is measured between sub-frame beat
+/// positions, so calling this on the result's `beats` (or reading
+/// [`BeatGrid::grid_stability`]) does not reproduce it.
 pub fn grid_stability(beats: &[usize]) -> Float {
-    if beats.len() < 3 {
+    let positions: Vec<f64> = beats.iter().map(|&b| b as f64).collect();
+    grid_stability_at(&positions)
+}
+
+/// [`grid_stability`] from beat positions in fractional frames: the analysis
+/// pipeline passes the beats' sub-frame positions, because whole-frame
+/// intervals make the score move in steps of about one frame per beat.
+pub(crate) fn grid_stability_at(positions: &[f64]) -> Float {
+    if positions.len() < 3 {
         return 0.0;
     }
-    let ibis: Vec<Float> = beats
+    let ibis: Vec<Float> = positions
         .windows(2)
-        .map(|w| w[1] as Float - w[0] as Float)
+        .map(|w| (w[1] - w[0]) as Float)
         .collect();
     let m = median(&ibis);
     if m <= 0.0 {

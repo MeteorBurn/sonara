@@ -180,7 +180,8 @@ Adds expensive rhythm analysis features on top of playlist mode:
 ```python
 r = sonara.analyze_file("track.mp3", mode="full")
 
-r['tempo_curve']                # Per-beat BPM values
+r['tempo_curve']                # Per-beat BPM values, from beat positions
+                                # finer than a frame
 r['tempo_variability']          # Coefficient of variation of tempo
 r['time_signature']             # e.g. "4/4", "3/4"
 r['time_signature_confidence']  # Detection confidence
@@ -236,7 +237,7 @@ The three keys appear **only** when `beatgrid` is computed (an explicit request 
 
 - **`grid_offset_sec`** — the time of the first tracked beat.
 - **`downbeats`** — assuming 4 beats per bar, the bar phase is chosen by the kick. Two onset envelopes are read at the beats: below 200 Hz (kick) and 200–800 Hz (snare body). Of the two phase pairs that lie two beats apart, the pair with the larger low-minus-mid accent wins; within it, the phase with the stronger low accent starts the bar. A loud snare on beats two and four is therefore not taken for beat one.
-- **`grid_stability`** — `clamp(1 - MAD / median, 0, 1)`, where the inter-beat intervals have median `median` and median absolute deviation `MAD`. A perfectly regular grid scores `1.0`; jitter lowers the score monotonically. Useful both as a confidence measure and, in future, for tempo-octave disambiguation via grid regularity.
+- **`grid_stability`** — `clamp(1 - MAD / median, 0, 1)`, where the inter-beat intervals have median `median` and median absolute deviation `MAD`. The intervals are measured between the beats' sub-frame positions, so the score is continuous: a sequenced track reads about `0.99`, a live performance lower; jitter lowers the score monotonically. Useful both as a confidence measure and, in future, for tempo-octave disambiguation via grid regularity.
 
 You can combine it with other features, e.g. `features=["bpm", "beatgrid"]`. The bar is always 4 beats long, so material in 3/4 or another meter also gets a 4-beat grid; `rhythmic_regularity` is measured against the same 4-beat bar.
 
@@ -938,7 +939,8 @@ record's stored chords, `loudness_lufs`, `replaygain_db` and the two
 `embedding` dimensions built from them differ from a fresh run, and on a track
 with silence or a fade so do `spectral_flatness_*`, `spectral_contrast_*`,
 `acousticness`, the built-in `vocalness` and the `embedding` dimensions built
-from the two spectral fields; a schema-6 record (0.3.6 or the
+from the two spectral fields; `tempo_curve`, `tempo_variability` and
+`grid_stability` differ too; a schema-6 record (0.3.6 or the
 `v0.3.7-meteorburn.1` wheel) also differs in `bpm`, `beats` and `downbeats`.
 Re-analyse such tracks, adding `onset_bands` and `rhythmic_regularity` to the
 request if you want them.
