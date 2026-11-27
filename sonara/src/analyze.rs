@@ -1599,7 +1599,12 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// from a record without the audio. `time_signature` comes from the
 /// recurrence of beat descriptors and reads only "4/4" (duple or quadruple),
 /// "3/4" (triple) or "N/A" (undecided); a stored value may read "2/4", "5/4",
-/// "6/4" or "7/4". The other fields keep their meaning and units.
+/// "6/4" or "7/4". The scores in `bpm_candidates` no longer carry a factor
+/// that depends on the length of the track (1/4 to 1/2, halving at every
+/// power of two of the frame count), so they, `bpm_confidence` and
+/// `rhythmic_regularity_confidence` differ; a track whose strongest candidate
+/// lies at 90-95 BPM with a score near 4.0 can get another tempo and other
+/// beats. The other fields keep their meaning and units.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
@@ -1761,7 +1766,9 @@ pub struct TrackAnalysis {
     /// suspicion. A trust signal, not a probability.
     pub bpm_confidence: Float,
     /// Strongest tempo candidates as `(bpm, score)` pairs, sorted by score
-    /// descending (up to the top 5).
+    /// descending (up to the top 5). A score is the mean lagged product of the
+    /// onset envelope times a constant and the tempo prior: it does not depend
+    /// on the length of the track.
     pub bpm_candidates: Vec<(Float, Float)>,
     /// Beat positions as main-pass frame indices; seconds =
     /// `frame * provenance.hop_length / provenance.sample_rate`

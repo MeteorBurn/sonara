@@ -169,6 +169,20 @@ schema-7 values differ from a fresh run:
   `tempo_curve` is a `frame_curves` feature: `augment_analysis` recomputes it
   only with the audio. `bpm`, `beats`, `downbeats` and `grid_offset_sec` are
   unchanged.
+- The scores in `bpm_candidates`, `bpm_confidence` and
+  `rhythmic_regularity_confidence`. A candidate's score is the mean lagged
+  product of the onset envelope (its autocorrelation divided by the number of
+  frames) times `1 / (2 sqrt 2)` and the tempo prior, so the same music scores
+  the same at any length. A stored schema-7 score also carries a factor
+  between 1/4 and 1/2 that depends on the length of the track and halves at
+  1:35, 3:10, 6:20, 12:41 and every further doubling (at 22050 Hz and hop
+  512); it differs from a fresh one by up to `sqrt 2` either way.
+  `bpm_confidence` reads the top score and moves with it by up to about 0.04,
+  and `rhythmic_regularity_confidence` has it as one factor. Only a track
+  whose strongest candidate lies at 90-95 BPM with a score near 4.0, the
+  threshold of the rule that may lift it by one and a half, can get another
+  tempo, and with it other beats, another grid and everything read from them;
+  none of 860 recordings of three public sets with a labelled tempo did.
 
 `augment_analysis` rejects a schema-7 record with `schema version mismatch`.
 

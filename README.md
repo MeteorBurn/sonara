@@ -944,7 +944,8 @@ record's stored chords, `loudness_lufs`, `replaygain_db` and the two
 with silence or a fade so do `spectral_flatness_*`, `spectral_contrast_*`,
 `acousticness`, the built-in `vocalness` and the `embedding` dimensions built
 from the two spectral fields; `tempo_curve`, `tempo_variability`,
-`grid_stability` and `time_signature` differ too; a schema-6 record (0.3.6 or the
+`grid_stability`, `time_signature`, `bpm_confidence` and the scores in
+`bpm_candidates` differ too; a schema-6 record (0.3.6 or the
 `v0.3.7-meteorburn.1` wheel) also differs in `bpm`, `beats` and `downbeats`.
 Re-analyse such tracks, adding `onset_bands` and `rhythmic_regularity` to the
 request if you want them.

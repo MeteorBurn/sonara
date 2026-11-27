@@ -866,6 +866,15 @@ impl AcfCandidates {
     }
 }
 
+/// Scale of the candidate scores relative to the mean lagged product of the
+/// envelope: `1 / (2 sqrt 2)`. `autocorrelate` returns the lagged sum times
+/// `1 / fft_size`, the mean product times `n / fft_size`, a factor between 1/4
+/// and 1/2 that halves at every power of two of the envelope length. The
+/// scores use the mean product, which does not depend on the length, times the
+/// geometric middle of that range: the scale the absolute thresholds on a
+/// score (`select_preferred_tempo_candidate`, `bpm_confidence`) are set on.
+const ACF_SCORE_SCALE: f64 = std::f64::consts::FRAC_1_SQRT_2 / 2.0;
+
 /// Autocorrelation tempo candidates of `oenv`, weighted by a log-normal prior
 /// centred at `start_bpm`; `None` when the envelope is too short for a lag
 /// window.
@@ -895,6 +904,16 @@ fn acf_candidates(
         return Ok(None);
     }
 
+    // The scores only: the stored `acf` keeps its scale, the tempo read from
+    // it depends on ratios alone. `mean_square / acf[0]` is `fft_size / n`.
+    let mean_square =
+        oenv.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / oenv.len() as f64;
+    let score_scale = if acf[0] > 0.0 {
+        (ACF_SCORE_SCALE * mean_square / acf[0] as f64) as Float
+    } else {
+        1.0
+    };
+
     // Weight by log-normal prior centered at start_bpm, collecting every
     // candidate so downstream metrical-multiple lifting can inspect them.
     let mut candidates = Vec::with_capacity(max_lag - min_lag + 1);
@@ -902,7 +921,7 @@ fn acf_candidates(
     for lag in min_lag..=max_lag {
         let bpm = 60.0 * frame_rate / lag as Float;
         let log_prior = -0.5 * ((bpm.log2() - start_bpm.log2()) / 1.0).powi(2);
-        let score = acf[lag] * (1.0 + log_prior.exp());
+        let score = acf[lag] * score_scale * (1.0 + log_prior.exp());
         candidates.push((lag, bpm, score));
     }
 
