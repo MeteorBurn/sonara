@@ -410,6 +410,9 @@ const METER_ONSET_HALF_WIDTH_SEC: f64 = 0.06;
 const METER_LOW_BAND_HZ: std::ops::RangeInclusive<f64> = 50.0..=100.0;
 /// Floor of the power spectrum under the flatness logarithm.
 const METER_POWER_FLOOR: f64 = 1e-12;
+/// Two-sided 5 % point of the normal distribution: `meter_from_beats` names a
+/// metre only when `|M|` is this many noise standard deviations from zero.
+const METER_SIGNIFICANCE_Z: f64 = 1.96;
 
 /// Decide between a duple and a triple metre from the recurrence of
 /// beat-segment descriptors (Gouyon & Herrera, "Determination of the meter of
@@ -423,11 +426,22 @@ const METER_POWER_FLOOR: f64 = 1e-12;
 /// standardised and autocorrelated over beat lags in 10-beat windows;
 /// `M = mean(acf[2, 4, 8]) - mean(acf[3, 6])`, averaged over the descriptors.
 ///
-/// Returns `(beats per bar, confidence)`: `4` when `M >= 0`, which stands for
-/// the duple and quadruple metres (2/4, 4/4), `3` otherwise, which stands for
-/// the triple ones (3/4, and 6/8 tracked at the eighth note); the confidence
-/// is `|M|` capped at 1. `beat_times` are beat positions in seconds,
-/// increasing.
+/// Returns `(beats per bar, confidence)`: `Some(4)` when `M >= 0`, which
+/// stands for the duple and quadruple metres (2/4, 4/4), `Some(3)` otherwise,
+/// which stands for the triple ones (3/4, and 6/8 tracked at the eighth note);
+/// the confidence is `|M|` capped at 1. `beat_times` are beat positions in
+/// seconds, increasing.
+///
+/// The metre is `None` (the confidence stays) when `|M|` is no larger than
+/// noise gives. A series of `N` beats without recurrence has an
+/// autocorrelation of variance `1/N` at every lag (Bartlett 1946; the usual
+/// `1.96 / sqrt(N)` band of a correlogram), so `M` of one descriptor has
+/// variance `(1/3 + 1/2) / N`, and the mean over the four, whose
+/// cross-correlations are `rho_ij`, that times `sum(rho_ij^2) / 16`. `|M|`
+/// must exceed 1.96 standard deviations (the 5 % level). The series of real
+/// music are not white, so the test is lenient on long tracks; under about
+/// 40 beats the 10-beat windows widen the spread, and white series pass it
+/// about once in ten.
 ///
 /// The answer is as good as the beats: the descriptors compare whole beats, so
 /// a tracker on another metrical level changes what recurs. A pulse whose
@@ -445,7 +459,7 @@ pub fn meter_from_beats(
     y: ArrayView1<Float>,
     sr: u32,
     beat_times: &[f64],
-) -> Option<(usize, Float)> {
+) -> Option<(Option<usize>, Float)> {
     let frame = (sr / METER_FRAME_RATE) as usize;
     let hop = frame / 2;
     if hop == 0 || y.len() < frame {
@@ -539,13 +553,16 @@ pub fn meter_from_beats(
     }
 
     let n_windows = rows.len() - METER_MIN_BEATS + 1;
+    let columns: Vec<Vec<f64>> = (0..4)
+        .map(|d| {
+            let column: Vec<f64> = rows.iter().map(|r| r[d]).collect();
+            let (mean, std) = mean_std(&column);
+            let std = if std == 0.0 { 1.0 } else { std };
+            column.iter().map(|v| (v - mean) / std).collect()
+        })
+        .collect();
     let mut m = 0.0;
-    for d in 0..4 {
-        let column: Vec<f64> = rows.iter().map(|r| r[d]).collect();
-        let (mean, std) = mean_std(&column);
-        let std = if std == 0.0 { 1.0 } else { std };
-        let x: Vec<f64> = column.iter().map(|v| (v - mean) / std).collect();
-
+    for x in &columns {
         // Normalised autocorrelation per lag, summed over the windows.
         let mut acf = [0.0; METER_MAX_LAG + 1];
         for s in 0..n_windows {
@@ -567,7 +584,17 @@ pub fn meter_from_beats(
     if !m.is_finite() {
         return None;
     }
-    Some((if m >= 0.0 { 4 } else { 3 }, m.abs().min(1.0) as Float))
+    // Noise level of the mean M: see the function's doc.
+    let n = rows.len() as f64;
+    let cross: f64 = columns
+        .iter()
+        .flat_map(|a| columns.iter().map(move |b| (a, b)))
+        .map(|(a, b)| (a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>() / n).powi(2))
+        .sum();
+    let lag_weight = 1.0 / METER_DUPLE_LAGS.len() as f64 + 1.0 / METER_TRIPLE_LAGS.len() as f64;
+    let noise = (lag_weight / n * cross / 16.0).sqrt();
+    let meter = (m.abs() > METER_SIGNIFICANCE_Z * noise).then_some(if m >= 0.0 { 4 } else { 3 });
+    Some((meter, m.abs().min(1.0) as Float))
 }
 
 #[cfg(test)]
@@ -751,8 +778,8 @@ mod tests {
         let sr = 22050_u32;
         let beat = sr as usize / 2; // 120 BPM
         let n_beats = 120; // 60 s
-        let drums = |pattern: &[bool]| {
-            let mut state = 0x2545_f491_u32;
+        let drums_seeded = |pattern: &[bool], seed: u32| {
+            let mut state = seed;
             let mut y = Array1::<Float>::zeros(n_beats * beat);
             for k in 0..n_beats {
                 let kick = pattern[k % pattern.len()];
@@ -768,19 +795,27 @@ mod tests {
             }
             y
         };
+        let drums = |pattern: &[bool]| drums_seeded(pattern, 0x2545_f491);
         let beat_times: Vec<f64> = (0..n_beats).map(|k| k as f64 * 0.5).collect();
 
         let triple = drums(&[true, false, false]);
         let (meter, confidence) = meter_from_beats(triple.view(), sr, &beat_times).unwrap();
-        assert_eq!(meter, 3, "kick, snare, snare (confidence {confidence})");
+        assert_eq!(meter, Some(3), "kick, snare, snare (confidence {confidence})");
         assert_eq!(confidence, 1.0, "a clean triple pattern reaches the cap");
 
         // The value, not only the decision: one broken descriptor moves the
         // mean of the four M by about a quarter.
         let duple = drums(&[true, false, true, false]);
         let (meter, confidence) = meter_from_beats(duple.view(), sr, &beat_times).unwrap();
-        assert_eq!(meter, 4, "kick, snare, kick, snare (confidence {confidence})");
+        assert_eq!(meter, Some(4), "kick, snare, kick, snare (confidence {confidence})");
         assert!((confidence - 0.9985).abs() < 1e-3, "{confidence}");
+
+        // Every beat a fresh noise burst: nothing recurs, so no metre is named.
+        // |M| is about 0.03 against a noise threshold near 0.09; the confidence stays.
+        let noise = drums_seeded(&[false], 1);
+        let (meter, confidence) = meter_from_beats(noise.view(), sr, &beat_times).unwrap();
+        assert_eq!(meter, None, "noise bursts (confidence {confidence})");
+        assert!(confidence > 0.0 && confidence < 0.05, "{confidence}");
 
         assert_eq!(meter_from_beats(duple.view(), sr, &beat_times[..10]), None);
 

@@ -139,13 +139,24 @@ schema-7 values differ from a fresh run:
   confidence is `min(|M|, 1)`, the gap between the duple and the triple
   reading; a low value means the grouping is not expressed, a high one is not
   a proof (a pulse whose beats all sound alike gets an arbitrary answer with a
-  non-zero confidence). Both keys are absent when fewer than 18 beats yield
-  descriptors (at least 20 tracked beats). A
+  non-zero confidence). The field is `"N/A"`, with the confidence kept, when
+  `|M|` does not exceed what a series without recurrence gives: 1.96 standard
+  deviations of `M` for white beat-descriptor series of the same length (the
+  5 % level; an autocorrelation of `N` values has variance `1/N`, Bartlett
+  1946). This is a statistical test, not part of the published method. It is
+  lenient on long tracks, whose descriptor series are not white, and below
+  about 40 beats, where a series without recurrence passes it about once in
+  ten. The field is also `"N/A"`, without a confidence, when the metre cannot
+  be measured: fewer than 18 beats yield descriptors (at least 20 tracked
+  beats). This is the one string a consumer has to expect besides the two
+  metres; unlike `rhythmic_regularity`, the undecided value is not `None`. A
   stored schema-7 value comes from another routine and may read `"2/4"`,
   `"5/4"`, `"6/4"` or `"7/4"`. Measured on samples of public sets with a known
-  metre: quadruple music is recognised in 90-97 % of the clips (METER2800,
-  GiantSteps, FMA, Groove MIDI), triple music in 60-77 % (METER2800). The beat
-  grid and `rhythmic_regularity*` do not read it.
+  metre (30-second clips of METER2800 and FMA, two-minute excerpts of
+  GiantSteps): the field names a metre for 6 to 8 recordings in 10 and is
+  `"N/A"` for the rest; of the named metres, 97-100 % are right on quadruple
+  music and about 77 % on triple music. The beat grid and
+  `rhythmic_regularity*` do not read it.
 - `tempo_curve`, `tempo_variability` and `grid_stability`. The intervals
   between beats are measured between the beats' sub-frame positions (the
   vertex of a parabola through the tracker's score, within half a frame), not

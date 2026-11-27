@@ -1597,8 +1597,8 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// instead of whole frames, so all three differ, and with the grid stability
 /// `rhythmic_regularity_confidence`; `tempo_curve` is no longer recomputed
 /// from a record without the audio. `time_signature` comes from the
-/// recurrence of beat descriptors and reads only "4/4" (duple or quadruple)
-/// or "3/4" (triple), or is absent; a stored value may read "2/4", "5/4",
+/// recurrence of beat descriptors and reads only "4/4" (duple or quadruple),
+/// "3/4" (triple) or "N/A" (undecided); a stored value may read "2/4", "5/4",
 /// "6/4" or "7/4". The other fields keep their meaning and units.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
@@ -2075,17 +2075,19 @@ pub struct TrackAnalysis {
     /// track with one tempo still reads about 0.01: the beat positions carry
     /// an error of a fraction of a frame.
     pub tempo_variability: Option<Float>,
-    /// "4/4" or "3/4": whether the beats group in twos or in threes
+    /// "4/4", "3/4" or "N/A": whether the beats group in twos or in threes
     /// (`feature::rhythm::meter_from_beats`). "4/4" stands for every duple and
     /// quadruple metre (2/4 included), "3/4" for every triple one (6/8
-    /// included); metres of five or seven beats get one of the two. `None`
-    /// when fewer than 18 beats are usable (at least 20 tracked beats).
+    /// included); metres of five or seven beats get one of the two.
+    /// "N/A" when the grouping is no clearer than noise would make it, or
+    /// when it cannot be measured: fewer than 18 beats are usable (at least
+    /// 20 tracked beats).
     pub time_signature: Option<String>,
     /// How far the duple and the triple readings are apart: |mean M| capped
     /// at 1, where M is the beat-lag autocorrelation of the beat descriptors
     /// at lags 2, 4, 8 minus that at lags 3, 6. Near 0 = undecided; a high
-    /// value is not a proof (a bare metronome can read 0.3). `Some` exactly
-    /// when `time_signature` is.
+    /// value is not a proof (a bare metronome can read 0.3). `None` when
+    /// there were too few beats to measure it.
     pub time_signature_confidence: Option<Float>,
 
     // -- Tonal (extended or full) --
@@ -3905,9 +3907,11 @@ fn analyze_signal_inner(
             .iter()
             .map(|&frame| frame as f64 * hop_length as f64 / sr as f64)
             .collect();
+        let undecided = || Some(String::from("N/A"));
         match crate::feature::rhythm::meter_from_beats(y, sr, &beat_times) {
-            Some((n, confidence)) => (Some(format!("{n}/4")), Some(confidence)),
-            None => (None, None),
+            Some((Some(n), confidence)) => (Some(format!("{n}/4")), Some(confidence)),
+            Some((None, confidence)) => (undecided(), Some(confidence)),
+            None => (undecided(), None),
         }
     } else {
         (None, None)

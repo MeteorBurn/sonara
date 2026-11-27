@@ -183,10 +183,12 @@ r = sonara.analyze_file("track.mp3", mode="full")
 r['tempo_curve']                # Per-beat BPM values, from beat positions
                                 # finer than a frame
 r['tempo_variability']          # Coefficient of variation of tempo
-r['time_signature']             # "4/4" (beats group in twos or fours) or
-                                # "3/4" (in threes, 6/8 included)
-r['time_signature_confidence']  # How clear that grouping is (0..1); both
-                                # keys are absent under 18 usable beats
+r['time_signature']             # "4/4" (beats group in twos or fours),
+                                # "3/4" (in threes, 6/8 included) or "N/A"
+                                # (the grouping is no clearer than noise, or
+                                # there are under 18 usable beats)
+r['time_signature_confidence']  # How clear that grouping is (0..1); absent
+                                # under 18 usable beats
 ```
 
 Full mode also computes every opt-in feature: `onset_bands`, `beatgrid`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression` (only in builds with the `aggression` Cargo feature; the Python wheel has it), `fingerprint`, `loudness`, `ebur128`, `native_dynamics`, `amplitude_envelope`, `stereo_field`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness` and `tags`. Their keys are described in the sections below.
