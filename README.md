@@ -183,8 +183,10 @@ r = sonara.analyze_file("track.mp3", mode="full")
 r['tempo_curve']                # Per-beat BPM values, from beat positions
                                 # finer than a frame
 r['tempo_variability']          # Coefficient of variation of tempo
-r['time_signature']             # e.g. "4/4", "3/4"
-r['time_signature_confidence']  # Detection confidence
+r['time_signature']             # "4/4" (beats group in twos or fours) or
+                                # "3/4" (in threes, 6/8 included)
+r['time_signature_confidence']  # How clear that grouping is (0..1); both
+                                # keys are absent under 18 usable beats
 ```
 
 Full mode also computes every opt-in feature: `onset_bands`, `beatgrid`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression` (only in builds with the `aggression` Cargo feature; the Python wheel has it), `fingerprint`, `loudness`, `ebur128`, `native_dynamics`, `amplitude_envelope`, `stereo_field`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness` and `tags`. Their keys are described in the sections below.
@@ -939,8 +941,8 @@ record's stored chords, `loudness_lufs`, `replaygain_db` and the two
 `embedding` dimensions built from them differ from a fresh run, and on a track
 with silence or a fade so do `spectral_flatness_*`, `spectral_contrast_*`,
 `acousticness`, the built-in `vocalness` and the `embedding` dimensions built
-from the two spectral fields; `tempo_curve`, `tempo_variability` and
-`grid_stability` differ too; a schema-6 record (0.3.6 or the
+from the two spectral fields; `tempo_curve`, `tempo_variability`,
+`grid_stability` and `time_signature` differ too; a schema-6 record (0.3.6 or the
 `v0.3.7-meteorburn.1` wheel) also differs in `bpm`, `beats` and `downbeats`.
 Re-analyse such tracks, adding `onset_bands` and `rhythmic_regularity` to the
 request if you want them.

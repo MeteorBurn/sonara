@@ -849,7 +849,7 @@ pub enum AnalysisMode {
     /// danceability, key, valence, acousticness). (~3ms per 10s track)
     Playlist,
     /// Every feature: Playlist plus the expensive rhythm analysis
-    /// (tempo_curve, time_signature via metrogram) and all opt-in features.
+    /// (tempo_curve, time_signature) and all opt-in features.
     /// The file-only ones (ebur128, native_dynamics, amplitude_envelope,
     /// stereo_field, tags) need `analyze_file` / `analyze_batch`.
     Full,
@@ -1596,7 +1596,10 @@ const RHYTHMIC_REGULARITY_DEPS: &[&str] = &["onset_bands", "beatgrid"];
 /// `grid_stability` are measured between the beats' sub-frame positions
 /// instead of whole frames, so all three differ, and with the grid stability
 /// `rhythmic_regularity_confidence`; `tempo_curve` is no longer recomputed
-/// from a record without the audio. Same meaning and units.
+/// from a record without the audio. `time_signature` comes from the
+/// recurrence of beat descriptors and reads only "4/4" (duple or quadruple)
+/// or "3/4" (triple), or is absent; a stored value may read "2/4", "5/4",
+/// "6/4" or "7/4". The other fields keep their meaning and units.
 pub const ANALYSIS_SCHEMA_VERSION: u32 = 8;
 
 /// STFT hop length (samples) used by the main analysis pass. All frame-index
@@ -2072,7 +2075,17 @@ pub struct TrackAnalysis {
     /// track with one tempo still reads about 0.01: the beat positions carry
     /// an error of a fraction of a frame.
     pub tempo_variability: Option<Float>,
+    /// "4/4" or "3/4": whether the beats group in twos or in threes
+    /// (`feature::rhythm::meter_from_beats`). "4/4" stands for every duple and
+    /// quadruple metre (2/4 included), "3/4" for every triple one (6/8
+    /// included); metres of five or seven beats get one of the two. `None`
+    /// when fewer than 18 beats are usable (at least 20 tracked beats).
     pub time_signature: Option<String>,
+    /// How far the duple and the triple readings are apart: |mean M| capped
+    /// at 1, where M is the beat-lag autocorrelation of the beat descriptors
+    /// at lags 2, 4, 8 minus that at lags 3, 6. Near 0 = undecided; a high
+    /// value is not a proof (a bare metronome can read 0.3). `Some` exactly
+    /// when `time_signature` is.
     pub time_signature_confidence: Option<Float>,
 
     // -- Tonal (extended or full) --
@@ -3888,25 +3901,13 @@ fn analyze_signal_inner(
 
     let (time_signature, time_signature_confidence) = if extended && config.wants("time_signature")
     {
-        let win = 384.min(oenv_padded.len());
-        if win >= 4 {
-            match crate::feature::rhythm::metrogram(
-                None,
-                Some(oenv_padded.view()),
-                sr,
-                hop_length,
-                win,
-                None,
-            ) {
-                Ok(mg) => {
-                    let (label, conf) =
-                        crate::feature::rhythm::detect_time_signature(mg.view(), None);
-                    (Some(label), Some(conf))
-                }
-                Err(_) => (None, None),
-            }
-        } else {
-            (None, None)
+        let beat_times: Vec<f64> = beats
+            .iter()
+            .map(|&frame| frame as f64 * hop_length as f64 / sr as f64)
+            .collect();
+        match crate::feature::rhythm::meter_from_beats(y, sr, &beat_times) {
+            Some((n, confidence)) => (Some(format!("{n}/4")), Some(confidence)),
+            None => (None, None),
         }
     } else {
         (None, None)
@@ -3918,8 +3919,7 @@ fn analyze_signal_inner(
     // Runs in Full mode or when requested via features=["beatgrid"].
     // ================================================================
 
-    // Bars are always 4 beats: the meter detector is not reliable enough to
-    // set the bar length (it reads plain four-on-the-floor as "2/4").
+    // Bars are always 4 beats: `time_signature` does not set the bar length.
     // shortcut: 3/4 material gets a 4/4 grid; take the bar length from
     // `time_signature` once its detector is validated.
     let beats_per_bar = crate::beatgrid::DEFAULT_BEATS_PER_BAR;
@@ -6277,11 +6277,20 @@ mod tests {
     }
 
     // Bars and regularity are computed in 4/4 whether or not `time_signature`
-    // runs in the same pass (it always does in Full): the meter detector reads
-    // four-on-the-floor as "2/4" and does not set the bar length.
+    // runs in the same pass (it always does in Full): the meter detector does
+    // not set the bar length.
     #[test]
     fn beat_grid_and_regularity_do_not_follow_the_detected_meter() {
-        let y = four_on_the_floor(22050, 128.0, 16);
+        // An accent on every third beat, so the detector answers "3/4" and a
+        // grid that followed it would differ from the 4-beat one.
+        let mut y = four_on_the_floor(22050, 128.0, 16);
+        let beat = (60.0 / 128.0 * 22050.0) as usize;
+        for onset in (0..y.len() - beat).step_by(3 * beat) {
+            for k in 0..beat / 4 {
+                let t = k as Float / 22050.0;
+                y[onset + k] += (2.0 * PI * 110.0 * t).sin() * (-t / 0.045).exp();
+            }
+        }
         let alone = analyze_signal(
             y.view(),
             22050,
@@ -6295,7 +6304,7 @@ mod tests {
             full(),
         ] {
             let r = analyze_signal(y.view(), 22050, &with_meter).unwrap();
-            assert!(r.time_signature.is_some(), "the detector must have run");
+            assert_eq!(r.time_signature.as_deref(), Some("3/4"));
             assert_eq!(r.downbeats, alone.downbeats);
             assert_eq!(r.rhythmic_regularity, alone.rhythmic_regularity);
             assert_eq!(r.rhythmic_regularity_label, alone.rhythmic_regularity_label);
@@ -7305,7 +7314,7 @@ mod tests {
             assert!(r.aggression_confidence.is_some(), "{sr}");
             assert!(r.provenance.aggression_model_id.is_some(), "{sr}");
             assert!(r.provenance.requested_features.is_none(), "{sr}");
-            assert!(r.time_signature_confidence.is_some(), "full-only kept");
+            assert!(r.tempo_curve.is_some(), "full-only kept");
             assert!(r.embedding.is_some(), "opt-in kept");
         }
     }

@@ -392,6 +392,184 @@ pub fn detect_time_signature(
     (label, confidence)
 }
 
+/// Beats one autocorrelation window of `meter_from_beats` spans.
+const METER_INTEGRATION: usize = 10;
+/// Longest beat lag `meter_from_beats` compares.
+const METER_MAX_LAG: usize = 8;
+/// Fewest usable beats: one integration window shifted by the longest lag.
+const METER_MIN_BEATS: usize = METER_INTEGRATION + METER_MAX_LAG;
+/// Beat lags at which a duple or quadruple metre repeats.
+const METER_DUPLE_LAGS: [usize; 3] = [2, 4, 8];
+/// Beat lags at which a triple metre repeats.
+const METER_TRIPLE_LAGS: [usize; 2] = [3, 6];
+/// Frames are 1/50 s long (20 ms) and half overlapped (a 10 ms hop).
+const METER_FRAME_RATE: u32 = 50;
+/// Half of the 120 ms region around a beat its onset descriptors are read from.
+const METER_ONSET_HALF_WIDTH_SEC: f64 = 0.06;
+/// Band of the low-frequency energy descriptor, Hz (inclusive).
+const METER_LOW_BAND_HZ: std::ops::RangeInclusive<f64> = 50.0..=100.0;
+/// Floor of the power spectrum under the flatness logarithm.
+const METER_POWER_FLOOR: f64 = 1e-12;
+
+/// Decide between a duple and a triple metre from the recurrence of
+/// beat-segment descriptors (Gouyon & Herrera, "Determination of the meter of
+/// musical audio signals: Seeking recurrences in beat segment descriptors",
+/// AES 114th Convention, 2003).
+///
+/// Every interior beat gets four descriptors: the spread of the frame energy
+/// over the segment between the midpoints to its neighbours, the mean spectral
+/// flatness and the mean 50-100 Hz energy within 60 ms of the beat, and the
+/// temporal centroid of the segment's energy. Each descriptor series is
+/// standardised and autocorrelated over beat lags in 10-beat windows;
+/// `M = mean(acf[2, 4, 8]) - mean(acf[3, 6])`, averaged over the descriptors.
+///
+/// Returns `(beats per bar, confidence)`: `4` when `M >= 0`, which stands for
+/// the duple and quadruple metres (2/4, 4/4), `3` otherwise, which stands for
+/// the triple ones (3/4, and 6/8 tracked at the eighth note); the confidence
+/// is `|M|` capped at 1. `beat_times` are beat positions in seconds,
+/// increasing.
+///
+/// The answer is as good as the beats: the descriptors compare whole beats, so
+/// a tracker on another metrical level changes what recurs. A pulse whose
+/// beats all sound alike (a bare metronome) differs between beats only by how
+/// the frames fall on them, and still gets an answer with a non-zero
+/// confidence.
+///
+/// `None` when the signal is shorter than one 20 ms frame or `sr` is below
+/// 100 Hz, when `beat_times` is not strictly increasing, when fewer than 18
+/// beats yield descriptors (the first and the last
+/// beat never do, and a beat is skipped when its segment is silent, holds
+/// fewer than two frames or has no frame within 60 ms), or when `M` is not
+/// finite.
+pub fn meter_from_beats(
+    y: ArrayView1<Float>,
+    sr: u32,
+    beat_times: &[f64],
+) -> Option<(usize, Float)> {
+    let frame = (sr / METER_FRAME_RATE) as usize;
+    let hop = frame / 2;
+    if hop == 0 || y.len() < frame {
+        return None;
+    }
+    // Also rejects a NaN: an unordered list would pair beats with wrong segments.
+    if beat_times.windows(2).any(|w| !(w[1] > w[0])) {
+        return None;
+    }
+    let sr = sr as f64;
+    let n_frames = 1 + (y.len() - frame) / hop;
+
+    let window: Vec<f64> = (0..frame)
+        .map(|n| 0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / (frame - 1) as f64).cos())
+        .collect();
+    let low_bins: Vec<usize> = (0..=frame / 2)
+        .filter(|&bin| METER_LOW_BAND_HZ.contains(&(bin as f64 * sr / frame as f64)))
+        .collect();
+    // f64 like the reference; `core::fft` is single precision.
+    let fft = realfft::RealFftPlanner::<f64>::new().plan_fft_forward(frame);
+    let mut windowed = fft.make_input_vec();
+    let mut spectrum = fft.make_output_vec();
+    let mut scratch = fft.make_scratch_vec();
+
+    // Per frame: energy, spectral flatness, low-band energy, centre time.
+    let mut energy = Vec::with_capacity(n_frames);
+    let mut flatness = Vec::with_capacity(n_frames);
+    let mut low = Vec::with_capacity(n_frames);
+    let mut centres = Vec::with_capacity(n_frames);
+    for k in 0..n_frames {
+        let start = k * hop;
+        let mut sum_sq = 0.0;
+        for (i, slot) in windowed.iter_mut().enumerate() {
+            let x = y[start + i] as f64;
+            sum_sq += x * x;
+            *slot = x * window[i];
+        }
+        fft.process_with_scratch(&mut windowed, &mut spectrum, &mut scratch)
+            .ok()?;
+        let (mut log_sum, mut power_sum) = (0.0, 0.0);
+        for c in &spectrum {
+            let p = c.norm_sqr().max(METER_POWER_FLOOR);
+            log_sum += p.ln();
+            power_sum += p;
+        }
+        let n_bins = spectrum.len() as f64;
+        energy.push(sum_sq);
+        flatness.push((log_sum / n_bins).exp() / (power_sum / n_bins));
+        low.push(low_bins.iter().map(|&b| spectrum[b].norm_sqr()).sum::<f64>());
+        centres.push((start as f64 + frame as f64 / 2.0) / sr);
+    }
+
+    let mean_std = |v: &[f64]| {
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / v.len() as f64;
+        (mean, var.sqrt())
+    };
+
+    let mut rows: Vec<[f64; 4]> = Vec::new();
+    for w in beat_times.windows(3) {
+        let beat = w[1];
+        let lo = 0.5 * (w[0] + beat);
+        let hi = 0.5 * (beat + w[2]);
+        let segment = centres.partition_point(|&c| c < lo)..centres.partition_point(|&c| c < hi);
+        let onset = centres.partition_point(|&c| c < beat - METER_ONSET_HALF_WIDTH_SEC)
+            ..centres.partition_point(|&c| c <= beat + METER_ONSET_HALF_WIDTH_SEC);
+        let i0 = ((lo * sr) as usize).min(y.len());
+        let i1 = ((hi * sr) as usize).min(y.len());
+        if segment.len() < 2 || onset.is_empty() || i1 <= i0 {
+            continue;
+        }
+        let (mut total, mut moment) = (0.0, 0.0);
+        for (i, &x) in y.slice(ndarray::s![i0..i1]).iter().enumerate() {
+            let e = (x as f64).powi(2);
+            total += e;
+            moment += i as f64 * e;
+        }
+        if total <= 0.0 {
+            continue;
+        }
+        let onset_len = onset.len() as f64;
+        rows.push([
+            mean_std(&energy[segment]).1,
+            flatness[onset.clone()].iter().sum::<f64>() / onset_len,
+            low[onset].iter().sum::<f64>() / onset_len,
+            moment / total / (i1 - i0) as f64,
+        ]);
+    }
+    if rows.len() < METER_MIN_BEATS {
+        return None;
+    }
+
+    let n_windows = rows.len() - METER_MIN_BEATS + 1;
+    let mut m = 0.0;
+    for d in 0..4 {
+        let column: Vec<f64> = rows.iter().map(|r| r[d]).collect();
+        let (mean, std) = mean_std(&column);
+        let std = if std == 0.0 { 1.0 } else { std };
+        let x: Vec<f64> = column.iter().map(|v| (v - mean) / std).collect();
+
+        // Normalised autocorrelation per lag, summed over the windows.
+        let mut acf = [0.0; METER_MAX_LAG + 1];
+        for s in 0..n_windows {
+            let a = &x[s..s + METER_INTEGRATION];
+            let a_sq: f64 = a.iter().map(|v| v * v).sum();
+            for (lag, slot) in acf.iter_mut().enumerate() {
+                let b = &x[s + lag..s + lag + METER_INTEGRATION];
+                let den = (a_sq * b.iter().map(|v| v * v).sum::<f64>()).sqrt();
+                if den > 0.0 {
+                    *slot += a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>() / den;
+                }
+            }
+        }
+        let mean_at = |lags: &[usize]| {
+            lags.iter().map(|&l| acf[l]).sum::<f64>() / (lags.len() * n_windows) as f64
+        };
+        m += (mean_at(&METER_DUPLE_LAGS) - mean_at(&METER_TRIPLE_LAGS)) / 4.0;
+    }
+    if !m.is_finite() {
+        return None;
+    }
+    Some((if m >= 0.0 { 4 } else { 3 }, m.abs().min(1.0) as Float))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +744,48 @@ mod tests {
             (confidence - 0.5).abs() < 1e-6,
             "confidence {confidence}, expected 0.5"
         );
+    }
+
+    #[test]
+    fn test_meter_from_beats_tells_triple_from_duple_drums() {
+        let sr = 22050_u32;
+        let beat = sr as usize / 2; // 120 BPM
+        let n_beats = 120; // 60 s
+        let drums = |pattern: &[bool]| {
+            let mut state = 0x2545_f491_u32;
+            let mut y = Array1::<Float>::zeros(n_beats * beat);
+            for k in 0..n_beats {
+                let kick = pattern[k % pattern.len()];
+                for i in 0..beat / 2 {
+                    let t = i as Float / sr as Float;
+                    y[k * beat + i] = if kick {
+                        (2.0 * PI * 60.0 * t).sin() * (-t / 0.1).exp()
+                    } else {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        0.7 * ((state >> 16) as Float / 32_768.0 - 1.0) * (-t / 0.03).exp()
+                    };
+                }
+            }
+            y
+        };
+        let beat_times: Vec<f64> = (0..n_beats).map(|k| k as f64 * 0.5).collect();
+
+        let triple = drums(&[true, false, false]);
+        let (meter, confidence) = meter_from_beats(triple.view(), sr, &beat_times).unwrap();
+        assert_eq!(meter, 3, "kick, snare, snare (confidence {confidence})");
+        assert_eq!(confidence, 1.0, "a clean triple pattern reaches the cap");
+
+        // The value, not only the decision: one broken descriptor moves the
+        // mean of the four M by about a quarter.
+        let duple = drums(&[true, false, true, false]);
+        let (meter, confidence) = meter_from_beats(duple.view(), sr, &beat_times).unwrap();
+        assert_eq!(meter, 4, "kick, snare, kick, snare (confidence {confidence})");
+        assert!((confidence - 0.9985).abs() < 1e-3, "{confidence}");
+
+        assert_eq!(meter_from_beats(duple.view(), sr, &beat_times[..10]), None);
+
+        let mut unordered = beat_times.clone();
+        unordered.swap(40, 41);
+        assert_eq!(meter_from_beats(duple.view(), sr, &unordered), None);
     }
 }

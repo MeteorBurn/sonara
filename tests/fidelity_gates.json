@@ -130,8 +130,8 @@
     {
       "path": "sonara/src/feature/rhythm.rs",
       "base_sha256": "fa117e91244a5b95cadde6aa71be473b7cae848d8452f81197b23acc6e7f0694",
-      "head_sha256": "e1d6e0853adedd2cc8a1ca6d6b13649152773def2abb389ac53405282c09f184",
-      "reason": "metrogram locates each bin's subharmonic once per ratio instead of once per frame (2026-11-26): the same arithmetic in the same order, pinned by a unit test that requires exact equality with the per-frame formula; tempo code is untouched and no analysis value changes"
+      "head_sha256": "d2bf636ca417c1260cc523241cbc019b138e480aab3577e4f0e0c46e6ab7b351",
+      "reason": "metrogram locates each bin's subharmonic once per ratio instead of once per frame (2026-11-26): the same arithmetic in the same order, pinned by a unit test that requires exact equality with the per-frame formula. New public meter_from_beats (2026-11-27): the duple-or-triple decision of Gouyon and Herrera (AES 114, 2003) from the recurrence of beat-segment descriptors; the pipeline's time_signature now comes from it instead of metrogram and detect_time_signature, which are untouched. Tempo code is untouched: on 60 real tracks only time_signature and time_signature_confidence differ. The Rust code gives the answer of the NumPy reference on 353 of 353 signals (confidence within 0.0003). Measured with that reference on samples of public sets with a known metre: quadruple music is recognised in 90-97% of the clips (METER2800, GiantSteps, FMA, Groove MIDI), triple music in 60-77% (METER2800); the routine it replaces was right on 33% of 357 METER2800 clips"
     },
     {
       "path": "sonara/src/beat.rs",

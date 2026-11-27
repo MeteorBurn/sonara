@@ -620,7 +620,7 @@ Apple M4 и не переносится на другое железо.
 
 | Константа / поле | Значение в 0.3.7 | Что инвалидирует |
 | --- | --- | --- |
-| `ANALYSIS_SCHEMA_VERSION` | 6; 7 с 2026-10-02; 8 с 2026-11-26 | любое изменение смысла существующего поля; v3 — vocalness v2 и перекалибровка acousticness/danceability, v5 — агрессия v3, v6 — каноническая частота агрессии, v7 — доли по огибающей ниже 3.2 кГц, `bpm`/`bpm_raw` по их периоду, v8 — нота «до» в аккордах, такт из 4 долей у `downbeats` и `rhythmic_regularity*`, `loudness_lufs` не зависит от длины сигнала, `spectral_flatness_*` и `spectral_contrast_*` считаются только по кадрам со звуком, `tempo_curve`, `tempo_variability` и `grid_stability` — по уточнённым положениям долей |
+| `ANALYSIS_SCHEMA_VERSION` | 6; 7 с 2026-10-02; 8 с 2026-11-26 | любое изменение смысла существующего поля; v3 — vocalness v2 и перекалибровка acousticness/danceability, v5 — агрессия v3, v6 — каноническая частота агрессии, v7 — доли по огибающей ниже 3.2 кГц, `bpm`/`bpm_raw` по их периоду, v8 — нота «до» в аккордах, такт из 4 долей у `downbeats` и `rhythmic_regularity*`, `loudness_lufs` не зависит от длины сигнала, `spectral_flatness_*` и `spectral_contrast_*` считаются только по кадрам со звуком, `tempo_curve`, `tempo_variability` и `grid_stability` — по уточнённым положениям долей, `time_signature` — только «4/4» или «3/4» по повторяемости описателей долей |
 | `SIMILARITY_VERSION` | 2 | эмбеддинги, все жанровые/вокальные модели, legacy-агрессия |
 | `SIMILARITY_PROFILE_TIMBRE_VERSION` | 1 | только результаты сравнений в профиле `timbre`, не векторы |
 | `FINGERPRINT_VERSION` | 1 | хранимые отпечатки |

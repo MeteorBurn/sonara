@@ -101,8 +101,8 @@ fingerprint version where those are consumed). sonagram's current floor is
 
 ### Schema 8: chords and the bar length of the beat grid (2026-11-26)
 
-Every field keeps its meaning and units; these stored schema-7 values differ
-from a fresh run:
+Every field but `time_signature` keeps its meaning and units; these stored
+schema-7 values differ from a fresh run:
 
 - `chord_sequence`, `chord_events`, `chord_change_rate`, `predominant_chord`.
   The pitch-class profile behind the chords weights a spectral peak by its
@@ -130,6 +130,22 @@ from a fresh run:
   are unchanged.
 - `downbeats` and `rhythmic_regularity*`, in a record whose request also
   computed `time_signature`. Both always use a 4-beat bar.
+- `time_signature` and `time_signature_confidence`. The field answers one
+  question, whether the beats group in twos or in threes, from the recurrence
+  of beat-segment descriptors over the tracked beats (Gouyon & Herrera, AES
+  114, 2003). It is `"4/4"` for every duple and quadruple metre (2/4 is not
+  told from 4/4) and `"3/4"` for every triple one (6/8 included); metres of
+  five or seven beats are not recognised and get one of the two answers. The
+  confidence is `min(|M|, 1)`, the gap between the duple and the triple
+  reading; a low value means the grouping is not expressed, a high one is not
+  a proof (a pulse whose beats all sound alike gets an arbitrary answer with a
+  non-zero confidence). Both keys are absent when fewer than 18 beats yield
+  descriptors (at least 20 tracked beats). A
+  stored schema-7 value comes from another routine and may read `"2/4"`,
+  `"5/4"`, `"6/4"` or `"7/4"`. Measured on samples of public sets with a known
+  metre: quadruple music is recognised in 90-97 % of the clips (METER2800,
+  GiantSteps, FMA, Groove MIDI), triple music in 60-77 % (METER2800). The beat
+  grid and `rhythmic_regularity*` do not read it.
 - `tempo_curve`, `tempo_variability` and `grid_stability`. The intervals
   between beats are measured between the beats' sub-frame positions (the
   vertex of a parabola through the tracker's score, within half a frame), not
