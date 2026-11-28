@@ -136,11 +136,24 @@ pub fn load_with_tags(
         });
     }
 
-    // Keep the requested frames and downmix them inside the decoded buffer, so
-    // no second copy of the file lives next to it. The channel sum starts from
-    // zero and runs in channel order, which is what `to_mono` computes.
+    // Keep the requested frames.
     samples.truncate(end_sample * n_channels);
     samples.drain(..offset_samples * n_channels);
+    let mut audio = downmix_interleaved(samples, n_channels);
+
+    // Resample if needed
+    let target_sr = if sr == 0 { native_sr } else { sr };
+    if target_sr != native_sr {
+        audio = resample(audio.view(), native_sr, target_sr)?;
+    }
+
+    Ok((audio, target_sr, tags))
+}
+
+/// Downmix interleaved frames inside their own buffer, so no second copy of
+/// the file lives next to it. The channel sum starts from zero and runs in
+/// channel order, which is what [`to_mono`] computes.
+pub(crate) fn downmix_interleaved(mut samples: Vec<Float>, n_channels: usize) -> Array1<Float> {
     if n_channels > 1 {
         let n_samples = samples.len() / n_channels;
         for i in 0..n_samples {
@@ -153,45 +166,12 @@ pub fn load_with_tags(
     }
     // The array keeps the buffer's whole capacity: give back what is unused.
     samples.shrink_to_fit();
-    let mut audio = Array1::from_vec(samples);
-
-    // Resample if needed
-    let target_sr = if sr == 0 { native_sr } else { sr };
-    if target_sr != native_sr {
-        audio = resample(audio.view(), native_sr, target_sr)?;
-    }
-
-    Ok((audio, target_sr, tags))
-}
-
-/// Decode a whole file without resampling or downmixing: channels as
-/// (n_channels, n_samples) at the file's own sample rate, plus the tags
-/// [`load_with_tags`] would return.
-pub fn load_channels_with_tags(
-    path: &Path,
-    want_tags: bool,
-) -> Result<(Array2<Float>, u32, Option<TrackTags>)> {
-    let (samples, native_sr, n_channels, tags) = decode_interleaved(path, want_tags)?;
-    let n_samples = samples.len() / n_channels;
-    if n_samples == 0 {
-        // Same error `load_with_tags` reports for an empty file.
-        return Err(SonaraError::InvalidParameter {
-            param: "offset",
-            reason: "offset 0s exceeds file duration 0s".into(),
-        });
-    }
-    let mut channels = Array2::<Float>::zeros((n_channels, n_samples));
-    for (i, frame) in samples.chunks_exact(n_channels).enumerate() {
-        for (ch, &v) in frame.iter().enumerate() {
-            channels[(ch, i)] = v;
-        }
-    }
-    Ok((channels, native_sr, tags))
+    Array1::from_vec(samples)
 }
 
 /// Decode a file to interleaved samples at its native rate:
 /// (samples, sample rate, channel count, tags).
-fn decode_interleaved(
+pub(crate) fn decode_interleaved(
     path: &Path,
     want_tags: bool,
 ) -> Result<(Vec<Float>, u32, usize, Option<TrackTags>)> {
@@ -1844,33 +1824,6 @@ data\x02\x00\x00\x00\x34\x12"[..];
             "the no-metadata probe must not read a trailing ID3v1 revision"
         );
         drop(format);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn test_load_channels_keeps_rate_and_channel_order() {
-        let path =
-            std::env::temp_dir().join(format!("sonara-load-channels-{}.wav", std::process::id()));
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: 48_000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
-        for i in 0..100i16 {
-            writer.write_sample(i * 100).unwrap(); // left: ramp up
-            writer.write_sample(-i * 50).unwrap(); // right: ramp down
-        }
-        writer.finalize().unwrap();
-
-        let (channels, sr, tags) = load_channels_with_tags(&path, true).unwrap();
-        assert_eq!((channels.dim(), sr, tags), ((2, 100), 48_000, None));
-        assert_abs_diff_eq!(channels[(0, 10)], 1000.0 / 32768.0, epsilon = 1e-7);
-        assert_abs_diff_eq!(channels[(1, 10)], -500.0 / 32768.0, epsilon = 1e-7);
-        // Downmixing the channels reproduces the mono loader bit for bit.
-        let (mono, mono_sr) = load(&path, 0, true, 0.0, 0.0).unwrap();
-        assert_eq!((to_mono(channels.view()), sr), (mono, mono_sr));
         std::fs::remove_file(path).unwrap();
     }
 

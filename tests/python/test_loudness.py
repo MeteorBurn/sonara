@@ -2,8 +2,8 @@
 """Tests for the opt-in loudness / gain metrics.
 
 Covers the `features=["loudness"]` group: true peak (dBTP), ReplayGain-style
-track gain, short-term loudness curve, momentary max, and EBU R128 loudness
-range (LRA). Uses only synthetic signals — no audio files required.
+track gain, short-term loudness curve, momentary and short-term max, and EBU
+R128 loudness range (LRA). Uses only synthetic signals — no audio files required.
 
 Runs standalone (`python test_loudness.py`) or under pytest.
 """
@@ -43,6 +43,7 @@ LOUDNESS_FIELDS = [
     "replaygain_db",
     "loudness_curve",
     "loudness_momentary_max_db",
+    "loudness_short_term_max_db",
     "loudness_range_lu",
 ]
 

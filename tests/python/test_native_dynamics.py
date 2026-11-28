@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for the file-only loudness / dynamics features.
+"""Tests for the loudness / dynamics features measured on the channels.
 
-Covers `features=["ebur128", "native_dynamics", "amplitude_envelope"]`: EBU R128
-loudness, sample peak, crest factor and the peak envelope, measured by
-`analyze_file` / `analyze_batch` on the file's own channels and sample rate.
+Covers `features=["loudness", "native_dynamics", "amplitude_envelope"]`: EBU R128
+loudness, sample peak, crest factor and the peak envelope, measured on the
+input's own channels and sample rate, for a file and for a signal alike.
 Writes a synthetic stereo WAV — no audio fixtures required.
 
 Runs standalone (`python test_native_dynamics.py`) or under pytest.
@@ -39,17 +39,17 @@ def check(name, fn):
 FILE_SR = 48000
 SECONDS = 5
 N = FILE_SR * SECONDS
-FEATURES = ["ebur128", "native_dynamics", "amplitude_envelope"]
+FEATURES = ["loudness", "native_dynamics", "amplitude_envelope"]
 KEYS = {
-    "ebur128": [
-        "ebur128_integrated_lufs",
-        "ebur128_momentary_max_lufs",
-        "ebur128_short_term_max_lufs",
-        "ebur128_range_lu",
-        "ebur128_true_peak_dbtp",
+    "loudness": [
+        "true_peak_db",
+        "replaygain_db",
+        "loudness_momentary_max_db",
+        "loudness_short_term_max_db",
+        "loudness_range_lu",
+        "loudness_curve",
     ],
     "native_dynamics": [
-        "native_sample_rate",
         "sample_peak_dbfs",
         "crest_factor_db",
         "crest_factor_frame_mean_db",
@@ -63,10 +63,15 @@ KEYS = {
 ALL_KEYS = [key for name in FEATURES for key in KEYS[name]]
 
 
-def _write_wav(path, amplitude):
-    """16-bit stereo 48 kHz, 1 kHz sine in phase on both channels."""
+def _pcm(amplitude):
+    """16-bit 1 kHz sine at 48 kHz, one channel."""
     tone = amplitude * np.sin(2 * np.pi * 1000.0 * np.arange(N) / FILE_SR)
-    pcm = np.round(tone * 32768.0).astype("<i2")
+    return np.round(tone * 32768.0).astype("<i2")
+
+
+def _write_wav(path, amplitude):
+    """16-bit stereo 48 kHz, the sine in phase on both channels."""
+    pcm = _pcm(amplitude)
     with wave.open(path, "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
@@ -79,18 +84,21 @@ atexit.register(shutil.rmtree, _dir, True)
 WAV = os.path.join(_dir, "tone.wav")
 SILENT_WAV = os.path.join(_dir, "silence.wav")
 # EBU Tech 3341 case: a 1 kHz stereo sine peaking at -23 dBFS reads -23.0 LUFS.
-_write_wav(WAV, 10.0 ** (-23.0 / 20.0))
+AMPLITUDE = 10.0 ** (-23.0 / 20.0)
+_write_wav(WAV, AMPLITUDE)
 _write_wav(SILENT_WAV, 0.0)
 
 
 def test_absent_by_default():
-    """Opt-in: compact and playlist leave these keys out, full measures a file."""
+    """Opt-in: compact and playlist leave these keys out, full measures them."""
     for mode in ("compact", "playlist"):
         r = sonara.analyze_file(WAV, mode=mode)
         for key in ALL_KEYS:
             assert key not in r, f"{key} should be absent in mode={mode} (opt-in)"
+        # What the channel features were measured on is recorded in every mode.
+        assert (r["native_sample_rate"], r["native_channels"]) == (FILE_SR, 2)
     full = sonara.analyze_file(WAV, mode="full")
-    missing = [key for key in ALL_KEYS + ["native_sample_rate"] if key not in full]
+    missing = [key for key in ALL_KEYS if key not in full]
     assert not missing, f"mode=full misses {missing}"
 
 
@@ -98,12 +106,15 @@ def test_reference_tone_values():
     r = sonara.analyze_file(WAV, features=FEATURES)
     for key in ALL_KEYS:
         assert key in r, f"{key} missing"
-    assert abs(r["ebur128_integrated_lufs"] + 23.0) < 0.1, r["ebur128_integrated_lufs"]
-    for key in KEYS["ebur128"]:
+    assert abs(r["loudness_lufs"] + 23.0) < 0.1, r["loudness_lufs"]
+    for key in KEYS["loudness"][:-1]:
         assert isinstance(r[key], float) and np.isfinite(r[key]), (key, r[key])
-    assert r["ebur128_range_lu"] >= 0.0
+    assert r["loudness_range_lu"] >= 0.0
+    # 3 s windows at a 1 s hop over 5 s.
+    assert len(r["loudness_curve"]) == SECONDS - 2, r["loudness_curve"]
     assert r["native_sample_rate"] == FILE_SR
     assert isinstance(r["native_sample_rate"], int)
+    assert r["native_channels"] == 2 and isinstance(r["native_channels"], int)
     assert abs(r["sample_peak_dbfs"] + 23.0) < 0.05, r["sample_peak_dbfs"]
     assert abs(r["crest_factor_db"] - 3.01) < 0.05, r["crest_factor_db"]
     assert abs(r["crest_factor_frame_mean_db"] - 3.01) < 0.1, r["crest_factor_frame_mean_db"]
@@ -124,34 +135,64 @@ def test_each_feature_emits_only_its_keys():
     for name in FEATURES:
         r = sonara.analyze_file(WAV, features=[name])
         present = {key for key in ALL_KEYS if key in r}
-        # Any of the three marks the record as measured from a file.
-        assert present == set(KEYS[name]) | {"native_sample_rate"}, (name, present)
+        assert present == set(KEYS[name]), (name, present)
 
 
 def test_other_keys_unchanged():
-    """Requesting the file-only features must not move any other value."""
-    base = sonara.analyze_file(WAV, features=["rms", "loudness"])
-    with_native = sonara.analyze_file(WAV, features=["rms", "loudness"] + FEATURES)
+    """Requesting the channel features must not move any other value."""
+    base = sonara.analyze_file(WAV, features=["rms"])
+    with_native = sonara.analyze_file(WAV, features=["rms"] + FEATURES)
     skip = set(ALL_KEYS) | {"provenance"}
     assert set(with_native) - set(ALL_KEYS) == set(base)
     for key in set(base) - skip:
         assert np.all(with_native[key] == base[key]), key
 
 
-def test_signal_never_has_keys():
-    """A bare signal has no file channels or native rate."""
-    t = np.arange(2 * 22050) / 22050
-    y = (0.3 * np.sin(2 * np.pi * 440.0 * t)).astype(np.float32)
-    r = sonara.analyze_signal(y, sr=22050, features=FEATURES)
-    for key in ALL_KEYS:
-        assert key not in r, f"{key} must be absent for analyze_signal"
+def _stereo_signal():
+    """The samples of `WAV` as a float32 array shaped (channels, samples)."""
+    channel = (_pcm(AMPLITUDE) / 32768.0).astype(np.float32)
+    return np.stack([channel, channel])
+
+
+def test_stereo_signal_is_measured_on_its_channels():
+    """A (channels, samples) signal gives what the file with those channels gives."""
+    features = FEATURES + ["stereo_field"]
+    r = sonara.analyze_signal(_stereo_signal(), sr=FILE_SR, target_sr=22050, features=features)
+    assert r["native_channels"] == 2
+    assert r["native_sample_rate"] == FILE_SR
+    assert r["provenance"]["sample_rate"] == 22050
+    # Two channels read -23 LUFS; their mono mix alone would read -26.
+    assert abs(r["loudness_lufs"] + 23.0) < 0.1, r["loudness_lufs"]
+    from_file = sonara.analyze_file(WAV, sr=22050, features=features)
+    for key in ALL_KEYS + ["loudness_lufs", "stereo_side_ratio", "stereo_correlation_mean"]:
+        assert r[key] == from_file[key], key
+
+
+def test_samples_by_channels_signal_is_rejected():
+    """(samples, channels), the layout of other libraries, is an error, not garbage."""
+    try:
+        sonara.analyze_signal(_stereo_signal().T, sr=FILE_SR)
+    except ValueError as e:
+        assert "(channels, samples)" in str(e), e
+    else:
+        raise AssertionError("a (samples, channels) array was accepted")
+    # An empty signal is reported as empty, not as one to transpose.
+    for empty in (np.zeros(0, dtype=np.float32), np.zeros((2, 0), dtype=np.float32)):
+        try:
+            sonara.analyze_signal(empty, sr=FILE_SR)
+        except ValueError as e:
+            assert "at least one sample" in str(e), e
+        else:
+            raise AssertionError("an empty signal was accepted")
 
 
 def test_silence_omits_undefined_levels():
     r = sonara.analyze_file(SILENT_WAV, features=FEATURES)
-    for key in KEYS["ebur128"] + KEYS["native_dynamics"][1:]:
+    for key in KEYS["loudness"][:-1] + KEYS["native_dynamics"]:
         assert key not in r, f"{key} is undefined for digital silence"
-    assert r["native_sample_rate"] == FILE_SR
+    # The always-on loudness and the curve sit at the absolute gate.
+    assert r["loudness_lufs"] == -70.0
+    assert r["loudness_curve"] == [-70.0] * (SECONDS - 2)
     assert r["amplitude_envelope"] and not any(r["amplitude_envelope"])
 
 
@@ -180,12 +221,13 @@ def test_augment_adds_keys_from_audio():
 
 
 TESTS = [
-    ("file-only keys absent by default", test_absent_by_default),
+    ("channel groups absent by default", test_absent_by_default),
     ("-23 dBFS stereo tone: LUFS, peak, crest", test_reference_tone_values),
     ("amplitude envelope grid and values", test_envelope_grid),
     ("each feature emits only its keys", test_each_feature_emits_only_its_keys),
     ("other keys unchanged by the request", test_other_keys_unchanged),
-    ("analyze_signal never has the keys", test_signal_never_has_keys),
+    ("stereo signal is measured on its channels", test_stereo_signal_is_measured_on_its_channels),
+    ("(samples, channels) signal is rejected", test_samples_by_channels_signal_is_rejected),
     ("silence omits undefined levels", test_silence_omits_undefined_levels),
     ("analyze_batch matches analyze_file", test_batch_matches_file),
     ("augment adds the keys from the audio", test_augment_adds_keys_from_audio),
@@ -193,7 +235,7 @@ TESTS = [
 
 
 if __name__ == "__main__":
-    print("File-only loudness / dynamics")
+    print("Loudness / dynamics on the channels")
     for name, fn in TESTS:
         check(name, fn)
     print(f"\n  RESULTS: {passed} PASSED, {failed} FAILED")

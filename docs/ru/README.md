@@ -32,16 +32,19 @@ SONARA — библиотека анализа музыки на Rust с Python-
 ## Архитектура и путь сигнала
 
 ```text
-Файл ── декодирование, моно, ресэмплинг ─┐
-                                      ├─ analyze_signal + AnalysisConfig
-Массив f32 + фактический sample rate ──┘
+Файл ── декодирование ───────────────────┐
+                                      ├─ analyze_channels + AnalysisConfig
+Массив f32 (моно или каналы) + его sr ──┘
     │
+    ├─ по каналам на их частоте: громкость BS.1770 / R128, пик, крест-фактор,
+    │  огибающая, стерео
+    ├─ сведение в моно → ресэмплинг до частоты анализа
     ├─ кадровый проход: Hann → FFT → модуль / мощность
     │     ├─ mel → log-mel → MFCC и атаки → темп / удары
     │     ├─ chroma → тональность
     │     ├─ спектральные пики → HPCP / аккорды / диссонанс
     │     └─ центроид / bandwidth / rolloff / flatness / contrast
-    ├─ временные измерения: RMS, ZCR, K-weighting / LUFS
+    ├─ временные измерения: RMS, ZCR
     ├─ опциональные траектории, структура, fingerprint, модели
     └─ TrackAnalysis + provenance
           ├─ типизированный результат Rust
@@ -93,8 +96,9 @@ Rust-ядро не зависит от PyO3. Крейтом `sonara-python` ре
 | [beatgrid.rs](../../sonara/src/beatgrid.rs) | Якорь сетки, начала тактов и устойчивость междолевых интервалов | [Ритм](rhythm-tonality.md) |
 | [rhythmic_regularity.rs](../../sonara/src/rhythmic_regularity.rs) | Распределение атак внутри метрической сетки и отказ при недостатке данных | [Ритм](rhythm-tonality.md) |
 | [tonal.rs](../../sonara/src/tonal.rs) | HPCP, распознавание аккордов и сенсорный диссонанс | [Гармония](rhythm-tonality.md) |
-| [perceptual.rs](../../sonara/src/perceptual.rs) | LUFS, энергия, danceability, key/Camelot, valence, acousticness | [Признаки](descriptors-models.md) и [гармония](rhythm-tonality.md) |
-| [loudness_ext.rs](../../sonara/src/loudness_ext.rs) | True peak, gain, short-term/momentary loudness, LRA | [Признаки](descriptors-models.md) |
+| [perceptual.rs](../../sonara/src/perceptual.rs) | Энергия, danceability, key/Camelot, valence, acousticness | [Признаки](descriptors-models.md) и [гармония](rhythm-tonality.md) |
+| [native_dynamics.rs](../../sonara/src/native_dynamics.rs) | Громкость по BS.1770 / EBU R128 по каналам, пик по отсчётам, крест-фактор, огибающая | [Признаки](descriptors-models.md) |
+| [loudness_ext.rs](../../sonara/src/loudness_ext.rs) | True peak одного канала, gain | [Признаки](descriptors-models.md) |
 | [mood.rs](../../sonara/src/mood.rs) | Приватная реализация эвристик настроения, экспорт через perceptual | [Признаки](descriptors-models.md) |
 | [structure.rs](../../sonara/src/structure.rs) | Кривая энергии, novelty-сегментация, intro/outro | [Структура](descriptors-models.md) |
 | [similarity.rs](../../sonara/src/similarity.rs) | 48-мерный вектор, профили весов, расстояние и similarity | [Сходство](descriptors-models.md) |

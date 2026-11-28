@@ -1,4 +1,5 @@
-use crate::array::AudioIn1;
+use crate::array::AudioIn;
+use numpy::ndarray::Axis;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
@@ -56,32 +57,17 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     d.set_item("loudness_lufs", r.loudness_lufs)?;
     d.set_item("dynamic_range_db", r.dynamic_range_db)?;
 
-    // --- loudness ---
-    // Extended loudness / gain metrics (opt-in via features=["loudness"]).
-    if let Some(v) = r.true_peak_db {
-        d.set_item("true_peak_db", v)?;
-    }
-    if let Some(v) = r.replaygain_db {
-        d.set_item("replaygain_db", v)?;
-    }
+    // Measured on the channels: loudness, native_dynamics, amplitude_envelope,
+    // stereo_field. A key is present only when its value is defined.
     if let Some(ref v) = r.loudness_curve {
         d.set_item("loudness_curve", v.clone())?;
     }
-    if let Some(v) = r.loudness_momentary_max_db {
-        d.set_item("loudness_momentary_max_db", v)?;
-    }
-    if let Some(v) = r.loudness_range_lu {
-        d.set_item("loudness_range_lu", v)?;
-    }
-    // --- end loudness ---
-    // File-only (analyze_file / analyze_batch): ebur128, native_dynamics,
-    // amplitude_envelope. A key is present only when its value is defined.
     for (key, value) in [
-        ("ebur128_integrated_lufs", r.ebur128_integrated_lufs),
-        ("ebur128_momentary_max_lufs", r.ebur128_momentary_max_lufs),
-        ("ebur128_short_term_max_lufs", r.ebur128_short_term_max_lufs),
-        ("ebur128_range_lu", r.ebur128_range_lu),
-        ("ebur128_true_peak_dbtp", r.ebur128_true_peak_dbtp),
+        ("true_peak_db", r.true_peak_db),
+        ("replaygain_db", r.replaygain_db),
+        ("loudness_momentary_max_db", r.loudness_momentary_max_db),
+        ("loudness_short_term_max_db", r.loudness_short_term_max_db),
+        ("loudness_range_lu", r.loudness_range_lu),
         ("sample_peak_dbfs", r.sample_peak_dbfs),
         ("crest_factor_db", r.crest_factor_db),
         ("crest_factor_frame_mean_db", r.crest_factor_frame_mean_db),
@@ -90,7 +76,6 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
             "amplitude_envelope_frame_sec",
             r.amplitude_envelope_frame_sec,
         ),
-        // stereo_field (file-only as well)
         ("stereo_side_ratio", r.stereo_side_ratio),
         ("stereo_side_ratio_low", r.stereo_side_ratio_low),
         ("stereo_correlation_mean", r.stereo_correlation_mean),
@@ -102,6 +87,9 @@ fn result_to_dict<'py>(py: Python<'py>, r: &rs::TrackAnalysis) -> PyResult<Bound
     }
     if let Some(v) = r.native_sample_rate {
         d.set_item("native_sample_rate", v)?;
+    }
+    if let Some(v) = r.native_channels {
+        d.set_item("native_channels", v)?;
     }
     if let Some(ref v) = r.amplitude_envelope {
         d.set_item("amplitude_envelope", v.clone())?;
@@ -525,12 +513,13 @@ pub fn py_analyze_file<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "analyze_signal", signature = (y, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None))]
+#[pyo3(name = "analyze_signal", signature = (y, *, sr=22050, target_sr=None, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn py_analyze_signal<'py>(
     py: Python<'py>,
-    y: AudioIn1<'py>,
+    y: AudioIn<'py>,
     sr: u32,
+    target_sr: Option<u32>,
     mode: &str,
     features: Option<Vec<String>>,
     bpm_min: Option<f32>,
@@ -546,9 +535,24 @@ pub fn py_analyze_signal<'py>(
         genre_model,
         vocalness_model,
     )?;
-    let signal = y.as_array();
+    let channels = match &y {
+        AudioIn::Mono(y) => y.as_array().insert_axis(Axis(0)),
+        AudioIn::Channels(y) => {
+            // Other libraries hand out (samples, channels): read as channels,
+            // that is thousands of channels of a few samples each. An empty
+            // signal is left to the analyzer, which reports it as empty.
+            let (n_channels, n_samples) = y.as_array().dim();
+            if n_samples > 0 && n_channels > n_samples {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "y has shape ({n_channels}, {n_samples}), but a 2-D signal is \
+                     (channels, samples); the array probably needs transposing: pass y.T"
+                )));
+            }
+            y.as_array()
+        }
+    };
     let result = py
-        .detach(|| rs::analyze_signal(signal, sr, &config))
+        .detach(|| rs::analyze_channels(channels, sr, target_sr.unwrap_or(0), &config))
         .into_pyresult()?;
     result_to_dict(py, &result)
 }
@@ -1053,23 +1057,15 @@ fn analysis_from_dict(cached: &Bound<'_, PyDict>) -> PyResult<rs::TrackAnalysis>
         replaygain_db: opt_field!(cached, "replaygain_db", f32, "a float"),
         loudness_curve: opt_field!(cached, "loudness_curve", Vec<f32>, "a list of floats"),
         loudness_momentary_max_db: opt_field!(cached, "loudness_momentary_max_db", f32, "a float"),
+        loudness_short_term_max_db: opt_field!(
+            cached,
+            "loudness_short_term_max_db",
+            f32,
+            "a float"
+        ),
         loudness_range_lu: opt_field!(cached, "loudness_range_lu", f32, "a float"),
-        ebur128_integrated_lufs: opt_field!(cached, "ebur128_integrated_lufs", f32, "a float"),
-        ebur128_momentary_max_lufs: opt_field!(
-            cached,
-            "ebur128_momentary_max_lufs",
-            f32,
-            "a float"
-        ),
-        ebur128_short_term_max_lufs: opt_field!(
-            cached,
-            "ebur128_short_term_max_lufs",
-            f32,
-            "a float"
-        ),
-        ebur128_range_lu: opt_field!(cached, "ebur128_range_lu", f32, "a float"),
-        ebur128_true_peak_dbtp: opt_field!(cached, "ebur128_true_peak_dbtp", f32, "a float"),
         native_sample_rate: opt_field!(cached, "native_sample_rate", u32, "an int"),
+        native_channels: opt_field!(cached, "native_channels", usize, "an int"),
         sample_peak_dbfs: opt_field!(cached, "sample_peak_dbfs", f32, "a float"),
         crest_factor_db: opt_field!(cached, "crest_factor_db", f32, "a float"),
         crest_factor_frame_mean_db: opt_field!(

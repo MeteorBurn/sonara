@@ -76,24 +76,62 @@ impl<'py> Deref for AudioIn1<'py> {
     }
 }
 
+/// `numpy.asarray(ob)`, refused unless its samples are floating-point.
+fn float_samples<'py>(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = ob.py();
+    let array = get_array_module(py)?
+        .getattr(intern!(py, "asarray"))?
+        .call1((ob,))?;
+    let dtype = array.getattr(intern!(py, "dtype"))?;
+    let kind: String = dtype.getattr(intern!(py, "kind"))?.extract()?;
+    if kind != "f" {
+        return Err(PyTypeError::new_err(format!(
+            "audio must be floating-point samples in [-1, 1], got dtype {dtype}; \
+             scale integer PCM first, e.g. y / 32768.0 for 16-bit"
+        )));
+    }
+    Ok(array)
+}
+
 impl<'a, 'py> FromPyObject<'a, 'py> for AudioIn1<'py> {
     type Error = PyErr;
 
     fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         if ob.cast::<PyArray<f32, Ix1>>().is_err() {
-            let py = ob.py();
-            let dtype = get_array_module(py)?
-                .getattr(intern!(py, "asarray"))?
-                .call1((ob,))?
-                .getattr(intern!(py, "dtype"))?;
-            let kind: String = dtype.getattr(intern!(py, "kind"))?.extract()?;
-            if kind != "f" {
-                return Err(PyTypeError::new_err(format!(
-                    "audio must be floating-point samples in [-1, 1], got dtype {dtype}; \
-                     scale integer PCM first, e.g. y / 32768.0 for 16-bit"
-                )));
-            }
+            float_samples(ob)?;
         }
         ArrayIn1::extract(ob).map(Self)
+    }
+}
+
+/// An audio argument of the analyzer: mono samples (1-D) or channels (2-D,
+/// shaped (channels, samples)). Floating-point only, as [`AudioIn1`].
+pub enum AudioIn<'py> {
+    Mono(ArrayIn1<'py, f32>),
+    Channels(ArrayIn2<'py, f32>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for AudioIn<'py> {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        // A float32 array is borrowed as it is, without asking NumPy.
+        let ndim = if ob.cast::<PyArray<f32, Ix1>>().is_ok() {
+            1
+        } else if ob.cast::<PyArray<f32, Ix2>>().is_ok() {
+            2
+        } else {
+            float_samples(ob)?
+                .getattr(intern!(ob.py(), "ndim"))?
+                .extract()?
+        };
+        match ndim {
+            1 => ArrayIn1::extract(ob).map(Self::Mono),
+            2 => ArrayIn2::extract(ob).map(Self::Channels),
+            n => Err(PyTypeError::new_err(format!(
+                "audio must be a 1-D array (mono) or a 2-D array shaped \
+                 (channels, samples), got {n}-D"
+            ))),
+        }
     }
 }

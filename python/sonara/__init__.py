@@ -64,10 +64,10 @@ def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None,
     features are computed by ``mode="full"`` or by naming them in ``features``;
     ``compact`` and ``playlist`` leave them out: ``beatgrid``, ``onset_bands``,
     ``rhythmic_regularity``, ``hpss``, ``structure``, ``embedding``,
-    ``aggression``, ``fingerprint``, ``loudness``, ``silence``,
-    ``key_candidates``, ``vocalness``, ``instrumentalness``, ``mood``, and the
-    file-only ``ebur128``, ``native_dynamics``, ``amplitude_envelope``,
-    ``stereo_field``, ``tags``. See the README for what each one returns.
+    ``aggression``, ``fingerprint``, ``loudness``, ``native_dynamics``,
+    ``amplitude_envelope``, ``stereo_field``, ``silence``, ``key_candidates``,
+    ``vocalness``, ``instrumentalness``, ``mood``, and the file-only ``tags``.
+    See the README for what each one returns.
 
     ``genre_model`` is a path to a user-trained genre model (JSON). When given,
     the result carries ``genre`` and ``genre_confidence``. See ``sonara.genre``
@@ -88,11 +88,21 @@ def analyze_file(path, *, sr=22050, mode="compact", features=None, bpm_min=None,
     ))
 
 
-def analyze_signal(y, *, sr=22050, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None):
+def analyze_signal(y, *, sr=22050, target_sr=None, mode="compact", features=None, bpm_min=None, bpm_max=None, genre_model=None, vocalness_model=None):
     """Analyze a signal array and return a `TrackAnalysis` (dict subclass with `.print()`).
 
-    ``y`` is mono audio as floating-point samples in ``[-1, 1]``; integer
-    samples (such as 16-bit PCM) raise ``TypeError``.
+    ``y`` is audio as floating-point samples in ``[-1, 1]``: a 1-D array
+    (mono) or a 2-D array shaped ``(channels, samples)``. Integer samples
+    (such as 16-bit PCM) raise ``TypeError``; a 2-D array with more channels
+    than samples raises ``ValueError`` (it is ``(samples, channels)`` and
+    needs transposing).
+
+    ``sr`` is the sample rate of ``y``. ``target_sr`` is the rate the analysis
+    runs at; ``None`` analyzes at ``sr``. Loudness, dynamics and the stereo
+    field are measured on the channels of ``y`` at ``sr``; the rest is
+    computed on the mono mix (the mean of the channels) resampled to
+    ``target_sr``. The result carries ``native_sample_rate`` (``sr``) and
+    ``native_channels``.
 
     ``genre_model`` (path to a user-trained model JSON) adds ``genre`` and
     ``genre_confidence`` to the result. See ``sonara.genre``.
@@ -100,7 +110,7 @@ def analyze_signal(y, *, sr=22050, mode="compact", features=None, bpm_min=None, 
     if vocalness_model == "bundled":
         vocalness_model = vocal_model.bundled_path()
     return TrackAnalysis(_analyze_signal(
-        y, sr=sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
+        y, sr=sr, target_sr=target_sr, mode=mode, features=features, bpm_min=bpm_min, bpm_max=bpm_max,
         genre_model=genre_model, vocalness_model=vocalness_model,
     ))
 

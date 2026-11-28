@@ -44,7 +44,7 @@ lifecycle.
 ## The consumed surface
 
 Typed Rust values directly from the `sonara` crate — `analyze_file` /
-`analyze_signal` / `AnalysisConfig` → `TrackAnalysis`. **Not** Python dicts,
+`analyze_channels` / `analyze_signal` / `AnalysisConfig` → `TrackAnalysis`. **Not** Python dicts,
 not JSON. `SonaraError` is a dependency-neutral structured error. sonara stays
 graph-agnostic; it is never asked to know about graphs.
 
@@ -84,10 +84,12 @@ Verified against sonara 0.3.5 on 2026-07-29 and re-verified against 0.3.7 on
   records. Never reinterpret an existing layout without a version bump; a
   future learned-vector layout gets a new explicit version/model identity
   rather than silently reusing the `embedding` field.
-- **`analyze_signal` stays the low-level, dependency-light entry point.**
+- **`analyze_signal` stays the low-level, dependency-light entry point**, and
+  so does `analyze_channels`, the same entry for several channels
+  (`analyze_signal` is its one-channel case).
   Symphonia currently enables all codecs and formats unconditionally. Do not
   churn this speculatively — but if a signal-only or reduced-codec feature
-  split is ever introduced, `analyze_signal` must stay buildable without the
+  split is ever introduced, both must stay buildable without the
   full decoder bundle.
 - **No serde/JSON bridge is required** solely to serve a downstream. Direct
   typed access is preferable and avoids another dependency contract.
@@ -108,10 +110,10 @@ schema-7 values differ from a fresh run:
   The pitch-class profile behind the chords weights a spectral peak by its
   distance to the nearest of the 12 notes, the same way for all of them: a
   peak up to half a semitone below C counts toward C.
-- `loudness_lufs` and `replaygain_db`. The loudness does not depend on the
-  length of the signal; a stored schema-7 value is too low, the more so the
-  longer the signal: about 0.05 dB at 5 minutes and 0.9 dB at one hour on a
-  steady test signal.
+- `loudness_lufs` and `replaygain_db`. The loudness is the gated integrated
+  loudness of ITU-R BS.1770-5 measured on the input's own channels (see
+  "Loudness and dynamics on the channels" below); a stored schema-7 value is
+  an ungated measurement of the mono mix at the analysis rate.
 - `spectral_flatness_mean`, `spectral_flatness_{std,iqr,p10,p90}`,
   `spectral_contrast_mean` and `spectral_contrast_std`, on a track with
   silence, a fade or a quiet tail. They cover the sounding frames only: a
@@ -367,9 +369,9 @@ key, existing values unchanged). The opt-in `hpss` feature (`full` mode or
 the share of percussive energy in the track by median-filter
 harmonic/percussive separation. `0` means all energy is in sustained,
 horizontal (tonal) structure of the spectrogram; `1` means all energy is in
-broadband, vertical (transient) structure. Unlike the file-only `ebur128`
-family it is computed in the main pass on the mono analysis signal, so
-`analyze_file`, `analyze_batch` and `analyze_signal` all emit it. On the main
+broadband, vertical (transient) structure. Unlike the loudness and dynamics
+measured on the channels, it is computed in the main pass on the mono analysis
+signal. On the main
 pass's magnitude spectrogram (n_fft 2048, hop 512, Hann, at the analysis sample
 rate; all frames, silence included) a median along time gives the harmonic
 estimate and a median along frequency gives the percussive estimate; the kernel
@@ -489,51 +491,59 @@ the share of listeners at the slower tempo was +0.097 (interval −0.025 to
 better there (+0.472, interval +0.373 to +0.557, 313 tracks) but has no second
 set labelled by listeners to confirm it, so it is not shipped.
 
-File-level loudness and dynamics (2026-11-18, MeteorBurn fork, no schema bump:
-additive keys, existing values unchanged). Three opt-in features, computed by
-`full` mode or an explicit request and never by `compact` or `playlist`,
-measure the file's own channels at its own sample rate instead of the
-mono mix at the analysis rate, so only `analyze_file` / `analyze_batch` emit
-them; `analyze_signal` never does, even when they are requested or the mode is
-`full`.
-`features=["ebur128"]` adds `ebur128_integrated_lufs`,
-`ebur128_momentary_max_lufs`, `ebur128_short_term_max_lufs` (LUFS),
-`ebur128_range_lu` (LU) and `ebur128_true_peak_dbtp` (dBTP): ITU-R BS.1770-5 /
-EBU Tech 3341 and 3342, with K-weighting for the file's rate, channel weights
-and both gates (the true peak has the EBU Tech 3341 accuracy, +0.2 / −0.4 dB).
+Loudness and dynamics on the channels (2026-11-28, MeteorBurn fork). Every
+input takes one path, `analyze_channels`: `analyze_file` decodes and calls it,
+`analyze_signal` is its one-channel case, and the Python `analyze_signal`
+accepts a mono array or one shaped `(channels, samples)` with the signal's rate
+`sr` and an optional analysis rate `target_sr`. Loudness, dynamics and the
+stereo field are measured on the input's own channels at their own sample rate
+(the file's rate, or the rate of the signal passed in), before the mono mix
+(the arithmetic mean of the channels) and the resampling to the analysis rate.
+Every analysis sets `native_sample_rate` (Hz, int) and `native_channels` (int):
+the rate and the channel count of that measurement. `tags` remains the only
+file-only feature.
+The always-on `loudness_lufs` is the integrated loudness of ITU-R BS.1770-5 /
+EBU Tech 3341, with K-weighting for the measured rate, channel weights and
+both gates. It is −70.0 (the absolute gate) when the standard gives no value:
+digital silence or a signal shorter than the 400 ms block. Three opt-in
+features, computed by `full` mode or an explicit request and never by
+`compact` or `playlist`, add the rest.
+`features=["loudness"]` adds `true_peak_db` (dBTP, the maximum over the
+channels, with the EBU Tech 3341 accuracy of +0.2 / −0.4 dB), `replaygain_db`
+(`-18 - loudness_lufs`), `loudness_momentary_max_db` and
+`loudness_short_term_max_db` (LUFS, EBU Tech 3341), `loudness_range_lu` (LU,
+EBU Tech 3342) and `loudness_curve`: the short-term loudness of a 3 s window at
+a 1 s hop, the first window at sample 0, where a window below the absolute
+gate reads −70.0 and a signal under 3 s gives an empty list.
 `features=["native_dynamics"]` adds `sample_peak_dbfs`, `crest_factor_db`
 (track peak over the RMS of all samples of all channels) and
 `crest_factor_frame_mean_db` (mean per-frame crest
 factor over frames with RMS above −70 dBFS). `features=["amplitude_envelope"]`
 adds `amplitude_envelope` (max |x| over the channels per frame, linear) with
 `amplitude_envelope_hop_sec` (512/22050 s) and `amplitude_envelope_frame_sec`
-(2048/22050 s): the grid is fixed in seconds, so it is the same at every file
-rate, and frame `k` is centred at `k · hop`. A key is absent (`None` in Rust)
-when its value is undefined — digital silence, a file shorter than the
-400 ms / 3 s window, or (loudness only; the true peak is still reported) a file
-with more than six channels, whose layout the channel count does not determine
-(up to six are read in WAV order L R C LFE Ls Rs, LFE excluded) — so with the
+(2048/22050 s): the grid is fixed in seconds, so it is the same at every
+sample rate, and frame `k` is centred at `k · hop`. A key of the three
+features is absent (`None` in Rust) when its value is undefined — digital
+silence, or a signal shorter than the 400 ms / 3 s window — so with the
 feature listed in `provenance.requested_features` (or `provenance.mode` equal
-to `full` on a record without a feature list) and `native_sample_rate`
-present, a missing key means "measured, undefined", not "pending". Any of the
-three features (and `stereo_field` below) sets `native_sample_rate` (Hz, int) when it measured a file, so
-a record without it (an `analyze_signal` result) was never measured. The
-envelope is always present for a measured file. The always-on `loudness_lufs` and the `loudness` group
-(`true_peak_db`, ...) are a different measurement (mono mix, analysis rate,
-ungated) and keep their values. The keys travel with their feature name and
+to `full` on a record without a feature list), a missing key means "measured,
+undefined", not "pending". The envelope and the curve are always present when
+requested. Up to six channels are read in WAV order L R C LFE Ls Rs, the LFE
+excluded; the channel count of a wider input does not determine its layout, so
+its loudness is measured on the mono mix as one channel, while the true peak
+still covers every channel. The opt-in keys travel with their feature name and
 `augment_analysis` refills them from the audio path (class `A`); they are not
-embedding evidence.
+embedding evidence. `loudness_lufs` is: it feeds dimension 39 of `embedding`.
+A refill of the `loudness` group writes `loudness_lufs` with it, from the same
+measurement, so `replaygain_db` equals `-18 - loudness_lufs` in the record.
 
-Stereo field (2026-11-25, MeteorBurn fork, no schema bump: additive keys,
-existing values unchanged). The opt-in `stereo_field` feature
+Stereo field (2026-11-25, MeteorBurn fork). The opt-in `stereo_field` feature
 (`full` mode or `features=["stereo_field"]`; `compact` and `playlist` do not
 compute it) belongs to the
-file-level family above: it is measured on the file's left and right channels
-at the file's own sample rate, so only `analyze_file` / `analyze_batch` emit
-it; `analyze_signal` never does, even when it is requested or the mode is
-`full`. It adds four
+family above: it is measured on the left and right channels of the input at
+their own sample rate. It adds four
 dimensionless keys. `stereo_side_ratio` (0..1) is the share of the Side signal
-in the energy of the whole file: with Mid `(L + R)/2` and Side `(L − R)/2` it
+in the energy of the whole signal: with Mid `(L + R)/2` and Side `(L − R)/2` it
 is `E_S / (E_M + E_S)` = `½·(1 − 2·cov(L,R) / (var L + var R))`. The variances
 and the covariance have the means removed, so a constant offset in a channel
 does not change the value. `0` means identical channels, `0.5` uncorrelated
@@ -546,9 +556,9 @@ frames are `2048/22050` s long, do not overlap, and an incomplete last frame
 is dropped. `stereo_correlation_p05` (−1..+1) is the 5th percentile of the
 same per-frame values, with the linear interpolation of the `_p10` fields.
 The filter is set in Hz and the frame in seconds, so values are comparable
-between files of different sample rates. Edge cases: a mono file is measured
+between inputs of different sample rates. Edge cases: one channel is measured
 as `L = R` (shares `0`, correlations `+1`: this is how mono plays on a stereo
-system); a file with more than two channels gets none of the four keys,
+system); an input with more than two channels gets none of the four keys,
 because its channel layout is unknown; a share is undefined when
 `(var L + var R)/2` in its band is below −70 dB; a frame in which the
 variance of both channels is below −70 dB is left out of the correlation
@@ -556,10 +566,9 @@ statistics (a constant offset is not signal; each channel's mean is removed
 before the low-pass as well); a frame
 in which one channel has zero variance counts as `0`; the correlation is
 undefined when no frame is left. Abstention follows the family: a key is
-absent (`None` in Rust) when its value is undefined, and `stereo_field` sets
-`native_sample_rate` like the three features above, so with the feature
+absent (`None` in Rust) when its value is undefined, so with the feature
 listed in `provenance.requested_features` (or `provenance.mode` equal to
-`full` on a record without a feature list) and `native_sample_rate` present, a
+`full` on a record without a feature list), a
 missing key means "measured, undefined", not "pending". Sources of the
 parameters. The width measure is Tardieu, Deruty, Charbuillet and Peeters,
 "Production Effect: Audio Features for Recording Techniques Description and
@@ -568,7 +577,7 @@ field is `σ_LR² / (1 + σ_LR²)`, the same quantity in a bounded 0..1 form. A
 related measure is the side/mid ratio of De Man et al. (ISMIR 2014). The
 correlation follows Ziemer 2023 (arXiv:2302.01090): `np.corrcoef` per frame
 of 2048 samples at 22050 Hz without overlap, averaged over the frames. Two
-differences: the frame is set in seconds, and the whole file is read at its
+differences: the frame is set in seconds, and the whole signal is read at its
 own sample rate (the author takes 500 frames from the middle after
 downsampling to 22050 Hz). The zero for a channel without variance is the
 convention of hardware meters (RTW 1260C: with one input signal only the

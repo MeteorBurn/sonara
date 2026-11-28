@@ -13,7 +13,9 @@ ComplexArray = NDArray[np.complex64]
 # Array arguments take any numeric array or sequence; sonara casts it to float32
 # (complex64), borrowing a float32 array without a copy. analyze_signal and
 # analyze_aggression_signal refuse integer samples with TypeError: audio is
-# floating point in [-1, 1].
+# floating point in [-1, 1]. analyze_signal takes mono (1-D) or channels (2-D,
+# shaped (channels, samples)); a 2-D array with more channels than samples
+# raises ValueError.
 AudioInput = ArrayLike
 SpectrogramInput = ArrayLike
 ComplexInput = ArrayLike
@@ -264,7 +266,9 @@ class TrackAnalysis(Dict[str, Any]):
 #                             # chord_sequence; contiguous, covering the track;
 #                             # label "N" = no chord detected in that span
 def analyze_file(path: PathArg, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[PathArg] = None, vocalness_model: Optional[PathArg] = None) -> TrackAnalysis: ...
-def analyze_signal(y: AudioInput, *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[PathArg] = None, vocalness_model: Optional[PathArg] = None) -> TrackAnalysis: ...
+# analyze_signal: `sr` is the rate of `y`, `target_sr` the rate the analysis
+# runs at (None = `sr`). The channel features are measured on `y` at `sr`.
+def analyze_signal(y: AudioInput, *, sr: int = 22050, target_sr: Optional[int] = None, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, genre_model: Optional[PathArg] = None, vocalness_model: Optional[PathArg] = None) -> TrackAnalysis: ...
 def analyze_batch(paths: Sequence[PathArg], *, sr: int = 22050, mode: str = "compact", features: Optional[List[str]] = None, bpm_min: Optional[float] = None, bpm_max: Optional[float] = None, progress: Optional[Callable[[int, int], None]] = None, genre_model: Optional[PathArg] = None, vocalness_model: Optional[PathArg] = None) -> List[TrackAnalysis]: ...
 # analyze_batch never raises on a per-file decode/IO error. Each input path yields
 # exactly one entry in input order, and every entry carries its input `path`.
@@ -363,60 +367,59 @@ def feature_dependencies() -> List[Dict[str, Union[str, bool, List[str]]]]: ...
 #   intro_end_sec:        float        # end of intro / pre-first-drop region
 #   outro_start_sec:      float        # start of outro / final fade
 #   energy_level:         int          # coarse 1-10 level
-# Extended loudness / gain metrics are opt-in via features=["loudness"] or full
-# mode (not computed by compact or playlist, for performance). When computed,
-# the result dict also carries:
-#   "true_peak_db"                — true peak in dBTP (4x oversampled, ITU-R BS.1770-4)
-#   "replaygain_db"               — track gain to reach -18 LUFS (-18 - loudness_lufs)
-#   "loudness_curve"              — List[float] short-term LUFS (3 s window, 1 s hop)
-#   "loudness_momentary_max_db"   — max momentary (400 ms) loudness, dB
-#   "loudness_range_lu"           — EBU R128 loudness range (LRA), LU
 
-# --- ebur128 / native_dynamics / amplitude_envelope ---
-# File-only, opt-in via features=[...] or full mode (compact and playlist do
-# not compute them): measured by
-# analyze_file / analyze_batch on the file's own channels at its own sample
-# rate, not on the mono mix at the analysis rate. analyze_signal never emits
-# them, in full mode either.
-# A key is absent when its value is undefined (digital silence, file
-# shorter than the measurement window). The older loudness_lufs / true_peak_db
-# (mono, analysis rate, ungated) are unchanged.
-# features=["ebur128"] — ITU-R BS.1770-5 / EBU Tech 3341, 3342, all float.
-# Channels are read in WAV order (L R C LFE Ls Rs, LFE excluded); a file with
-# more than 6 channels gets no loudness keys (unknown layout), only the peak:
-#   "ebur128_integrated_lufs"      — gated programme loudness, LUFS
-#   "ebur128_momentary_max_lufs"   — max momentary (400 ms) loudness, LUFS
-#   "ebur128_short_term_max_lufs"  — max short-term (3 s) loudness, LUFS
-#   "ebur128_range_lu"             — loudness range (LRA), LU
-#   "ebur128_true_peak_dbtp"       — true peak over the channels, dBTP (4x);
+# --- measured on the channels: loudness / native_dynamics / amplitude_envelope ---
+# Loudness, dynamics and the stereo field are measured on the input's own
+# channels at its own sample rate (the file's, or `sr` of analyze_signal), not
+# on the mono mix at the analysis rate. Every result carries:
+#   "loudness_lufs"                — float, integrated (programme) loudness,
+#                                    LUFS: ITU-R BS.1770-5 / EBU Tech 3341 with
+#                                    the absolute (-70 LUFS) and relative
+#                                    (-10 LU) gates. -70.0 when the standard
+#                                    gives no value (digital silence, signal
+#                                    under 400 ms)
+#   "native_sample_rate"           — int, the rate the channel features were
+#                                    measured at, Hz
+#   "native_channels"              — int, the number of channels they were
+#                                    measured on
+# Channels are read in WAV order (L R C LFE Ls Rs, LFE excluded); with more
+# than 6 channels the layout is unknown and the loudness is measured on the
+# mono mix as one channel (the true peak still covers every channel).
+# The groups below are opt-in via features=[...] or full mode (compact and
+# playlist do not compute them). A key is absent when its value is undefined
+# (digital silence, signal shorter than the measurement window).
+# features=["loudness"] — EBU Tech 3341, 3342, all float but the curve:
+#   "true_peak_db"                 — true peak over the channels, dBTP (4x);
 #                                    EBU Tech 3341 accuracy, +0.2 / -0.4 dB
-# Any of the three features (and stereo_field below) also sets:
-#   "native_sample_rate"           — int, sample rate of the file, Hz. Present
-#                                    means "measured from a file", so a missing
-#                                    level is undefined, not unmeasured
+#   "replaygain_db"                — track gain to reach -18 LUFS
+#                                    (-18 - loudness_lufs)
+#   "loudness_curve"               — List[float], short-term LUFS: 3 s window,
+#                                    1 s hop, first window at sample 0; a
+#                                    window below the absolute gate reads
+#                                    -70.0; empty for a signal under 3 s
+#   "loudness_momentary_max_db"    — max momentary (400 ms) loudness, LUFS
+#   "loudness_short_term_max_db"   — max short-term (3 s) loudness, LUFS
+#   "loudness_range_lu"            — loudness range (LRA), LU
 # features=["native_dynamics"]:
-#   "sample_peak_dbfs"             — max |x| over the file's channels, dBFS
+#   "sample_peak_dbfs"             — max |x| over the channels, dBFS
 #   "crest_factor_db"              — track peak / RMS of all samples, dB
 #   "crest_factor_frame_mean_db"   — mean per-frame crest factor, dB, over
 #                                    envelope frames with RMS above -70 dBFS
 # features=["amplitude_envelope"]:
 #   "amplitude_envelope"           — List[float], max |x| over the channels in
 #                                    each frame (linear amplitude; above 1
-#                                    for float files with overs); frame k is
+#                                    for float audio with overs); frame k is
 #                                    centred at k * amplitude_envelope_hop_sec
 #   "amplitude_envelope_hop_sec"   — hop, seconds (512/22050)
 #   "amplitude_envelope_frame_sec" — frame length, seconds (2048/22050)
 
 # --- stereo_field --- features=["stereo_field"] (opt-in: full mode or an explicit request)
-# File-only like the family above: measured by analyze_file / analyze_batch on
-# the file's left and right channels at its own sample rate; analyze_signal
-# never emits it. All float, dimensionless. A key is absent when its value is
-# undefined; "native_sample_rate" (above) is set as well and marks the record
-# as measured from a file. A mono file is measured as L = R (shares 0,
-# correlations +1); a file with more than two channels gets none of the four
-# keys (unknown layout).
+# Measured like the family above on the left and right channels at their own
+# sample rate. All float, dimensionless. A key is absent when its value is
+# undefined. One channel is measured as L = R (shares 0, correlations +1);
+# more than two channels get none of the four keys (unknown layout).
 #   "stereo_side_ratio"        — 0..1, share of the Side signal in the energy
-#                                of the whole file:
+#                                of the whole signal:
 #                                0.5 * (1 - 2*cov(L,R) / (var L + var R)),
 #                                means removed (a constant offset in a channel
 #                                does not change it). 0 = identical channels,

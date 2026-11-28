@@ -14,7 +14,7 @@ Feature extraction, batch analysis, and built-in perceptual features (energy, da
 python -m pip install https://github.com/MeteorBurn/sonara/releases/download/v0.3.7-bpm-precision-20261005/sonara-0.3.7-cp310-abi3-win_amd64.whl
 ```
 
-One call gets you 30+ features — tempo, key, chords, energy, mood, timbre — in ~4 ms per 10-second track:
+One call gets you 30+ features — tempo, key, chords, energy, mood, timbre — in ~11 ms per 10-second track:
 
 ```python
 import sonara
@@ -70,11 +70,25 @@ sonara includes a fused analysis pipeline that extracts all features in a single
 
 | Mode | Features | Time (10s track) | Use case |
 |------|----------|-------------------|----------|
-| **`compact`** | 11 core features | ~1.2 ms | Fast scanning, metadata |
-| **`playlist`** | 30+ features incl. tonal & perceptual | ~4 ms | Playlist generation, music discovery |
-| **`full`** | Every feature: playlist + time signature + all opt-in features | ~50 ms | Research, comprehensive analysis |
+| **`compact`** | 11 core features | ~3 ms | Fast scanning, metadata |
+| **`playlist`** | 30+ features incl. tonal & perceptual | ~11 ms | Playlist generation, music discovery |
+| **`full`** | Every feature: playlist + time signature + all opt-in features | ~26 ms | Research, comprehensive analysis |
 
 Passing `features=[...]` replaces the mode: only the listed features are returned (plus the core fields every run reports), and the mode's own set is not added. To get playlist plus one more feature, list the features you want or use `full`.
+
+### Files and signals
+
+`analyze_file` and `analyze_batch` decode a file; `analyze_signal` takes audio that is already in memory. Both inputs go through the same analysis:
+
+```python
+r = sonara.analyze_signal(y, sr=44100, target_sr=22050, mode="playlist")
+```
+
+- `y` is floating-point samples in `[-1, 1]`: a 1-D array (mono) or a 2-D array shaped `(channels, samples)`. Integer samples raise `TypeError`. A 2-D array with more channels than samples raises `ValueError`: it is `(samples, channels)`, the layout other libraries use, and needs transposing (`y.T`).
+- `sr` is the sample rate of `y`. `target_sr` is the rate the analysis runs at; without it the analysis runs at `sr`.
+- Loudness, dynamics and the stereo field are measured on the channels at their own rate: the file's, or `sr` of the signal. Everything else is computed on the mono mix (the mean of the channels) resampled to the analysis rate.
+- Every result carries `native_sample_rate` and `native_channels`: the rate and the number of channels those features were measured on.
+- Only `tags` needs a file.
 
 ### Compact mode (default)
 
@@ -92,7 +106,9 @@ r['onset_frames']           # Onset positions
 r['onset_density']          # Onsets per second
 r['rms_mean']               # Average loudness (RMS)
 r['rms_max']                # Peak loudness (RMS)
-r['loudness_lufs']          # Integrated loudness (LUFS, ITU-R BS.1770-4)
+r['loudness_lufs']          # Integrated loudness (LUFS, ITU-R BS.1770 / EBU R128)
+r['native_sample_rate']     # Rate the loudness was measured at (Hz)
+r['native_channels']        # Number of channels it was measured on
 r['dynamic_range_db']       # Loudness range (p95 - p5, dB)
 r['spectral_centroid_mean'] # Brightness (Hz)
 r['zero_crossing_rate']     # Percussiveness proxy
@@ -191,9 +207,9 @@ r['time_signature_confidence']  # How clear that grouping is (0..1); absent
                                 # under 18 usable beats
 ```
 
-Full mode also computes every opt-in feature: `onset_bands`, `beatgrid`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression` (only in builds with the `aggression` Cargo feature; the Python wheel has it), `fingerprint`, `loudness`, `ebur128`, `native_dynamics`, `amplitude_envelope`, `stereo_field`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness` and `tags`. Their keys are described in the sections below.
+Full mode also computes every opt-in feature: `onset_bands`, `beatgrid`, `rhythmic_regularity`, `hpss`, `structure`, `embedding`, `aggression` (only in builds with the `aggression` Cargo feature; the Python wheel has it), `fingerprint`, `loudness`, `native_dynamics`, `amplitude_envelope`, `stereo_field`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness` and `tags`. Their keys are described in the sections below.
 
-Five of them are file-only: `ebur128`, `native_dynamics`, `amplitude_envelope`, `stereo_field` and `tags` need the file's own channels, sample rate or metadata, so in full mode they come only from `analyze_file` / `analyze_batch`. With `analyze_signal` their keys are absent and no error is raised. `genre` and `genre_confidence` still need a genre model (`genre_model=...`); no mode produces them on its own.
+`tags` is file-only: it needs the file's metadata, so in full mode it comes only from `analyze_file` / `analyze_batch`. With `analyze_signal` its key is absent and no error is raised. `genre` and `genre_confidence` still need a genre model (`genre_model=...`); no mode produces them on its own.
 
 ### BPM range alignment
 
@@ -248,58 +264,67 @@ You can combine it with other features, e.g. `features=["bpm", "beatgrid"]`. The
 ### Loudness & gain (opt-in)
 
 Broadcast-standard loudness and gain metrics — what players and mix software
-consume for auto-gain and clip protection. These are **opt-in**: the `compact`
-and `playlist` modes do not compute them (for performance); `full` mode or an
-explicit request for the `loudness` feature group does. They extend the always-on
-`loudness_lufs` (integrated LUFS, ITU-R BS.1770-4) and `dynamic_range_db`.
+consume for auto-gain and clip protection. Loudness follows ITU-R BS.1770-5 and
+EBU R128 (Tech 3341, 3342) and is measured on the input's own channels at its
+own sample rate: every channel of a file at the file's rate, or the array given
+to `analyze_signal` at its `sr`. It is not measured on the mono mix at the
+analysis rate.
+
+`loudness_lufs`, the integrated (programme) loudness with the absolute
+(−70 LUFS) and relative (−10 LU) gates, is part of every result. It reads
+`-70.0` when the standard gives no value: digital silence or a signal shorter
+than 400 ms.
+
+The rest is the **opt-in** `loudness` group: `full` mode or an explicit request
+computes it, the `compact` and `playlist` modes do not (for performance).
 
 ```python
 r = sonara.analyze_file("track.mp3", features=["loudness"])
 
-r['true_peak_db']                # True peak (dBTP), 4x oversampled per BS.1770-4
+r['true_peak_db']                # True peak over the channels (dBTP), 4x oversampled
 r['replaygain_db']               # Track gain to reach -18 LUFS: -18 - loudness_lufs
 r['loudness_curve']              # Short-term LUFS per window (3 s window, 1 s hop)
-r['loudness_momentary_max_db']   # Max momentary loudness (400 ms window), dB
-r['loudness_range_lu']           # EBU R128 loudness range (LRA), LU
+r['loudness_momentary_max_db']   # Max momentary (400 ms) loudness (LUFS)
+r['loudness_short_term_max_db']  # Max short-term (3 s) loudness (LUFS)
+r['loudness_range_lu']           # Loudness range (LRA), EBU Tech 3342 (LU)
 ```
 
-- **`true_peak_db`** — the highest inter-sample peak, computed on a 4x oversampled
-  signal (windowed-sinc polyphase interpolation, per BS.1770-4 Annex 2). A value
-  above `0.0` dBTP means the waveform overshoots full scale between samples and
-  can clip a downstream reconstruction filter / DAC.
+- **`true_peak_db`** — the highest inter-sample peak over the channels, computed
+  on a 4x oversampled signal (windowed-sinc polyphase interpolation, per BS.1770
+  Annex 2). A value above `0.0` dBTP means the waveform overshoots full scale
+  between samples and can clip a downstream reconstruction filter / DAC. It is
+  accurate to the EBU Tech 3341 tolerance (+0.2 / −0.4 dB).
 - **`replaygain_db`** — ReplayGain-style track gain to the -18 LUFS reference,
   `-18 - loudness_lufs`. Add it to the signal (or set the player's gain) for
   consistent perceived level across tracks.
 - **`loudness_curve`** — the short-term loudness trajectory: one LUFS value per
-  3-second window at a 1-second hop (empty for tracks under one window).
+  3-second window at a 1-second hop, the first window starting at the first
+  sample. A window below the absolute gate reads `-70.0`; the list is empty for
+  a signal under one window.
 - **`loudness_range_lu`** — EBU R128 LRA: the gated 95th-10th percentile spread
   of the short-term distribution (with the -20 LU relative gate). This is the
   standardized counterpart to the approximate `dynamic_range_db`.
 
-**Standard loudness and dynamics of the file (fork)** — three more opt-in
-features measure the file itself: every channel at the file's own sample rate,
-not the mono mix at the analysis rate. Only `analyze_file` / `analyze_batch`
-compute them (`analyze_signal` has no file), and a key is absent when its value
-is undefined (digital silence, a file shorter than the window). `loudness_lufs`
-and the `loudness` group above keep their values.
+A key of the group is absent when its value is undefined (digital silence, a
+signal shorter than the window). Channels are read in WAV order (L R C LFE Ls
+Rs, the LFE excluded). With more than six channels the layout is unknown: the
+loudness is measured on the mono mix as one channel, and the true peak still
+covers every channel.
+
+**Peak, crest factor and envelope** — two more opt-in features measured the
+same way, on the channels at their own sample rate:
 
 ```python
 r = sonara.analyze_file(
-    "track.flac", features=["ebur128", "native_dynamics", "amplitude_envelope"]
+    "track.flac", features=["native_dynamics", "amplitude_envelope"]
 )
 
-r['ebur128_integrated_lufs']       # ITU-R BS.1770-5 / EBU Tech 3341, gated (LUFS)
-r['ebur128_momentary_max_lufs']    # max momentary (400 ms) loudness (LUFS)
-r['ebur128_short_term_max_lufs']   # max short-term (3 s) loudness (LUFS)
-r['ebur128_range_lu']              # loudness range, EBU Tech 3342 (LU)
-r['ebur128_true_peak_dbtp']        # true peak over the channels (dBTP)
-r['native_sample_rate']            # sample rate of the file (Hz); set by any file-level feature
 r['sample_peak_dbfs']              # max |x| over the channels (dBFS)
 r['crest_factor_db']               # track peak / overall RMS (dB)
 r['crest_factor_frame_mean_db']    # mean per-frame crest factor, RMS > -70 dBFS
 r['amplitude_envelope']            # max |x| per frame; frame k is centred at
 r['amplitude_envelope_hop_sec']    # k * hop: 512/22050 s hop and 2048/22050 s
-r['amplitude_envelope_frame_sec']  # frames at any file sample rate
+r['amplitude_envelope_frame_sec']  # frames at any sample rate
 ```
 
 **Gain staging example** — normalize levels and guard against clipping:
@@ -325,7 +350,7 @@ Cherry-pick specific features regardless of mode:
 r = sonara.analyze_file("track.mp3", features=["bpm", "energy", "key", "chords"])
 ```
 
-Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `rhythm_levels` — plus the **opt-in** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `stereo_field`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `ebur128`, `native_dynamics`, `amplitude_envelope`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which the `compact` and `playlist` modes do not compute: use `full` mode or request them explicitly (see their sections below).
+Valid feature names: `bpm`, `beats`, `onsets`, `rms`, `dynamic_range`, `centroid`, `zcr`, `onset_density`, `bandwidth`, `rolloff`, `flatness`, `contrast`, `mfcc`, `chroma`, `chords`, `dissonance`, `energy`, `danceability`, `key`, `valence`, `acousticness`, `tempo_curve`, `time_signature`, `rhythm_levels` — plus the **opt-in** features `beatgrid`, `onset_bands`, `rhythmic_regularity`, `hpss`, `stereo_field`, `structure`, `embedding`, `aggression`, `fingerprint`, `loudness`, `native_dynamics`, `amplitude_envelope`, `silence`, `key_candidates`, `vocalness`, `mood`, `instrumentalness`, `tags`, which the `compact` and `playlist` modes do not compute: use `full` mode or request them explicitly (see their sections below).
 
 ### Multiband onset strength (opt-in)
 
@@ -622,15 +647,14 @@ Limitations (the sources of every parameter and all measured numbers are in
   listeners.
 - The half-tempo level (half-time) is not measured by this feature.
 
-### Stereo field (opt-in, files only)
+### Stereo field (opt-in)
 
 How much of the energy lies in the difference between the left and the right
 channel, overall and below 150 Hz, and how the two channels correlate over
 time. It is **opt-in** — computed by `full` mode or an explicit request, not by
-`compact` or `playlist` — and, like the file-level
-loudness features above, it is measured on the file's own channels at the
-file's own sample rate, so only `analyze_file` / `analyze_batch` compute it;
-`analyze_signal` has no channels and never emits the keys.
+`compact` or `playlist` — and, like the loudness above, it is measured on the
+input's own channels at their own sample rate: the channels of a file, or the
+`(channels, samples)` array given to `analyze_signal`.
 
 ```python
 r = sonara.analyze_file("track.flac", features=["stereo_field"])
@@ -640,7 +664,6 @@ r['stereo_side_ratio']        # share of the Side signal in the energy, 0..1
 r['stereo_side_ratio_low']    # the same below 150 Hz
 r['stereo_correlation_mean']  # mean per-frame correlation of L and R, -1..+1
 r['stereo_correlation_p05']   # 5th percentile of the per-frame correlation
-r['native_sample_rate']       # sample rate of the file (Hz): the record was measured
 ```
 
 - **`stereo_side_ratio`** — `½·(1 − 2·cov(L,R) / (var L + var R))` over the
@@ -658,16 +681,15 @@ r['native_sample_rate']       # sample rate of the file (Hz): the record was mea
   interpolation, as for the `_p10` fields).
 
 The filter is set in Hz and the frame in seconds, so values are comparable
-between files of different sample rates. Edge cases: a mono file is measured as
-`L = R` (shares `0`, correlations `+1`); a file with more than two channels
-gets none of the four keys, because its layout is unknown. A share is absent
+between inputs of different sample rates. Edge cases: one channel is measured as
+`L = R` (shares `0`, correlations `+1`); more than two channels
+get none of the four keys, because the layout is unknown. A share is absent
 when `(var L + var R)/2` in its band is below −70 dB (silence, or nothing below
 150 Hz for the low share). Frames in which the variance of both channels is
 below −70 dB are left out of the correlation (a constant offset is not signal;
 it is removed before the low-pass as well), a frame in which one channel has zero variance
 counts as `0`, and both correlation keys are absent when no frame is left.
-`native_sample_rate` is set even then, so in a record that has it a missing
-key means "undefined", not "not measured".
+With the feature requested, a missing key means "undefined", not "not measured".
 
 Limitations (the sources of every parameter are in
 [docs/consumer-contract.md](docs/consumer-contract.md)):
@@ -1276,13 +1298,15 @@ plt.show()
 
 All arithmetic uses f32 precision (matching native decoder format), with a parallelized fused FFT pipeline where all features (spectral, tonal, contrast) are computed in a single pass per frame — eliminating redundant FFT computation and keeping data in L1 cache.
 
-### Analysis pipeline benchmarks (Apple Silicon)
+### Analysis pipeline benchmarks (Intel Core i7-11370H)
+
+One mono signal at 22 050 Hz through `analyze_signal`, best of repeated runs.
 
 | Mode | 10s track | 3-min track | Features |
 |------|-----------|-------------|----------|
-| `compact` | ~1.2 ms | ~39 ms | 11 core features |
-| `playlist` | ~4 ms | ~80 ms | 30+ features |
-| `full` | ~50 ms | ~510 ms | All features incl. time signature |
+| `compact` | ~3 ms | ~61 ms | 11 core features |
+| `playlist` | ~11 ms | ~213 ms | 30+ features |
+| `full` | ~26 ms | ~481 ms | All features incl. time signature |
 
 ### Feature benchmarks (vs Python/librosa)
 
@@ -1359,7 +1383,7 @@ sonara provides 100+ audio analysis functions:
 
 **Sequence Analysis:** `dtw`, `rqa`, `viterbi`, `viterbi_discriminative`, `viterbi_binary`, `recurrence_matrix`, `cross_similarity`, `path_enhance`
 
-**Perceptual:** `loudness_lufs`, `energy`, `danceability`, `detect_key`, `valence`, `acousticness`, `aggression_score`
+**Perceptual:** `energy`, `danceability`, `detect_key`, `valence`, `acousticness`, `aggression_score`
 
 **Conversions (50+):** `hz_to_mel`, `mel_to_hz`, `hz_to_midi`, `midi_to_hz`, `note_to_hz`, `note_to_midi`, `hz_to_note`, `hz_to_octs`, `hz_to_svara_h`, `hz_to_svara_c`, `hz_to_fjs`, `fft_frequencies`, `mel_frequencies`, `cqt_frequencies`, `frames_to_time`, `time_to_frames`, frequency weighting (A/B/C/D/Z), notation helpers, and more
 
@@ -1378,8 +1402,9 @@ sonara is a two-crate Rust workspace:
 sonara/src/
   analyze.rs      — Fused analysis pipeline (compact/playlist/full modes)
   aggression.rs   — Versioned 39-feature fused aggression model
-  perceptual.rs   — LUFS, energy, danceability, key detection, valence, acousticness
-  loudness_ext.rs — True peak (dBTP), ReplayGain, short-term curve, momentary max, EBU R128 LRA
+  perceptual.rs   — Energy, danceability, key detection, valence, acousticness
+  native_dynamics.rs — EBU R128 loudness, sample peak, crest factor, peak envelope
+  loudness_ext.rs — True peak (dBTP), ReplayGain
   tonal.rs        — HPCP, chord detection, dissonance (Sethares 1998)
   beat.rs         — Beat tracking (Ellis 2007 DP algorithm), tempo candidates, BPM range
   beatgrid.rs     — Beat grid: first-beat offset, downbeats, grid stability

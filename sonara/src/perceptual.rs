@@ -1,9 +1,8 @@
-//! Perceptual audio features: LUFS loudness, energy, danceability, key, valence, acousticness.
+//! Perceptual audio features: energy, danceability, key, valence, acousticness.
 //!
 //! These are higher-level features derived from the signal-level measurements
 //! already computed by the fused analysis pipeline. No additional FFT work.
 //!
-//! Tier 0 (standardized): LUFS integrated loudness (ITU-R BS.1770-4)
 //! Tier 1 (signal-grounded): energy, danceability, key detection
 //! Tier 2 (heuristic approximations): valence, acousticness, mood_*, instrumentalness
 //! Tier 3 (needs a model): genre
@@ -15,165 +14,6 @@
 use ndarray::ArrayView1;
 
 use crate::types::Float;
-
-// ============================================================
-// LUFS Integrated Loudness (ITU-R BS.1770-4 / EBU R128)
-// ============================================================
-
-/// K-weighting filter coefficients for a given sample rate.
-///
-/// Two cascaded biquad sections:
-/// 1. High-shelf (~+4dB above 1500 Hz) — head-related transfer function
-/// 2. High-pass at ~38 Hz — removes subsonic content
-///
-/// Coefficients are computed via bilinear transform from the analog prototypes
-/// defined in ITU-R BS.1770-4.
-struct KWeightCoeffs {
-    // Stage 1: high-shelf (b0, b1, b2, a1, a2) — a0 normalized to 1.0
-    s1_b: [Float; 3],
-    s1_a: [Float; 2], // a1, a2 (a0 = 1.0)
-    // Stage 2: high-pass
-    s2_b: [Float; 3],
-    s2_a: [Float; 2],
-}
-
-impl KWeightCoeffs {
-    fn for_sample_rate(sr: u32) -> Self {
-        let sr = sr as f64;
-
-        // Stage 1: High shelf filter
-        // Pre-warped analog prototype from BS.1770-4
-        let f0: f64 = 1681.974450955533;
-        let g: f64 = 3.999843853572914; // ~+4 dB
-        let q: f64 = 0.7071752369554196;
-
-        let k = (std::f64::consts::PI * f0 / sr).tan();
-        let vh = (10.0_f64).powf(g / 20.0);
-        let vb = vh.powf(0.4996667741545416);
-
-        let a0 = 1.0 + k / q + k * k;
-        let s1_b0 = ((vh + vb * k / q + k * k) / a0) as Float;
-        let s1_b1 = (2.0 * (k * k - vh) / a0) as Float;
-        let s1_b2 = ((vh - vb * k / q + k * k) / a0) as Float;
-        let s1_a1 = (2.0 * (k * k - 1.0) / a0) as Float;
-        let s1_a2 = ((1.0 - k / q + k * k) / a0) as Float;
-
-        // Stage 2: High-pass filter at ~38 Hz
-        let f0: f64 = 38.13547087602444;
-        let q: f64 = 0.5003270373238773;
-
-        let k = (std::f64::consts::PI * f0 / sr).tan();
-        let a0 = 1.0 + k / q + k * k;
-        let s2_b0 = (1.0 / a0) as Float;
-        let s2_b1 = (-2.0 / a0) as Float;
-        let s2_b2 = (1.0 / a0) as Float;
-        let s2_a1 = (2.0 * (k * k - 1.0) / a0) as Float;
-        let s2_a2 = ((1.0 - k / q + k * k) / a0) as Float;
-
-        KWeightCoeffs {
-            s1_b: [s1_b0, s1_b1, s1_b2],
-            s1_a: [s1_a1, s1_a2],
-            s2_b: [s2_b0, s2_b1, s2_b2],
-            s2_a: [s2_a1, s2_a2],
-        }
-    }
-}
-
-/// Compute integrated LUFS loudness per ITU-R BS.1770-4 / EBU R128.
-///
-/// This is the industry standard for loudness measurement, used by Spotify,
-/// YouTube, and broadcast. It applies K-weighting (models human loudness
-/// perception) then computes mean-square energy.
-///
-/// Returns the integrated loudness in LUFS (typically -60 to 0 for music).
-/// Silence returns -70.0 (the EBU R128 "absolute gate" threshold).
-///
-/// Performance: ~0.2-0.5ms for a 3-minute track (two biquad IIR passes).
-pub fn loudness_lufs(y: ArrayView1<Float>, sr: u32) -> Float {
-    let n = y.len();
-    if n == 0 {
-        return -70.0;
-    }
-
-    let c = KWeightCoeffs::for_sample_rate(sr);
-    // A strided view (`stereo[:, 0]`, `y[::2]`) has no slice: copy it once.
-    let y = y.as_standard_layout();
-    let raw = y.as_slice().unwrap();
-
-    // Apply K-weighting: two cascaded biquad sections (Direct Form II Transposed)
-    // We process both stages in a single pass to stay cache-friendly.
-    let mut s1_z1: Float = 0.0;
-    let mut s1_z2: Float = 0.0;
-    let mut s2_z1: Float = 0.0;
-    let mut s2_z2: Float = 0.0;
-    // f64: an f32 running sum stops growing once it dwarfs a single term,
-    // which reads long signals as quieter than they are.
-    let mut sum_sq: f64 = 0.0;
-
-    for i in 0..n {
-        // Stage 1: high shelf
-        let x = raw[i];
-        let y1 = c.s1_b[0] * x + s1_z1;
-        s1_z1 = c.s1_b[1] * x - c.s1_a[0] * y1 + s1_z2;
-        s1_z2 = c.s1_b[2] * x - c.s1_a[1] * y1;
-
-        // Stage 2: high pass
-        let y2 = c.s2_b[0] * y1 + s2_z1;
-        s2_z1 = c.s2_b[1] * y1 - c.s2_a[0] * y2 + s2_z2;
-        s2_z2 = c.s2_b[2] * y1 - c.s2_a[1] * y2;
-
-        sum_sq += f64::from(y2) * f64::from(y2);
-    }
-
-    let mean_sq = (sum_sq / n as f64) as Float;
-
-    if mean_sq < 1e-20 {
-        -70.0 // EBU R128 absolute gate
-    } else {
-        -0.691 + 10.0 * mean_sq.log10()
-    }
-}
-
-// --- loudness ---
-/// Apply the ITU-R BS.1770-4 K-weighting filter and return the filtered samples.
-///
-/// This shares the exact `KWeightCoeffs` biquad cascade that [`loudness_lufs`]
-/// uses, so block-based measurements built on top of it (momentary / short-term
-/// loudness, loudness range) are filtered identically to the integrated value —
-/// no duplicated filter definition. It does not gate or aggregate; callers window
-/// the returned mean-square energy themselves. Returns an empty vec for empty input.
-///
-/// (Appended in a marked block so parallel edits to this file stay isolated.)
-pub(crate) fn k_weighted_signal(y: ArrayView1<Float>, sr: u32) -> Vec<Float> {
-    let n = y.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let c = KWeightCoeffs::for_sample_rate(sr);
-    let mut out = vec![0.0 as Float; n];
-
-    // Two cascaded biquad sections (Direct Form II Transposed), single pass.
-    let mut s1_z1: Float = 0.0;
-    let mut s1_z2: Float = 0.0;
-    let mut s2_z1: Float = 0.0;
-    let mut s2_z2: Float = 0.0;
-
-    for (i, &x) in y.iter().enumerate() {
-        // Stage 1: high shelf
-        let y1 = c.s1_b[0] * x + s1_z1;
-        s1_z1 = c.s1_b[1] * x - c.s1_a[0] * y1 + s1_z2;
-        s1_z2 = c.s1_b[2] * x - c.s1_a[1] * y1;
-
-        // Stage 2: high pass
-        let y2 = c.s2_b[0] * y1 + s2_z1;
-        s2_z1 = c.s2_b[1] * y1 - c.s2_a[0] * y2 + s2_z2;
-        s2_z2 = c.s2_b[2] * y1 - c.s2_a[1] * y2;
-
-        out[i] = y2;
-    }
-    out
-}
-// --- end loudness ---
 
 // ============================================================
 // Key detection types
@@ -715,7 +555,6 @@ mod tests {
         let (y, sr) = crate::core::audio::load(path, 0, true, 0.0, 0.0).unwrap();
         for view in [y.slice(ndarray::s![..;2]), y.slice(ndarray::s![..;-1])] {
             let copy = Array1::from(view.to_vec());
-            assert_eq!(loudness_lufs(view, sr), loudness_lufs(copy.view(), sr));
             assert_eq!(
                 danceability_dfa(view, sr),
                 danceability_dfa(copy.view(), sr)
@@ -1284,54 +1123,5 @@ mod tests {
     #[test]
     fn test_key_candidates_empty_on_bad_len() {
         assert!(detect_key_candidates(&[0.0; 5]).is_empty());
-    }
-
-    // ---- LUFS tests ----
-
-    #[test]
-    fn test_lufs_silence() {
-        let y = Array1::<Float>::zeros(22050);
-        let lufs = loudness_lufs(y.view(), 22050);
-        assert_eq!(lufs, -70.0, "Silence should be -70 LUFS");
-    }
-
-    #[test]
-    fn test_lufs_loud_vs_quiet() {
-        let loud = Array1::from_shape_fn(22050, |i| {
-            (2.0 * std::f32::consts::PI * 1000.0 * i as Float / 22050.0).sin()
-        });
-        let quiet = loud.mapv(|v| v * 0.1);
-
-        let lufs_loud = loudness_lufs(loud.view(), 22050);
-        let lufs_quiet = loudness_lufs(quiet.view(), 22050);
-
-        assert!(
-            lufs_loud > lufs_quiet,
-            "Loud LUFS ({}) should be > quiet LUFS ({})",
-            lufs_loud,
-            lufs_quiet
-        );
-        // 10x amplitude = 20 dB difference
-        let diff = lufs_loud - lufs_quiet;
-        assert!(
-            (diff - 20.0).abs() < 2.0,
-            "LUFS difference {} should be ~20 dB for 10x amplitude ratio",
-            diff
-        );
-    }
-
-    #[test]
-    fn test_lufs_range() {
-        // Unit amplitude 1kHz sine should be around -3 LUFS
-        // (K-weighting boosts HF slightly, so slightly higher than pure RMS)
-        let y = Array1::from_shape_fn(44100, |i| {
-            (2.0 * std::f32::consts::PI * 1000.0 * i as Float / 22050.0).sin()
-        });
-        let lufs = loudness_lufs(y.view(), 22050);
-        assert!(
-            lufs > -10.0 && lufs < 5.0,
-            "Unit sine LUFS {} should be in reasonable range",
-            lufs
-        );
     }
 }

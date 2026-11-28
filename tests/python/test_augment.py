@@ -289,9 +289,8 @@ def _stereo_field_keys():
         quiet = measure("silence", np.zeros(t.size), np.zeros(t.size))[1]
         assert not STEREO_FIELD & set(quiet), sorted(STEREO_FIELD & set(quiet))
         assert quiet["native_sample_rate"] == STEREO_SR
-        # File-only: a bare signal has no channels to measure.
-        signal = sonara.analyze_signal(_y, sr=SR, features=["stereo_field"])
-        assert not STEREO_FIELD & set(signal), sorted(STEREO_FIELD & set(signal))
+        # A signal is measured like a file: one channel reads as L = R.
+        expect(sonara.analyze_signal(_y, sr=SR, features=["stereo_field"]), 0.0, 1.0)
         # Class A, opt-in: stored values survive the dict round trip, and a
         # refill needs the audio path.
         measured = STEREO_FIELD & set(anti)
@@ -308,7 +307,7 @@ def _stereo_field_keys():
         assert aug["bpm"] == rec["bpm"]
 
 
-test("stereo_field is opt-in (full or on request) and file-only, exact on synthetic stereo", _stereo_field_keys)
+test("stereo_field is opt-in (full or on request), exact on synthetic stereo", _stereo_field_keys)
 
 
 def _roundtrip_optin():

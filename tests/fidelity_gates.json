@@ -75,21 +75,21 @@
     },
     {
       "path": "sonara/src/core/audio.rs",
-      "base_sha256": "7b4b842e696069edf452ccf3dbcbab62137d32352eed9451f47ebfc0e80297b6",
-      "head_sha256": "d44274bb3282bbf21187f238aced0e90ce6629006ced42e65c5ff7dff4c0fe4e",
-      "reason": "extract the shared decode step and add an additive multichannel loader for the opt-in file-only features; load and load_with_tags run the same operations, existing analysis fields measured bit-identical on 60 real tracks (2026-11-19); since 2026-11-26 load with mono=false on a multi-channel file is an error instead of the first channel alone, every analysis path loads with mono=true and the 60 tracks stay identical; the same day the mono loader downmixes inside the decoded buffer with the same channel-order sum and the WAV reader reserves its buffer once: no value changes, 60 tracks identical"
+      "base_sha256": "d44274bb3282bbf21187f238aced0e90ce6629006ced42e65c5ff7dff4c0fe4e",
+      "head_sha256": "473330259670b2e6f0a9e7147360a318b731d9cb958da8f5a7d9c546970b7dfd",
+      "reason": "the in-buffer downmix moves into downmix_interleaved and decode_interleaved is visible to the crate (2026-11-28): analyze_file measures the channels on a view of the decoder's buffer and then mixes down in place, and the channel loader load_channels_with_tags, which the library no longer calls, is removed; no sample value changes. EBU Tech 3341/3342 set (70 files) and ITU-R BS.2217 (49 files) within tolerance; on 60 real tracks in three configurations the loudness fields equal the former ebur128_* values bit for bit, only dimension 39 of the embedding follows, and every other field is unchanged"
     },
     {
       "path": "sonara/src/native_dynamics.rs",
-      "base_sha256": null,
-      "head_sha256": "b292999aa13b533367a5d77eb4a3be3f73e667ac14baa04381e67855b71030a9",
-      "reason": "new module behind the opt-in file-only features ebur128, native_dynamics and amplitude_envelope; no existing field reads it; verified on the EBU Tech 3341/3342 and ITU-R BS.2217 sets (2026-11-19)"
+      "base_sha256": "b292999aa13b533367a5d77eb4a3be3f73e667ac14baa04381e67855b71030a9",
+      "head_sha256": "5cbfae5bdc0b32f6519e4440dca0eb55fb5228dbd653d7b53a12637c5eff4187",
+      "reason": "ebur128 also returns the short-term curve (3 s window, 1 s hop), measures the mono mix as one channel past six channels and skips the true peak when the loudness group is not requested (2026-11-28). EBU Tech 3341/3342 set (70 files) and ITU-R BS.2217 (49 files) within tolerance; on 60 real tracks in three configurations the loudness fields equal the former ebur128_* values bit for bit, only dimension 39 of the embedding follows, and every other field is unchanged"
     },
     {
       "path": "tests/python/test_native_dynamics.py",
-      "base_sha256": null,
-      "head_sha256": "bad229a21bf7ae34a2b54dd2d8dd105ce3a1aa3a7e27c4c2866670e9fc03882d",
-      "reason": "tests for the file-only features ebur128, native_dynamics and amplitude_envelope (new on this branch); since 2026-11-26 full mode computes them, so the absence check covers compact and playlist and full is checked for every key; no existing analysis value changes"
+      "base_sha256": "bad229a21bf7ae34a2b54dd2d8dd105ce3a1aa3a7e27c4c2866670e9fc03882d",
+      "head_sha256": "a21290698fc5cae145828b72ea239a29a7cc1ac5edfebfcbbca1ea867173b92d",
+      "reason": "the ebur128 keys become the loudness group and a signal carries the channel features (owner's decision, 2026-11-28): the check that a signal never has the keys is replaced by a stereo signal read against the file with the same channels and by a refused (samples, channels) array, and an empty signal must be reported as empty; ten checks pass on the new build"
     },
     {
       "path": "tests/python/test_beatgrid.py",
@@ -117,9 +117,9 @@
     },
     {
       "path": "tests/python/test_loudness.py",
-      "base_sha256": "9ec9f8342f1ce606dd56dbd5876882da407d7ee1a8cc65c19993d8243a425beb",
-      "head_sha256": "5ba591e0ccee72ad45ceefd6c53a5f6d796d4239a963bdf5073dfb32852c447e",
-      "reason": "full mode now computes every opt-in feature (2026-11-26): the absence check is narrowed to compact and playlist and a presence check in full is added; no analysis value changes"
+      "base_sha256": "5ba591e0ccee72ad45ceefd6c53a5f6d796d4239a963bdf5073dfb32852c447e",
+      "head_sha256": "4e20d1fdf96af48bc0d6171d952534cd2a3b27cd580c5e9251b233c57ea85396",
+      "reason": "the loudness group gains loudness_short_term_max_db (2026-11-28); the seven checks are otherwise unchanged and pass on the new build"
     },
     {
       "path": "tests/python/test_structure.py",
@@ -141,9 +141,9 @@
     },
     {
       "path": "sonara-python/src/array.rs",
-      "base_sha256": "54029f13218432853717c99c327ad885e41537ee1cc0afa28ed3b08a40cdf5b8",
-      "head_sha256": "7843e3e64dcbe252f3796d05bb0f61e02746dcc2d7043b035b5f90295981b1f6",
-      "reason": "add AudioIn1, an audio argument that accepts floating-point samples only, for analyze_signal and analyze_aggression_signal (2026-11-26); ArrayIn is untouched and floating-point input converts exactly as before"
+      "base_sha256": "7843e3e64dcbe252f3796d05bb0f61e02746dcc2d7043b035b5f90295981b1f6",
+      "head_sha256": "06f0403f31224b756d56738c1d50cc30fb06d230b9a37eb15c7ec703383960e1",
+      "reason": "AudioIn accepts a 1-D or a 2-D (channels, samples) floating-point array for analyze_signal (2026-11-28); AudioIn1 and the integer-dtype refusal are unchanged; all 17 Python suites pass"
     },
     {
       "path": "sonara-python/src/core/audio.rs",
@@ -171,15 +171,15 @@
     },
     {
       "path": "sonara/src/perceptual.rs",
-      "base_sha256": "9f3ebdd59daf147129e0eb2773735ee0c8e6119bfa81212970edf8b42baed359",
-      "head_sha256": "d37f7e319b4ae984a39a35820906d437d2785525f26492e2409f5c159a34566c",
-      "reason": "two changes (2026-11-26). The module comment says that genre is filled by a user-supplied model instead of calling it a future placeholder. loudness_lufs accumulates the K-weighted sum of squares in f64 instead of f32, whose running sum stopped growing on long signals; filter coefficients and the formula are untouched. Evidence: a periodic sine and a multi-tone signal of 10 s, 5, 30, 60 and 120 min read -23.0685 and -22.5434 LUFS at every length (before: down to -28.51 and -24.37 at 120 min) and match an independent f64 scipy computation within 0.0001 dB; a real track repeated to 66 min reads the same as once (before: 0.76 dB lower). On 60 real tracks loudness_lufs rises by 0.02..0.11 dB, replaygain_db and embedding dimension 39 follow, and every other field is identical; mood and aggression fields are identical"
+      "base_sha256": "d37f7e319b4ae984a39a35820906d437d2785525f26492e2409f5c159a34566c",
+      "head_sha256": "ca74d2f3cb44cf557afc53df3da583617b2177ad01578054c85e8ed6f784dc99",
+      "reason": "the ungated mono loudness_lufs and its K-weighting helper are removed by the owner's decision (2026-11-28): loudness_lufs is the BS.1770 integrated loudness measured on the channels in native_dynamics; no other function of the file changes. EBU Tech 3341/3342 set (70 files) and ITU-R BS.2217 (49 files) within tolerance; on 60 real tracks in three configurations the loudness fields equal the former ebur128_* values bit for bit, only dimension 39 of the embedding follows, and every other field is unchanged"
     },
     {
       "path": "sonara/src/loudness_ext.rs",
-      "base_sha256": "c798d52f1aeae9102244048f7ea5880d0b98380680136ca71f242a285ce9c27d",
-      "head_sha256": "1402a6e0740a13439534b869afc9c3a7bd810fcb895b812f7c938abe3b865d28",
-      "reason": "the f64 prefix sum of squares is kept only at block edges (2026-11-26): the running sum is accumulated sample by sample as before, so every value read is unchanged; loudness fields identical on 60 real tracks and on 30- and 60-minute signals"
+      "base_sha256": "1402a6e0740a13439534b869afc9c3a7bd810fcb895b812f7c938abe3b865d28",
+      "head_sha256": "8a97128a01e9a24f2750b4f397e343f6546651cb96a868872bede5abcc0a08ff",
+      "reason": "the mono short-term, momentary and loudness-range functions are removed by the owner's decision (2026-11-28); true_peak_db and replaygain_db, which the standard measurement uses, are unchanged. EBU Tech 3341/3342 set (70 files) and ITU-R BS.2217 (49 files) within tolerance; on 60 real tracks in three configurations the loudness fields equal the former ebur128_* values bit for bit, only dimension 39 of the embedding follows, and every other field is unchanged"
     },
     {
       "path": "sonara/src/tonal.rs",

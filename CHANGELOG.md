@@ -4,6 +4,51 @@ All notable changes to sonara are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **One path for every input.** `analyze_file`, `analyze_batch` and
+  `analyze_signal` all go through the new Rust entry
+  `analyze_channels(channels, channels_sr, sr, config)`: loudness, dynamics and
+  the stereo field are measured on the input's own channels at their own sample
+  rate, then the channels are mixed to mono and resampled to the analysis rate
+  for everything else. The Rust `analyze_signal` is its one-channel case.
+- **Python `analyze_signal` takes channels.** `y` is a mono array or a 2-D
+  array shaped `(channels, samples)`; `sr` is the rate of `y` and the new
+  `target_sr` is the rate the analysis runs at (default: `sr`). A 2-D array
+  with more channels than samples raises `ValueError`. `native_dynamics`,
+  `amplitude_envelope` and `stereo_field` are computed for signals as for
+  files; only `tags` stays file-only.
+- **Loudness is one standard measurement.** `loudness_lufs` is the gated
+  integrated loudness of ITU-R BS.1770-5 / EBU Tech 3341, measured on the
+  channels at their own rate; it was an ungated measurement of the mono mix at
+  the analysis rate. It reads `-70.0` for digital silence and for a signal
+  under 400 ms. The `loudness` group (`true_peak_db`, `replaygain_db`,
+  `loudness_curve`, `loudness_momentary_max_db`, `loudness_range_lu`) comes
+  from the same measurement, and a key of the group is absent when its value
+  is undefined. With more than six channels the loudness is measured on the
+  mono mix as one channel. `augment_analysis` with `loudness` rewrites
+  `loudness_lufs` together with the group. Stored values of these fields and of dimension 39
+  of `embedding` differ from a fresh run; `ANALYSIS_SCHEMA_VERSION` and
+  `SIMILARITY_VERSION` are unchanged.
+
+### Added
+
+- `loudness_short_term_max_db` in the `loudness` group: the maximum short-term
+  (3 s) loudness.
+- `native_channels`, the number of channels the channel features were measured
+  on. It and `native_sample_rate` are part of every result.
+
+### Removed
+
+- The `ebur128` feature and its keys: `ebur128_integrated_lufs` (read
+  `loudness_lufs`), `ebur128_momentary_max_lufs` (`loudness_momentary_max_db`),
+  `ebur128_short_term_max_lufs` (`loudness_short_term_max_db`),
+  `ebur128_range_lu` (`loudness_range_lu`) and `ebur128_true_peak_dbtp`
+  (`true_peak_db`).
+- Rust: `perceptual::loudness_lufs` and, in `loudness_ext`, `loudness_metrics`,
+  `LoudnessMetrics`, `loudness_curve`, `loudness_momentary_max_db` and
+  `loudness_range_lu`. `native_dynamics::ebur128` is the loudness measurement.
+
 ## [0.3.7-bpm-precision-20261005] - 2026-10-05
 
 Fork release of package `0.3.7` (tag `v0.3.7-bpm-precision-20261005`): the 0.3.7

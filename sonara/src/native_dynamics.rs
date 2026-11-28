@@ -1,13 +1,13 @@
-//! Loudness and dynamics measured on the file's own channels and sample rate.
+//! Loudness and dynamics measured on a signal's own channels and sample rate.
 //!
 //! - [`ebur128`] — ITU-R BS.1770-5 / EBU Tech 3341 + 3342: integrated,
-//!   momentary max, short-term max, loudness range, true peak.
+//!   momentary max, short-term max and curve, loudness range, true peak.
 //! - [`native_dynamics`] — sample peak, crest factor and a peak envelope on the
 //!   analyzer's frame grid.
 //!
 //! Pure functions: no file access, no dependence on the analysis sample rate.
 
-use ndarray::{s, ArrayView2};
+use ndarray::{s, ArrayView2, Axis};
 
 use crate::loudness_ext::true_peak_db;
 use crate::types::Float;
@@ -16,20 +16,26 @@ use crate::types::Float;
 pub const ENVELOPE_FRAME_SEC: f64 = 2048.0 / 22050.0;
 pub const ENVELOPE_HOP_SEC: f64 = 512.0 / 22050.0;
 
-const ABS_GATE_LUFS: f64 = -70.0;
+/// Absolute gate of BS.1770: quieter blocks do not count as programme.
+pub(crate) const ABS_GATE_LUFS: f64 = -70.0;
 /// Peaks at or below this are digital silence: the dB value is undefined.
 const SILENCE_PEAK: Float = 1e-12;
 /// Sub-blocks per momentary (400 ms) and short-term (3 s) window.
 const MOMENTARY_SUBS: usize = 40;
 const SHORT_TERM_SUBS: usize = 300;
+/// Sub-blocks between two values of the short-term curve (1 s).
+const CURVE_HOP_SUBS: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ebur128 {
     pub integrated_lufs: Option<Float>,
     pub momentary_max_lufs: Option<Float>,
     pub short_term_max_lufs: Option<Float>,
     pub range_lu: Option<Float>,
     pub true_peak_dbtp: Option<Float>,
+    /// Short-term (3 s) loudness in LUFS once per second, the first window at
+    /// sample 0; a window below the absolute gate reads -70. Empty under 3 s.
+    pub short_term_curve: Vec<Float>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,25 +204,34 @@ fn gate(mean_sq: impl Iterator<Item = f64>, relative_lu: f64) -> Vec<f64> {
 }
 
 /// EBU R128 loudness of a multichannel signal. `channels` is
-/// (n_channels, n_samples) at the file's own sample rate `sr`.
+/// (n_channels, n_samples) at its own sample rate `sr`.
 pub fn ebur128(channels: ArrayView2<Float>, sr: u32) -> Ebur128 {
+    ebur128_with(channels, sr, true)
+}
+
+/// [`ebur128`]; without `true_peak` the 4x oversampling is skipped and
+/// `true_peak_dbtp` stays `None`.
+pub(crate) fn ebur128_with(channels: ArrayView2<Float>, sr: u32, true_peak: bool) -> Ebur128 {
     let mut out = Ebur128 {
         integrated_lufs: None,
         momentary_max_lufs: None,
         short_term_max_lufs: None,
         range_lu: None,
         true_peak_dbtp: None,
+        short_term_curve: Vec::new(),
     };
     if sr == 0 || channels.is_empty() {
         return out;
     }
 
     // BS.1770 weights follow speaker positions; past 5.1 the channel count
-    // alone does not say which channel sits where, so loudness stays undefined.
+    // alone does not say which channel sits where, so the mono mix is measured
+    // as one channel.
     let energy = if channels.nrows() <= 6 {
         sub_block_energy(channels, sr)
     } else {
-        Vec::new()
+        let mono = crate::core::audio::to_mono(channels);
+        sub_block_energy(mono.view().insert_axis(Axis(0)), sr)
     };
     let mut prefix = Vec::with_capacity(energy.len() + 1);
     let mut total = 0.0f64;
@@ -230,6 +245,11 @@ pub fn ebur128(channels: ArrayView2<Float>, sr: u32) -> Ebur128 {
 
     out.momentary_max_lufs = max_lufs(&momentary);
     out.short_term_max_lufs = max_lufs(&short_term);
+    out.short_term_curve = short_term
+        .iter()
+        .step_by(CURVE_HOP_SUBS)
+        .map(|&z| lufs(z).max(ABS_GATE_LUFS) as Float)
+        .collect();
 
     // Gating blocks overlap by 75%: every 10th 10 ms position.
     let gated = gate(momentary.iter().copied().step_by(10), 10.0);
@@ -248,6 +268,9 @@ pub fn ebur128(channels: ArrayView2<Float>, sr: u32) -> Ebur128 {
         out.range_lu = finite(at(0.95) - at(0.10));
     }
 
+    if !true_peak {
+        return out;
+    }
     out.true_peak_dbtp = channels
         .outer_iter()
         // true_peak_db reports a -70 floor for silence; skip those rows instead.
@@ -273,7 +296,7 @@ fn frame_center(k: usize, sr: u32) -> usize {
     ((k as u64 * 512 * sr as u64 + 11025) / 22050) as usize
 }
 
-/// Peak, crest factor and peak envelope over the file's own channels (not a
+/// Peak, crest factor and peak envelope over the signal's own channels (not a
 /// mono mix). `channels` is (n_channels, n_samples) at sample rate `sr`.
 pub fn native_dynamics(channels: ArrayView2<Float>, sr: u32) -> NativeDynamics {
     let mut out = NativeDynamics {
@@ -410,6 +433,9 @@ mod tests {
             assert!(close(r.integrated_lufs, -23.0, 0.1), "{sr}: {r:?}");
             assert!(close(r.momentary_max_lufs, -23.0, 0.1), "{sr}: {r:?}");
             assert!(close(r.short_term_max_lufs, -23.0, 0.1), "{sr}: {r:?}");
+            // 3 s windows at a 1 s hop: floor(20 - 3) + 1 values.
+            assert_eq!(r.short_term_curve.len(), 18, "{sr}");
+            assert!(r.short_term_curve.iter().all(|&v| close(Some(v), -23.0, 0.1)));
         }
         let mono = ebur128(tone(1, 48000, &[(-23.0, 20.0)]).view(), 48000);
         assert!(close(mono.integrated_lufs, -26.0, 0.1), "{mono:?}");
@@ -444,13 +470,11 @@ mod tests {
         assert_eq!(channel_weights(4), [1.0, 1.0, 1.41, 1.41]);
         assert_eq!(channel_weights(5), [1.0, 1.0, 1.0, 1.41, 1.41]);
 
-        // Unknown layout (> 5.1): no loudness, the peak needs no layout.
+        // Unknown layout (> 5.1): the mono mix as one channel, which reads the
+        // tone as a mono file does; the peak needs no layout.
         let wide = tone(8, 48000, &[(-23.0, 5.0)]);
         let r = ebur128(wide.view(), 48000);
-        assert_eq!(
-            (r.integrated_lufs, r.momentary_max_lufs, r.range_lu),
-            (None, None, None)
-        );
+        assert!(close(r.integrated_lufs, -26.0, 0.1), "{r:?}");
         assert!(close(r.true_peak_dbtp, -23.0, 0.1), "{r:?}");
     }
 
@@ -525,10 +549,16 @@ mod tests {
             short_term_max_lufs: None,
             range_lu: None,
             true_peak_dbtp: None,
+            short_term_curve: Vec::new(),
         };
 
+        // Silence has no levels; its three short-term windows sit at the gate.
         let silence = Array2::<Float>::zeros((2, 48000 * 5));
-        assert_eq!(ebur128(silence.view(), 48000), none);
+        let quiet = Ebur128 {
+            short_term_curve: vec![-70.0; 3],
+            ..none.clone()
+        };
+        assert_eq!(ebur128(silence.view(), 48000), quiet);
         let d = native_dynamics(silence.view(), 48000);
         assert_eq!(d.sample_peak_dbfs, None);
         assert_eq!(d.crest_factor_db, None);
@@ -560,6 +590,7 @@ mod tests {
         assert!(close(r.integrated_lufs, -23.0, 0.1), "{r:?}");
         assert_eq!(r.short_term_max_lufs, None);
         assert_eq!(r.range_lu, None);
+        assert!(r.short_term_curve.is_empty());
     }
 
     #[test]

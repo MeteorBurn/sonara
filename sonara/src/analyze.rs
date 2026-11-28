@@ -6,14 +6,20 @@
 //! ## Modes
 //!
 //! - **Compact** (default): core signal features — tempo, beats, onsets, RMS,
-//!   centroid, ZCR, dynamic range. ~0.6ms per 10s track.
+//!   centroid, ZCR, dynamic range. ~3ms per 10s track.
 //! - **Playlist**: everything needed for playlist generation — adds spectral
 //!   features, MFCCs, chroma, plus perceptual features (energy, danceability,
-//!   key, valence, acousticness). ~3ms per 10s track.
+//!   key, valence, acousticness). ~11ms per 10s track.
 //! - **Full**: every registered feature — Playlist plus `tempo_curve`,
-//!   `time_signature` and all opt-in families (see `FEATURE_REGISTRY`). The
-//!   file-only ones (`ebur128`, `native_dynamics`, `amplitude_envelope`,
-//!   `stereo_field`, `tags`) are measured by `analyze_file` / `analyze_batch`.
+//!   `time_signature` and all opt-in families (see `FEATURE_REGISTRY`). `tags`
+//!   is file-only: it is read by `analyze_file` / `analyze_batch`.
+//!
+//! ## Inputs
+//!
+//! A file and a signal take one path, [`analyze_channels`]: loudness, dynamics
+//! and the stereo field are measured on the channels at their own rate, then
+//! the channels are mixed to mono and resampled to the analysis rate for
+//! everything else.
 //!
 //! ## Algorithms
 //!
@@ -706,7 +712,7 @@ impl PairSums {
     }
 }
 
-/// Stereo field of a file's channels (rows) at its sample rate `sr`: the Side
+/// Stereo field of the channels (rows) at their sample rate `sr`: the Side
 /// share of the energy, whole and below 150 Hz, and the mean and 5th
 /// percentile of the per-frame correlation of the unfiltered channels. One
 /// channel reads as `L = R`; everything is `None` for no or over two channels.
@@ -842,16 +848,15 @@ pub(crate) fn validated_zero_crossing_rate(y: ndarray::ArrayView1<Float>) -> Res
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisMode {
     /// Core signal features only: tempo, beats, onsets, RMS, centroid, ZCR,
-    /// dynamic range. (~0.6ms per 10s track)
+    /// dynamic range. (~3ms per 10s track)
     Compact,
     /// All features for playlist generation: adds spectral bandwidth/rolloff/
     /// flatness/contrast, MFCCs, chroma, plus perceptual features (energy,
-    /// danceability, key, valence, acousticness). (~3ms per 10s track)
+    /// danceability, key, valence, acousticness). (~11ms per 10s track)
     Playlist,
     /// Every feature: Playlist plus the expensive rhythm analysis
     /// (tempo_curve, time_signature) and all opt-in features.
-    /// The file-only ones (ebur128, native_dynamics, amplitude_envelope,
-    /// stereo_field, tags) need `analyze_file` / `analyze_batch`.
+    /// The file-only `tags` need `analyze_file` / `analyze_batch`.
     Full,
 }
 
@@ -1060,10 +1065,9 @@ const FEATURE_REGISTRY: &[FeatureSpec] = &[
     #[cfg(feature = "aggression")]
     feature("aggression", true, true, false, A, &[]),
     feature("fingerprint", false, true, false, A, &[]),
+    // Measured on the input's own channels and sample rate, before the mono
+    // mix: see `measure_channels`.
     feature("loudness", false, true, false, A, &[]),
-    // File-only (analyze_file / analyze_batch): measured on the file's own
-    // channels and sample rate, see `crate::native_dynamics`.
-    feature("ebur128", false, true, false, A, &[]),
     feature("native_dynamics", false, true, false, A, &[]),
     feature("amplitude_envelope", false, true, false, A, &[]),
     feature("stereo_field", false, true, false, A, &[]),
@@ -1247,15 +1251,14 @@ pub struct AnalysisConfig {
     /// `embedding` (similarity vector; auto-pulls the features it is built from),
     /// `aggression` (bundled model score; available with the `aggression` Cargo feature),
     /// `fingerprint` (duplicate-detection fingerprint),
-    /// `loudness` (true peak, ReplayGain, loudness curve, momentary max, LRA),
+    /// `loudness` (true peak, ReplayGain, loudness curve, momentary and
+    /// short-term max, LRA), `native_dynamics` (sample peak and crest factors),
+    /// `amplitude_envelope`, `stereo_field` (Side share and L/R correlation),
     /// `silence` (leading/trailing silence offsets),
     /// `key_candidates` (top-3 keys), `vocalness` and `instrumentalness`
     /// (vocal presence and its inverse), `mood` (four mood affinities)
     ///
     /// **Opt-in, files only (`analyze_file` / `analyze_batch`):**
-    /// `ebur128` (EBU R128 loudness of the file's own channels),
-    /// `native_dynamics` (sample peak and crest factors),
-    /// `amplitude_envelope`, `stereo_field` (Side share and L/R correlation),
     /// `tags` (file metadata)
     ///
     /// Note: `duration` is always included. Some features depend on others
@@ -1779,59 +1782,54 @@ pub struct TrackAnalysis {
     pub onset_frames: Vec<usize>,
     pub rms_mean: Float,
     pub rms_max: Float,
+    // --- measured on the channels ---
+    // Loudness, dynamics and the stereo field are measured on the input's own
+    // channels at its own sample rate, before the mono mix and the resampling
+    // (see `measure_channels` and `crate::native_dynamics`).
+    /// Integrated (programme) loudness in LUFS, ITU-R BS.1770-5 / EBU Tech
+    /// 3341 with absolute (-70 LUFS) and relative (-10 LU) gating. Channels in
+    /// WAV order (L R C LFE Ls Rs, LFE excluded); past six channels the layout
+    /// is unknown and the mono mix is measured as one channel. -70 when the
+    /// standard gives no value: digital silence or a signal under 400 ms.
     pub loudness_lufs: Float,
     pub dynamic_range_db: Float,
 
     // --- loudness ---
-    // Extended loudness / gain metrics (opt-in via `features=["loudness"]`).
-    // `Some` only when the "loudness" group is computed (Full mode or a request).
-    /// True peak in dBTP (4x oversampled, ITU-R BS.1770-4 Annex 2). ~0 dBTP is
-    /// full scale; > 0 dBTP means inter-sample overs that can clip on playback.
+    // The rest of the loudness measurement, opt-in via `features=["loudness"]`
+    // or Full mode. `None` when the group was not requested or the value is
+    // undefined (digital silence, signal shorter than the window).
+    /// True peak in dBTP (4x oversampled, BS.1770-5 Annex 2), the maximum over
+    /// the channels. ~0 dBTP is full scale; > 0 dBTP means inter-sample overs
+    /// that can clip on playback. Accurate to the EBU Tech 3341 tolerance
+    /// (+0.2 / -0.4 dB): it can read up to 0.4 dB low.
     pub true_peak_db: Option<Float>,
     /// ReplayGain-style track gain in dB to reach the -18 LUFS reference:
-    /// `-18 - loudness_lufs`.
+    /// `-18 - loudness_lufs`. `None` when the integrated loudness is undefined.
     pub replaygain_db: Option<Float>,
-    /// Short-term loudness curve: one LUFS value per 3 s window at a 1 s hop
-    /// (ITU-R BS.1770 short-term integration). Empty for tracks under one window.
+    /// Short-term loudness curve: one LUFS value per 3 s window at a 1 s hop,
+    /// the first window at sample 0 (EBU Tech 3341 short-term). A window below
+    /// the absolute gate reads -70. Empty for signals under one window.
     pub loudness_curve: Option<Vec<Float>>,
-    /// Maximum momentary (400 ms window) loudness, dB (EBU R128 momentary).
+    /// Maximum momentary (400 ms) loudness in LUFS, EBU Tech 3341.
     pub loudness_momentary_max_db: Option<Float>,
-    /// EBU R128 loudness range (LRA) in LU: gated 95th-10th percentile spread of
-    /// the short-term loudness distribution. The standardized counterpart to the
-    /// approximate `dynamic_range_db` (which is a raw p95-p5 of RMS).
+    /// Maximum short-term (3 s) loudness in LUFS, EBU Tech 3341.
+    pub loudness_short_term_max_db: Option<Float>,
+    /// Loudness range (LRA) in LU, EBU Tech 3342. The standardized counterpart
+    /// to the approximate `dynamic_range_db` (which is a raw p95-p5 of RMS).
     pub loudness_range_lu: Option<Float>,
     // --- end loudness ---
-    // --- ebur128 / native_dynamics / amplitude_envelope ---
-    // File-only, opt-in via `features=[...]`: measured by `analyze_file` /
-    // `analyze_batch` on the file's own channels at its own sample rate
-    // (see `crate::native_dynamics`). `None` when the feature was not
-    // requested, when the analysis ran through `analyze_signal`, or when the
-    // value is undefined (digital silence, file shorter than the window).
-    // Unlike `loudness_lufs` / `true_peak_db` (mono mix at the analysis rate,
-    // ungated), these follow the standards on the original channels.
-    /// `ebur128`: integrated (programme) loudness in LUFS, ITU-R BS.1770-5 /
-    /// EBU Tech 3341 with absolute (-70 LUFS) and relative (-10 LU) gating.
-    /// Channels in WAV order (L R C LFE Ls Rs, LFE excluded); the loudness
-    /// fields are `None` past six channels, where the layout is unknown.
-    pub ebur128_integrated_lufs: Option<Float>,
-    /// `ebur128`: maximum momentary (400 ms) loudness in LUFS, EBU Tech 3341.
-    pub ebur128_momentary_max_lufs: Option<Float>,
-    /// `ebur128`: maximum short-term (3 s) loudness in LUFS, EBU Tech 3341.
-    pub ebur128_short_term_max_lufs: Option<Float>,
-    /// `ebur128`: loudness range (LRA) in LU, EBU Tech 3342.
-    pub ebur128_range_lu: Option<Float>,
-    /// `ebur128`: true peak in dBTP (4x oversampled, BS.1770-5 Annex 2), the
-    /// maximum over the file's channels. Accurate to the EBU Tech 3341
-    /// tolerance (+0.2 / -0.4 dB): it can read up to 0.4 dB low.
-    pub ebur128_true_peak_dbtp: Option<Float>,
-    /// Sample rate of the file in Hz, the rate the file-only features are
-    /// measured at. `Some` whenever any of `ebur128`, `native_dynamics`,
-    /// `amplitude_envelope` or `stereo_field` was measured from a file, so it
-    /// tells "measured, value undefined" (a level is `None`) from "never
-    /// measured" (a signal).
+    /// Sample rate in Hz the channel features were measured at: the file's own
+    /// rate, or the rate of the signal passed in.
     pub native_sample_rate: Option<u32>,
-    /// `native_dynamics`: sample peak in dBFS, max |x| over the file's channels
-    /// (not the mono mix).
+    /// Number of channels the channel features were measured on. With
+    /// `native_sample_rate` it is set by every analysis, so a missing level
+    /// means "undefined", not "never measured".
+    pub native_channels: Option<usize>,
+    // --- native_dynamics / amplitude_envelope ---
+    // Opt-in via `features=[...]` or Full mode. `None` when the feature was
+    // not requested or the value is undefined (digital silence).
+    /// `native_dynamics`: sample peak in dBFS, max |x| over the channels (not
+    /// the mono mix).
     pub sample_peak_dbfs: Option<Float>,
     /// `native_dynamics`: crest factor in dB, track peak over the RMS of all
     /// samples of all channels.
@@ -1839,8 +1837,8 @@ pub struct TrackAnalysis {
     /// `native_dynamics`: mean of the per-frame crest factor in dB over frames
     /// whose RMS is above -70 dBFS (frames of `amplitude_envelope`).
     pub crest_factor_frame_mean_db: Option<Float>,
-    /// `amplitude_envelope`: peak envelope, max |x| over the file's channels in
-    /// each frame. The grid is in seconds, not samples: frame 2048/22050 s, hop
+    /// `amplitude_envelope`: peak envelope, max |x| over the channels in each
+    /// frame. The grid is in seconds, not samples: frame 2048/22050 s, hop
     /// 512/22050 s, frame `k` centred at `k * amplitude_envelope_hop_sec`.
     pub amplitude_envelope: Option<Vec<Float>>,
     /// `amplitude_envelope`: hop between envelope frames in seconds.
@@ -1848,12 +1846,12 @@ pub struct TrackAnalysis {
     /// `amplitude_envelope`: envelope frame length in seconds.
     pub amplitude_envelope_frame_sec: Option<Float>,
     // --- stereo_field ---
-    // File-only and opt-in like the group above, measured on the left and
-    // right channels of the file. A mono file reads as L = R (shares 0,
-    // correlation +1). `None` when not requested, for a signal, for a file
-    // with more than two channels (unknown layout), and where noted below.
+    // Opt-in like the group above, measured on the left and right channels.
+    // One channel reads as L = R (shares 0, correlation +1). `None` when not
+    // requested, with more than two channels (unknown layout), and where noted
+    // below.
     /// `stereo_field`: share of the Side signal in the energy of the whole
-    /// file, `E_S / (E_M + E_S)` with `M = (L + R) / 2`, `S = (L - R) / 2` and
+    /// signal, `E_S / (E_M + E_S)` with `M = (L + R) / 2`, `S = (L - R) / 2` and
     /// each channel's mean removed, in `[0, 1]`: 0 for identical channels, 0.5
     /// for unrelated ones, 1 for an inverted channel (Tardieu et al. 2011,
     /// eq. 3, in bounded form). `None` when the mean variance of the channels
@@ -1861,8 +1859,8 @@ pub struct TrackAnalysis {
     pub stereo_side_ratio: Option<Float>,
     /// `stereo_field`: the same share below 150 Hz, after a Butterworth
     /// low-pass of order 4 on both channels (means removed first). `None`
-    /// when the filtered channels are below -70 dB or the file's Nyquist
-    /// frequency is at most 150 Hz.
+    /// when the filtered channels are below -70 dB or the Nyquist frequency
+    /// is at most 150 Hz.
     pub stereo_side_ratio_low: Option<Float>,
     /// `stereo_field`: mean of the Pearson correlation of the left and right
     /// channels over frames of 2048/22050 s without overlap (Ziemer 2023), in
@@ -2370,98 +2368,130 @@ pub(crate) fn catch_analysis_panic<T>(run: impl FnOnce() -> Result<T>) -> Result
     })
 }
 
-/// Analyze a track from a file path with the given configuration.
+/// What is measured on the input's own channels at their own rate, before the
+/// mono mix.
+struct ChannelMeasures {
+    channels: usize,
+    sample_rate: u32,
+    loudness: crate::native_dynamics::Ebur128,
+    dynamics: Option<crate::native_dynamics::NativeDynamics>,
+    stereo: Option<StereoField>,
+}
+
+/// Validate `channels` (n_channels, n_samples) at `sr` and measure what the
+/// configuration asks of them. The integrated loudness is always measured.
+fn measure_channels(
+    channels: ArrayView2<Float>,
+    sr: u32,
+    config: &AnalysisConfig,
+) -> Result<ChannelMeasures> {
+    if sr == 0 {
+        return Err(SonaraError::InvalidParameter {
+            param: "sr",
+            reason: "sample rate must be greater than zero".into(),
+        });
+    }
+    if channels.is_empty() {
+        return Err(SonaraError::InvalidAudio(
+            "signal must contain at least one sample".into(),
+        ));
+    }
+    // One pass over the buffer; the per-channel check only names the bad sample.
+    let finite = match channels.as_slice_memory_order() {
+        Some(samples) => samples.iter().all(|sample| sample.is_finite()),
+        None => channels.iter().all(|sample| sample.is_finite()),
+    };
+    if !finite {
+        for row in channels.outer_iter() {
+            validated_zero_crossing_rate(row)?;
+        }
+    }
+    Ok(ChannelMeasures {
+        channels: channels.nrows(),
+        sample_rate: sr,
+        // The true peak is the costly part: only the `loudness` group reads it.
+        loudness: crate::native_dynamics::ebur128_with(channels, sr, config.wants("loudness")),
+        dynamics: (config.wants("native_dynamics") || config.wants("amplitude_envelope"))
+            .then(|| crate::native_dynamics::native_dynamics(channels, sr)),
+        stereo: config
+            .wants("stereo_field")
+            .then(|| stereo_field(channels, sr)),
+    })
+}
+
+/// Analyze a track from a file path with the given configuration: the decoded
+/// channels take the path of [`analyze_channels`], plus the file's tags.
 pub fn analyze_file(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
     catch_analysis_panic(|| analyze_file_unguarded(path, sr, config))
 }
 
 fn analyze_file_unguarded(path: &Path, sr: u32, config: &AnalysisConfig) -> Result<TrackAnalysis> {
     config.validate()?;
-    // Tags are file-only metadata (see `TrackTags`): read them during load when
-    // requested, then post-fill the result. When not requested, `load_with_tags`
-    // does zero extra work — identical to the plain `load` fast path.
-    let want_tags = config.wants("tags");
-    // File-only loudness/dynamics/stereo need the file's own channels and rate: decode
-    // once without downmixing, measure, then continue on the same mono mix
-    // `load_with_tags` would have produced.
-    let want_ebur128 = config.wants("ebur128");
-    let want_dynamics = config.wants("native_dynamics");
-    let want_envelope = config.wants("amplitude_envelope");
-    let want_stereo = config.wants("stereo_field");
-    if want_ebur128 || want_dynamics || want_envelope || want_stereo {
-        let (channels, native_sr, tags) = audio::load_channels_with_tags(path, want_tags)?;
-        let ebu = want_ebur128.then(|| crate::native_dynamics::ebur128(channels.view(), native_sr));
-        let dynamics = (want_dynamics || want_envelope)
-            .then(|| crate::native_dynamics::native_dynamics(channels.view(), native_sr));
-        let stereo = want_stereo.then(|| stereo_field(channels.view(), native_sr));
-        let native = if channels.nrows() == 1 {
-            channels.row(0).to_owned()
-        } else {
-            audio::to_mono(channels.view())
-        };
-        drop(channels);
-        let mut result = analyze_native_mono(native, native_sr, sr, config)?;
-        result.tags = tags;
-        // Marks the record as measured from a file: a missing level then
-        // means "undefined", not "never measured".
-        result.native_sample_rate = Some(native_sr);
-        if let Some(ebu) = ebu {
-            result.ebur128_integrated_lufs = ebu.integrated_lufs;
-            result.ebur128_momentary_max_lufs = ebu.momentary_max_lufs;
-            result.ebur128_short_term_max_lufs = ebu.short_term_max_lufs;
-            result.ebur128_range_lu = ebu.range_lu;
-            result.ebur128_true_peak_dbtp = ebu.true_peak_dbtp;
-        }
-        if let Some(dynamics) = dynamics {
-            if want_dynamics {
-                result.sample_peak_dbfs = dynamics.sample_peak_dbfs;
-                result.crest_factor_db = dynamics.crest_factor_db;
-                result.crest_factor_frame_mean_db = dynamics.crest_factor_frame_mean_db;
-            }
-            if want_envelope {
-                result.amplitude_envelope = Some(dynamics.envelope);
-                result.amplitude_envelope_hop_sec =
-                    Some(crate::native_dynamics::ENVELOPE_HOP_SEC as Float);
-                result.amplitude_envelope_frame_sec =
-                    Some(crate::native_dynamics::ENVELOPE_FRAME_SEC as Float);
-            }
-        }
-        if let Some(stereo) = stereo {
-            result.stereo_side_ratio = stereo.side_ratio;
-            result.stereo_side_ratio_low = stereo.side_ratio_low;
-            result.stereo_correlation_mean = stereo.correlation_mean;
-            result.stereo_correlation_p05 = stereo.correlation_p05;
-        }
-        return Ok(result);
-    }
-    // Decode at the file's own rate: `analyze_native_mono` rejects non-finite
-    // samples before it resamples.
-    let (native, native_sr, tags) = audio::load_with_tags(path, 0, true, 0.0, 0.0, want_tags)?;
-    let mut result = analyze_native_mono(native, native_sr, sr, config)?;
+    // Tags are file-only metadata (see `TrackTags`): read during the decode
+    // when requested, at no cost otherwise.
+    let (samples, native_sr, n_channels, tags) =
+        audio::decode_interleaved(path, config.wants("tags"))?;
+    // The decoder's interleaved frames, seen as (n_channels, n_samples): the
+    // channels are measured in place and then mixed down inside the same
+    // buffer, so the file is never held twice.
+    let frames = (samples.len() / n_channels, n_channels);
+    let measured = measure_channels(
+        ArrayView2::from_shape(frames, &samples[..frames.0 * frames.1])
+            .expect("the slice holds whole frames")
+            .reversed_axes(),
+        native_sr,
+        config,
+    )?;
+    let native = audio::downmix_interleaved(samples, n_channels);
+    let mut result = analyze_native_mono(native.into(), native_sr, sr, config, measured)?;
     result.tags = tags;
     Ok(result)
 }
 
-/// Analyze the mono mix of a file decoded at its own rate `native_sr`; `sr` is
-/// the caller's rate (0 = native). File-only fields are left to the caller.
-fn analyze_native_mono(
-    native: Array1<Float>,
-    native_sr: u32,
+/// Analyze a signal given as channels: `channels` is (n_channels, n_samples)
+/// at the rate `channels_sr`, `sr` is the analysis rate (0 = `channels_sr`).
+///
+/// The one path every input takes. Loudness, dynamics and the stereo field are
+/// measured on the channels at `channels_sr`; the channels are then mixed to
+/// mono (arithmetic mean) and resampled to the analysis rate for everything
+/// else. A single channel at the analysis rate is analyzed without a copy.
+pub fn analyze_channels(
+    channels: ArrayView2<Float>,
+    channels_sr: u32,
     sr: u32,
     config: &AnalysisConfig,
 ) -> Result<TrackAnalysis> {
+    catch_analysis_panic(|| {
+        config.validate()?;
+        let measured = measure_channels(channels, channels_sr, config)?;
+        let native = if channels.nrows() == 1 {
+            ndarray::CowArray::from(channels.row(0))
+        } else {
+            audio::to_mono(channels).into()
+        };
+        analyze_native_mono(native, channels_sr, sr, config, measured)
+    })
+}
+
+/// Analyze the mono mix of an input at its own rate `native_sr`; `sr` is the
+/// caller's rate (0 = native). `measured` comes from the channels of the mix.
+fn analyze_native_mono(
+    native: ndarray::CowArray<'_, Float, ndarray::Ix1>,
+    native_sr: u32,
+    sr: u32,
+    config: &AnalysisConfig,
+    measured: ChannelMeasures,
+) -> Result<TrackAnalysis> {
     // The resampler panics on non-finite samples: reject them before it runs.
-    if !native.is_empty() {
-        validated_zero_crossing_rate(native.view())?;
-    }
+    let native_zcr = validated_zero_crossing_rate(native.view())?;
     let caller_sr = if sr == 0 { native_sr } else { sr };
     // At the model's own rate one lane serves both: the plain path below, which
     // also frees the native copy once it is resampled.
     #[cfg(feature = "aggression")]
     if config.needs_aggression() && caller_sr != crate::aggression::AGGRESSION_SAMPLE_RATE {
-        // Decode once at the source rate, then derive the caller and model
-        // lanes independently. This prevents a lossy caller-rate roundtrip,
-        // preserves generic field semantics, and avoids a second file decode.
+        // Derive the caller and model lanes independently from the source
+        // rate. This prevents a lossy caller-rate roundtrip, preserves generic
+        // field semantics, and avoids a second file decode.
         let caller = (caller_sr != native_sr)
             .then(|| audio::resample(native.view(), native_sr, caller_sr))
             .transpose()?;
@@ -2488,17 +2518,27 @@ fn analyze_native_mono(
             canonical_view,
             crate::aggression::AGGRESSION_SAMPLE_RATE,
             config,
+            measured,
         );
     }
-    let y = if caller_sr != native_sr {
+    let (y, zero_crossing_rate) = if caller_sr != native_sr {
         let resampled = audio::resample(native.view(), native_sr, caller_sr)?;
         // The analysis reads only the resampled copy: free the native one first.
         drop(native);
-        resampled
+        let zero_crossing_rate = validated_zero_crossing_rate(resampled.view())?;
+        (resampled.into(), zero_crossing_rate)
     } else {
-        native
+        (native, native_zcr)
     };
-    analyze_signal(y.view(), caller_sr, config)
+    analyze_signal_inner(
+        y.view(),
+        caller_sr,
+        config.needs_extended(),
+        zero_crossing_rate,
+        config,
+        FRAME_CHUNK,
+        measured,
+    )
 }
 
 /// [`analyze_file`] that also returns the rhythm envelopes of its fused pass by
@@ -2518,65 +2558,14 @@ pub fn analyze_file_with_rhythm_envelopes(
     result.map(|analysis| (analysis, captured.map(|envelopes| envelopes.named())))
 }
 
-/// Analyze a pre-loaded audio signal with the given configuration.
+/// Analyze a pre-loaded mono signal with the given configuration: the
+/// one-channel case of [`analyze_channels`], analyzed at its own rate `sr`.
 pub fn analyze_signal(
     y: ndarray::ArrayView1<Float>,
     sr: u32,
     config: &AnalysisConfig,
 ) -> Result<TrackAnalysis> {
-    catch_analysis_panic(|| analyze_signal_unguarded(y, sr, config))
-}
-
-fn analyze_signal_unguarded(
-    y: ndarray::ArrayView1<Float>,
-    sr: u32,
-    config: &AnalysisConfig,
-) -> Result<TrackAnalysis> {
-    config.validate()?;
-    if sr == 0 {
-        return Err(SonaraError::InvalidParameter {
-            param: "sr",
-            reason: "sample rate must be greater than zero".into(),
-        });
-    }
-    if y.is_empty() {
-        return Err(SonaraError::InvalidAudio(
-            "signal must contain at least one sample".into(),
-        ));
-    }
-
-    #[cfg(feature = "aggression")]
-    if sr != crate::aggression::AGGRESSION_SAMPLE_RATE && config.needs_aggression() {
-        return analyze_signal_with_canonical_aggression(y, sr, config);
-    }
-
-    let zero_crossing_rate = validated_zero_crossing_rate(y)?;
-    let extended = config.needs_extended();
-    analyze_signal_inner(y, sr, extended, zero_crossing_rate, config, FRAME_CHUNK)
-}
-
-#[cfg(feature = "aggression")]
-#[inline(never)]
-fn analyze_signal_with_canonical_aggression(
-    y: ndarray::ArrayView1<Float>,
-    sr: u32,
-    config: &AnalysisConfig,
-) -> Result<TrackAnalysis> {
-    // The resampler panics on non-finite samples: reject them before it runs.
-    validated_zero_crossing_rate(y)?;
-    // Normal API inputs are contiguous, so resample directly and allocate only
-    // the canonical lane. Materialize unusual strided views only when needed by
-    // the optimized 2:1 resampler.
-    let source = (!y.is_standard_layout()).then(|| y.to_owned());
-    let source_view = source.as_ref().map(|audio| audio.view()).unwrap_or(y);
-    let canonical = audio::resample(source_view, sr, crate::aggression::AGGRESSION_SAMPLE_RATE)?;
-    analyze_signal_with_precomputed_aggression(
-        y,
-        sr,
-        canonical.view(),
-        crate::aggression::AGGRESSION_SAMPLE_RATE,
-        config,
-    )
+    analyze_channels(y.insert_axis(ndarray::Axis(0)), sr, sr, config)
 }
 
 #[cfg(feature = "aggression")]
@@ -2587,6 +2576,7 @@ fn analyze_signal_with_precomputed_aggression(
     canonical: ndarray::ArrayView1<Float>,
     canonical_sr: u32,
     config: &AnalysisConfig,
+    measured: ChannelMeasures,
 ) -> Result<TrackAnalysis> {
     if canonical_sr != crate::aggression::AGGRESSION_SAMPLE_RATE {
         return Err(SonaraError::ModelError(format!(
@@ -2619,6 +2609,7 @@ fn analyze_signal_with_precomputed_aggression(
         native_zcr,
         &native_config,
         FRAME_CHUNK,
+        measured,
     )?;
 
     let aggression = analyze_canonical_aggression(canonical)?;
@@ -2699,6 +2690,7 @@ fn analyze_signal_inner(
     zero_crossing_rate: Float,
     config: &AnalysisConfig,
     frame_chunk: usize,
+    measured: ChannelMeasures,
 ) -> Result<TrackAnalysis> {
     #[cfg(feature = "aggression")]
     let wants_aggression = config.needs_aggression();
@@ -3567,32 +3559,38 @@ fn analyze_signal_inner(
     let zcr = zero_crossing_rate;
 
     // ================================================================
-    // LUFS integrated loudness (ITU-R BS.1770-4, K-weighted)
+    // Loudness (ITU-R BS.1770 / EBU R128), measured on the channels
     // ================================================================
 
-    let loudness_lufs = perceptual::loudness_lufs(y, sr);
+    let ebu = measured.loudness;
+    // The absolute gate where the standard gives no value: digital silence or
+    // a signal shorter than one 400 ms block.
+    let loudness_lufs = ebu
+        .integrated_lufs
+        .unwrap_or(crate::native_dynamics::ABS_GATE_LUFS as Float);
 
     // --- loudness ---
-    // Extended loudness / gain metrics — opt-in (Full mode or `features=["loudness"]`).
-    // Compact and Playlist skip this entirely, so they pay nothing.
-    let (true_peak_db, replaygain_db, loudness_curve, loudness_momentary_max_db, loudness_range_lu) =
-        if config.wants("loudness") {
-            let tp = crate::loudness_ext::true_peak_db(y);
-            let rg = crate::loudness_ext::replaygain_db(loudness_lufs);
-            // Short-term curve: 3 s window, 1 s hop (ITU-R BS.1770 short-term).
-            // One K-weighting pass feeds the curve, momentary max and LRA.
-            let m = crate::loudness_ext::loudness_metrics(y, sr, 3.0, 1.0);
-            (
-                Some(tp),
-                Some(rg),
-                Some(m.curve),
-                Some(m.momentary_max_db),
-                Some(m.range_lu),
-            )
-        } else {
-            (None, None, None, None, None)
-        };
+    // The rest of the measurement is opt-in (Full mode or `features=["loudness"]`).
+    let wants_loudness = config.wants("loudness");
+    let loudness_curve = wants_loudness.then_some(ebu.short_term_curve);
+    let ebu_opt = |value: Option<Float>| value.filter(|_| wants_loudness);
     // --- end loudness ---
+
+    // `native_dynamics` and `amplitude_envelope` share one pass over the channels.
+    let (sample_peak_dbfs, crest_factor_db, crest_factor_frame_mean_db) = match &measured.dynamics {
+        Some(d) if config.wants("native_dynamics") => (
+            d.sample_peak_dbfs,
+            d.crest_factor_db,
+            d.crest_factor_frame_mean_db,
+        ),
+        _ => (None, None, None),
+    };
+    let wants_envelope = config.wants("amplitude_envelope");
+    let amplitude_envelope = measured
+        .dynamics
+        .filter(|_| wants_envelope)
+        .map(|d| d.envelope);
+    let stereo = measured.stereo.unwrap_or_default();
 
     // ================================================================
     // EXTENDED: MFCCs via pre-computed DCT matrix (no per-frame cos())
@@ -4421,30 +4419,27 @@ fn analyze_signal_inner(
         loudness_lufs,
         dynamic_range_db,
         // --- loudness ---
-        true_peak_db,
-        replaygain_db,
+        true_peak_db: ebu_opt(ebu.true_peak_dbtp),
+        replaygain_db: ebu_opt(ebu.integrated_lufs).map(crate::loudness_ext::replaygain_db),
         loudness_curve,
-        loudness_momentary_max_db,
-        loudness_range_lu,
+        loudness_momentary_max_db: ebu_opt(ebu.momentary_max_lufs),
+        loudness_short_term_max_db: ebu_opt(ebu.short_term_max_lufs),
+        loudness_range_lu: ebu_opt(ebu.range_lu),
         // --- end loudness ---
-        // File-only: filled by analyze_file when requested; a bare signal has
-        // no file channels or native rate.
-        ebur128_integrated_lufs: None,
-        ebur128_momentary_max_lufs: None,
-        ebur128_short_term_max_lufs: None,
-        ebur128_range_lu: None,
-        ebur128_true_peak_dbtp: None,
-        native_sample_rate: None,
-        sample_peak_dbfs: None,
-        crest_factor_db: None,
-        crest_factor_frame_mean_db: None,
-        amplitude_envelope: None,
-        amplitude_envelope_hop_sec: None,
-        amplitude_envelope_frame_sec: None,
-        stereo_side_ratio: None,
-        stereo_side_ratio_low: None,
-        stereo_correlation_mean: None,
-        stereo_correlation_p05: None,
+        native_sample_rate: Some(measured.sample_rate),
+        native_channels: Some(measured.channels),
+        sample_peak_dbfs,
+        crest_factor_db,
+        crest_factor_frame_mean_db,
+        amplitude_envelope,
+        amplitude_envelope_hop_sec: wants_envelope
+            .then_some(crate::native_dynamics::ENVELOPE_HOP_SEC as Float),
+        amplitude_envelope_frame_sec: wants_envelope
+            .then_some(crate::native_dynamics::ENVELOPE_FRAME_SEC as Float),
+        stereo_side_ratio: stereo.side_ratio,
+        stereo_side_ratio_low: stereo.side_ratio_low,
+        stereo_correlation_mean: stereo.correlation_mean,
+        stereo_correlation_p05: stereo.correlation_p05,
         spectral_centroid_mean: centroid_mean,
         zero_crossing_rate: zcr,
         onset_density,
@@ -5363,6 +5358,15 @@ fn recompute_decode_free(
 /// augmented clone. Only the named feature's fields move — everything else on
 /// `out` is preserved.
 fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &str) {
+    // A group measured on the channels brings the rate and channel count it
+    // was measured at.
+    if matches!(
+        name,
+        "loudness" | "native_dynamics" | "amplitude_envelope" | "stereo_field"
+    ) {
+        out.native_sample_rate = fresh.native_sample_rate;
+        out.native_channels = fresh.native_channels;
+    }
     match name {
         "bpm" => {
             out.bpm = fresh.bpm;
@@ -5526,34 +5530,27 @@ fn merge_feature_fields(out: &mut TrackAnalysis, fresh: &TrackAnalysis, name: &s
         }
         "fingerprint" => out.fingerprint = fresh.fingerprint.clone(),
         "loudness" => {
+            // One measurement: the always-on level travels with its group, so
+            // `replaygain_db` stays `-18 - loudness_lufs`.
+            out.loudness_lufs = fresh.loudness_lufs;
             out.true_peak_db = fresh.true_peak_db;
             out.replaygain_db = fresh.replaygain_db;
             out.loudness_curve = fresh.loudness_curve.clone();
             out.loudness_momentary_max_db = fresh.loudness_momentary_max_db;
+            out.loudness_short_term_max_db = fresh.loudness_short_term_max_db;
             out.loudness_range_lu = fresh.loudness_range_lu;
         }
-        "ebur128" => {
-            out.native_sample_rate = fresh.native_sample_rate;
-            out.ebur128_integrated_lufs = fresh.ebur128_integrated_lufs;
-            out.ebur128_momentary_max_lufs = fresh.ebur128_momentary_max_lufs;
-            out.ebur128_short_term_max_lufs = fresh.ebur128_short_term_max_lufs;
-            out.ebur128_range_lu = fresh.ebur128_range_lu;
-            out.ebur128_true_peak_dbtp = fresh.ebur128_true_peak_dbtp;
-        }
         "native_dynamics" => {
-            out.native_sample_rate = fresh.native_sample_rate;
             out.sample_peak_dbfs = fresh.sample_peak_dbfs;
             out.crest_factor_db = fresh.crest_factor_db;
             out.crest_factor_frame_mean_db = fresh.crest_factor_frame_mean_db;
         }
         "amplitude_envelope" => {
-            out.native_sample_rate = fresh.native_sample_rate;
             out.amplitude_envelope = fresh.amplitude_envelope.clone();
             out.amplitude_envelope_hop_sec = fresh.amplitude_envelope_hop_sec;
             out.amplitude_envelope_frame_sec = fresh.amplitude_envelope_frame_sec;
         }
         "stereo_field" => {
-            out.native_sample_rate = fresh.native_sample_rate;
             out.stereo_side_ratio = fresh.stereo_side_ratio;
             out.stereo_side_ratio_low = fresh.stereo_side_ratio_low;
             out.stereo_correlation_mean = fresh.stereo_correlation_mean;
@@ -5820,18 +5817,10 @@ pub fn augment_analysis(
                     mode: cached.provenance.mode,
                     ..Default::default()
                 };
-                // Only a record measured from a file (it then carries
-                // `native_sample_rate`) holds the file-only groups.
-                const FILE_ONLY: [&str; 5] = [
-                    "ebur128",
-                    "native_dynamics",
-                    "amplitude_envelope",
-                    "stereo_field",
-                    "tags",
-                ];
-                let from_file = cached.native_sample_rate.is_some();
+                // `tags` are file-only: only a record that carries them holds
+                // the group.
                 analysis_feature_names()
-                    .filter(|name| probe.emits(name) && (from_file || !FILE_ONLY.contains(name)))
+                    .filter(|name| probe.emits(name) && (*name != "tags" || cached.tags.is_some()))
                     .map(str::to_owned)
                     .collect()
             }
@@ -5852,6 +5841,23 @@ mod tests {
     fn sine(freq: Float, sr: u32, dur: Float) -> Array1<Float> {
         let n = (sr as Float * dur) as usize;
         Array1::from_shape_fn(n, |i| (2.0 * PI * freq * i as Float / sr as Float).sin())
+    }
+
+    /// A file's channels as (n_channels, n_samples), de-interleaved one sample
+    /// at a time: built apart from the view `analyze_file` measures on.
+    fn decoded_channels(
+        path: &Path,
+        want_tags: bool,
+    ) -> (ndarray::Array2<Float>, u32, Option<audio::TrackTags>) {
+        let (samples, sr, n, tags) = audio::decode_interleaved(path, want_tags).unwrap();
+        let channels =
+            ndarray::Array2::from_shape_fn((n, samples.len() / n), |(ch, i)| samples[i * n + ch]);
+        (channels, sr, tags)
+    }
+
+    /// The channel measures of a mono signal, for tests that call the core directly.
+    fn measured(y: &Array1<Float>, sr: u32, config: &AnalysisConfig) -> ChannelMeasures {
+        measure_channels(y.view().insert_axis(ndarray::Axis(0)), sr, config).unwrap()
     }
 
     #[test]
@@ -5959,7 +5965,6 @@ mod tests {
             "embedding",
             "fingerprint",
             "loudness",
-            "ebur128",
             "native_dynamics",
             "amplitude_envelope",
             "stereo_field",
@@ -6029,7 +6034,6 @@ mod tests {
         assert_eq!(class_of("zcr"), DependencyClass::Audio);
         assert_eq!(class_of("fingerprint"), DependencyClass::Audio);
         assert_eq!(class_of("loudness"), DependencyClass::Audio);
-        assert_eq!(class_of("ebur128"), DependencyClass::Audio);
         assert_eq!(class_of("native_dynamics"), DependencyClass::Audio);
         assert_eq!(class_of("amplitude_envelope"), DependencyClass::Audio);
         assert_eq!(class_of("stereo_field"), DependencyClass::Audio);
@@ -6447,10 +6451,9 @@ mod tests {
     fn test_analyze_file_default_no_tags() {
         let result = analyze_file(&fixture("tagged.flac"), 22050, &compact()).unwrap();
         assert!(result.tags.is_none(), "tags not requested → None");
-        // Full reads them, along with the other file-only groups.
+        // Full reads them.
         let result = analyze_file(&fixture("tagged.flac"), 22050, &full()).unwrap();
         assert_eq!(result.tags.unwrap().title.as_deref(), Some("Test Title"));
-        assert!(result.native_sample_rate.is_some());
     }
 
     fn tiny_vocalness_model(id: &str, ev: u32) -> crate::vocal_model::VocalnessModel {
@@ -6621,8 +6624,9 @@ mod tests {
 
     #[cfg(feature = "aggression")]
     fn legacy_same_lane_file(path: &Path, config: &AnalysisConfig) -> TrackAnalysis {
-        let (native, native_sr, tags) =
-            audio::load_with_tags(path, 0, true, 0.0, 0.0, true).unwrap();
+        let (channels, native_sr, tags) = decoded_channels(path, true);
+        let measured = measure_channels(channels.view(), native_sr, config).unwrap();
+        let native = audio::to_mono(channels.view());
         let canonical = (native_sr != crate::aggression::AGGRESSION_SAMPLE_RATE)
             .then(|| {
                 audio::resample(
@@ -6643,6 +6647,7 @@ mod tests {
             canonical_view,
             crate::aggression::AGGRESSION_SAMPLE_RATE,
             config,
+            measured,
         )
         .unwrap();
         result.tags = tags;
@@ -8199,7 +8204,7 @@ mod tests {
             Some(&["onset_density".to_string()][..])
         );
         // A Full record from a signal expands to every feature it could hold:
-        // the opt-in ones, but not the file-only groups it never measured.
+        // the opt-in ones, but not the file-only tags it never read.
         let full_record = analyze_signal(y.view(), SR, &full()).unwrap();
         let aug = augment_analysis(
             &full_record,
@@ -8210,9 +8215,8 @@ mod tests {
         .unwrap();
         let names = aug.provenance.requested_features.unwrap();
         assert!(names.contains(&"hpss".to_string()));
-        for file_only in ["ebur128", "native_dynamics", "amplitude_envelope", "stereo_field", "tags"] {
-            assert!(!names.contains(&file_only.to_string()), "{file_only}");
-        }
+        assert!(names.contains(&"stereo_field".to_string()));
+        assert!(!names.contains(&"tags".to_string()));
     }
 
     #[test]
@@ -8226,7 +8230,7 @@ mod tests {
         ));
         // A file decoded at 48 kHz and analyzed at the default rate.
         assert!(matches!(
-            analyze_native_mono(y, 48000, 22050, &playlist()),
+            analyze_channels(y.view().insert_axis(ndarray::Axis(0)), 48000, 22050, &playlist()),
             Err(SonaraError::InvalidAudio(_))
         ));
     }
@@ -8303,25 +8307,26 @@ mod tests {
         assert!(results[1].is_err());
     }
 
-    // The file route (decode at the file's rate, validate, resample) gives the
-    // same analysis as the loader's own resampling followed by the signal entry.
+    // A decoded file and the same channels passed as a signal take one path:
+    // the records are equal at the file's rate and resampled, mono and stereo.
     #[test]
-    fn test_file_route_matches_loader_resampling() {
+    fn test_file_and_its_channels_give_the_same_record() {
         let dir = std::env::temp_dir();
         let at_44k = dir.join(format!("sonara-route-44k-{}.wav", std::process::id()));
         let at_48k = dir.join(format!("sonara-route-48k-{}.wav", std::process::id()));
         write_augment_wav(&at_44k);
         write_float_wav(&at_48k, None);
-        for path in [&at_44k, &at_48k] {
+        let stereo = write_stereo_field_wav("route");
+        for path in [&at_44k, &at_48k, &stereo] {
+            let (channels, native_sr, _) = decoded_channels(path, false);
             for sr in [0, 22050] {
-                let (y, loaded_sr) = audio::load(path, sr, true, 0.0, 0.0).unwrap();
-                let from_signal = analyze_signal(y.view(), loaded_sr, &playlist()).unwrap();
-                let from_file = analyze_file(path, sr, &playlist()).unwrap();
-                assert!(from_file == from_signal, "{} sr={sr}", path.display());
+                let from_channels =
+                    analyze_channels(channels.view(), native_sr, sr, &full()).unwrap();
+                let from_file = analyze_file(path, sr, &full()).unwrap();
+                assert!(from_file == from_channels, "{} sr={sr}", path.display());
             }
+            let _ = std::fs::remove_file(path);
         }
-        let _ = std::fs::remove_file(&at_44k);
-        let _ = std::fs::remove_file(&at_48k);
     }
 
     #[test]
@@ -8728,7 +8733,17 @@ mod tests {
         });
         let zcr = validated_zero_crossing_rate(y.view()).unwrap();
         let run = |config: &AnalysisConfig, chunk| {
-            analyze_signal_inner(y.view(), sr, config.needs_extended(), zcr, config, chunk).unwrap()
+            let measured = measured(&y, sr, config);
+            analyze_signal_inner(
+                y.view(),
+                sr,
+                config.needs_extended(),
+                zcr,
+                config,
+                chunk,
+                measured,
+            )
+            .unwrap()
         };
         let config = playlist();
         let whole = run(&config, usize::MAX);
@@ -9030,7 +9045,8 @@ mod tests {
     fn hpss_chunked(y: &Array1<Float>, chunk: usize) -> Float {
         let config = feature_config(&["hpss"]);
         let zcr = validated_zero_crossing_rate(y.view()).unwrap();
-        analyze_signal_inner(y.view(), 22050, false, zcr, &config, chunk)
+        let measured = measured(y, 22050, &config);
+        analyze_signal_inner(y.view(), 22050, false, zcr, &config, chunk, measured)
             .unwrap()
             .hpss_percussive_ratio
             .unwrap()
@@ -9244,8 +9260,10 @@ mod tests {
         let zcr = validated_zero_crossing_rate(y.view()).unwrap();
         let config = feature_config(&["hpss", "spectral_texture", "tuning"]);
         let extended = config.needs_extended();
-        let run =
-            |chunk| analyze_signal_inner(y.view(), 22050, extended, zcr, &config, chunk).unwrap();
+        let run = |chunk| {
+            let measured = measured(&y, 22050, &config);
+            analyze_signal_inner(y.view(), 22050, extended, zcr, &config, chunk, measured).unwrap()
+        };
         let whole = run(usize::MAX);
         assert!(whole
             .hpss_percussive_ratio
@@ -9493,10 +9511,10 @@ mod tests {
         );
     }
 
-    // --- ebur128 / native_dynamics / amplitude_envelope (file-only) ---
+    // --- loudness / native_dynamics / amplitude_envelope / stereo_field ---
 
     const NATIVE_FEATURES: [&str; 4] = [
-        "ebur128",
+        "loudness",
         "native_dynamics",
         "amplitude_envelope",
         "stereo_field",
@@ -9531,14 +9549,17 @@ mod tests {
         path
     }
 
-    fn ebur128_fields(r: &TrackAnalysis) -> [Option<Float>; 5] {
-        [
-            r.ebur128_integrated_lufs,
-            r.ebur128_momentary_max_lufs,
-            r.ebur128_short_term_max_lufs,
-            r.ebur128_range_lu,
-            r.ebur128_true_peak_dbtp,
-        ]
+    fn loudness_fields(r: &TrackAnalysis) -> (Option<Vec<Float>>, [Option<Float>; 5]) {
+        (
+            r.loudness_curve.clone(),
+            [
+                r.true_peak_db,
+                r.replaygain_db,
+                r.loudness_momentary_max_db,
+                r.loudness_short_term_max_db,
+                r.loudness_range_lu,
+            ],
+        )
     }
 
     fn native_dynamics_fields(r: &TrackAnalysis) -> [Option<Float>; 3] {
@@ -9556,7 +9577,7 @@ mod tests {
         )
     }
 
-    /// `r` with the 16 file-only fields and the recorded request cleared.
+    /// `r` with the 16 fields of the channel groups and the recorded request cleared.
     fn without_native_fields(mut r: TrackAnalysis) -> TrackAnalysis {
         let blank = analyze_signal(sine(440.0, 22050, 0.5).view(), 22050, &compact()).unwrap();
         for name in NATIVE_FEATURES {
@@ -9573,12 +9594,17 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         // EBU Tech 3341 case: a -23 dBFS 1 kHz stereo sine reads -23.0 LUFS.
-        let lufs = r.ebur128_integrated_lufs.unwrap();
+        let lufs = r.loudness_lufs;
         assert!((lufs + 23.0).abs() < 0.1, "{lufs}");
-        for v in ebur128_fields(&r) {
+        let (curve, levels) = loudness_fields(&r);
+        for v in levels {
             assert!(v.is_some_and(Float::is_finite), "{v:?}");
         }
+        assert_eq!(r.replaygain_db, Some(-18.0 - lufs));
+        // 3 s windows at a 1 s hop over 5 s.
+        assert_eq!(curve.map(|c| c.len()), Some(3));
         assert_eq!(r.native_sample_rate, Some(48_000));
+        assert_eq!(r.native_channels, Some(2));
         let peak = r.sample_peak_dbfs.unwrap();
         assert!((peak + 23.0).abs() < 0.05, "{peak}");
         let crest = r.crest_factor_db.unwrap();
@@ -9607,15 +9633,17 @@ mod tests {
         // Each feature fills its own group only.
         let groups = |r: &TrackAnalysis| {
             [
-                ebur128_fields(r) != ebur128_fields(&none),
+                loudness_fields(r) != loudness_fields(&none),
                 native_dynamics_fields(r) != native_dynamics_fields(&none),
                 amplitude_envelope_fields(r) != amplitude_envelope_fields(&none),
                 stereo_field_fields(r) != stereo_field_fields(&none),
             ]
         };
-        assert_eq!(ebur128_fields(&none), [None; 5]);
+        assert_eq!(loudness_fields(&none), (None, [None; 5]));
         assert_eq!(native_dynamics_fields(&none), [None; 3]);
-        assert_eq!(none.native_sample_rate, None);
+        // Every analysis records what its channel features were measured on.
+        assert_eq!(none.native_sample_rate, Some(48_000));
+        assert_eq!(none.native_channels, Some(2));
         assert_eq!(amplitude_envelope_fields(&none), (None, [None; 2]));
         assert_eq!(stereo_field_fields(&none), [None; 4]);
         assert_eq!(groups(&all), [true; 4]);
@@ -9624,12 +9652,10 @@ mod tests {
             let mut expected = [false; 4];
             expected[i] = true;
             assert_eq!(groups(&one), expected, "{name}");
-            // Any of the four marks the record as measured from a file.
-            assert_eq!(one.native_sample_rate, Some(48_000), "{name}");
             // The envelope run shares the dynamics pass but emits the same values.
             assert_eq!(
                 [
-                    ebur128_fields(&one) == ebur128_fields(&all),
+                    loudness_fields(&one) == loudness_fields(&all),
                     native_dynamics_fields(&one) == native_dynamics_fields(&all),
                     amplitude_envelope_fields(&one) == amplitude_envelope_fields(&all),
                     stereo_field_fields(&one) == stereo_field_fields(&all),
@@ -9639,19 +9665,20 @@ mod tests {
             );
         }
 
-        // A bare signal has no file: requested or not, the fields stay None.
+        // A signal takes the same path: one channel at its own rate.
         let y = sine(440.0, 22050, 2.0);
         let signal = analyze_signal(y.view(), 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
-        assert_eq!(groups(&signal), [false; 4]);
-        assert_eq!(signal.native_sample_rate, None);
+        assert_eq!(groups(&signal), [true; 4]);
+        assert_eq!(signal.native_sample_rate, Some(22050));
+        assert_eq!(signal.native_channels, Some(1));
         std::fs::remove_file(&path).unwrap();
 
         // Digital silence: levels are undefined, the envelope is all zeros.
         let silent = write_native_dynamics_wav("silence", None, 1);
         let z = analyze_file(&silent, 22050, &feature_config(&NATIVE_FEATURES)).unwrap();
         std::fs::remove_file(&silent).unwrap();
-        assert_eq!(ebur128_fields(&z), [None; 5]);
-        assert_eq!(z.native_sample_rate, Some(48_000));
+        assert_eq!(loudness_fields(&z), (Some(Vec::new()), [None; 5]));
+        assert_eq!(z.loudness_lufs, -70.0);
         assert_eq!(native_dynamics_fields(&z), [None; 3]);
         assert_eq!(stereo_field_fields(&z), [None; 4]);
         assert!(z
@@ -9662,9 +9689,9 @@ mod tests {
     #[test]
     fn test_native_dynamics_leave_other_fields_bit_identical() {
         let wav = write_native_dynamics_wav("identical", Some(-6.0), 3);
-        let mut bases = vec![vec!["rms", "loudness"], vec!["rms", "loudness", "tags"]];
+        let mut bases = vec![vec!["rms"], vec!["rms", "tags"]];
         if cfg!(feature = "aggression") {
-            bases.push(vec!["rms", "loudness", "aggression"]);
+            bases.push(vec!["rms", "aggression"]);
         }
         for path in [wav.clone(), fixture("tagged.flac")] {
             for base in &bases {
@@ -9675,7 +9702,6 @@ mod tests {
                     names.extend(NATIVE_FEATURES);
                     let with = analyze_file(&path, sr, &feature_config(&names)).unwrap();
                     let plain = analyze_file(&path, sr, &feature_config(base)).unwrap();
-                    assert!(with.native_sample_rate.is_some());
                     assert!(
                         without_native_fields(with) == without_native_fields(plain),
                         "{} sr={sr} {base:?}",
@@ -9694,8 +9720,11 @@ mod tests {
         let cached = analyze_file(&path, 22050, &feature_config(&["rms"])).unwrap();
 
         let mut out = cached.clone();
-        merge_feature_fields(&mut out, &fresh, "ebur128");
-        assert_eq!(ebur128_fields(&out), ebur128_fields(&fresh));
+        // A record measured on other channels: the group brings its own level.
+        out.loudness_lufs = -1.0;
+        merge_feature_fields(&mut out, &fresh, "loudness");
+        assert_eq!(out.loudness_lufs, fresh.loudness_lufs);
+        assert_eq!(loudness_fields(&out), loudness_fields(&fresh));
         assert_eq!(native_dynamics_fields(&out), [None; 3]);
         assert_eq!(out.native_sample_rate, Some(48_000));
         merge_feature_fields(&mut out, &fresh, "native_dynamics");
@@ -9715,7 +9744,7 @@ mod tests {
             augment_analysis(&cached, &NATIVE_FEATURES, Some(&path), &compact()).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(without_native_fields(augmented.clone()) == without_native_fields(cached));
-        assert_eq!(ebur128_fields(&augmented), ebur128_fields(&fresh));
+        assert_eq!(loudness_fields(&augmented), loudness_fields(&fresh));
         assert_eq!(
             native_dynamics_fields(&augmented),
             native_dynamics_fields(&fresh)
@@ -9727,7 +9756,7 @@ mod tests {
         assert_eq!(stereo_field_fields(&augmented), stereo_field_fields(&fresh));
     }
 
-    // --- stereo_field (file-only) ---
+    // --- stereo_field ---
 
     const STEREO_RATES: [u32; 4] = [22050, 44100, 48000, 96000];
     /// Ten cycles per correlation frame, inside the low band.
@@ -9982,11 +10011,5 @@ mod tests {
             );
         }
         assert_eq!(stereo_field_fields(&without), [None; 4]);
-
-        // A bare signal has no file channels: requested or not, the fields stay None.
-        let y = sine(440.0, 22050, 2.0);
-        let signal = analyze_signal(y.view(), 22050, &feature_config(&["stereo_field"])).unwrap();
-        assert_eq!(stereo_field_fields(&signal), [None; 4]);
-        assert_eq!(signal.native_sample_rate, None);
     }
 }
