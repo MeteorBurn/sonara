@@ -32,8 +32,7 @@ Sonara is the MeteorBurn fork of `kkollsga/sonara`, a Rust MIR library with a fu
 | --- | --- |
 | DSP in `sonara/` | Use `Float = f32` and pass sample rate explicitly. When a new feature needs a spectrum, reuse the fused pass in `analyze_signal_inner`. Keep PyO3/NumPy out of the core crate and ML runtimes out of its default features. Any proposed boundary change requires prior downstream notification. |
 | Feature selection | Opt-in families such as `onset_bands`, `beatgrid` and `rhythmic_regularity` are computed by `full` mode or through `features=[...]`. `compact` and `playlist` must never enable them. |
-| Stored results | Bump `ANALYSIS_SCHEMA_VERSION` only when an existing field changes meaning or units. Additive fields use per-feature freshness. On abstention, keep confidence and store `None`; a stored `None` regularity score means the measurement was undecidable. |
-| Similarity or fingerprints | Bump the corresponding layout version when reinterpreting stored values. A `SIMILARITY_VERSION` bump invalidates the genre, vocalness and aggression models. |
+| Stored results | Additive fields use per-feature freshness. On abstention, keep confidence and store `None`; a stored `None` regularity score means the measurement was undecidable. |
 | Packaging or release | Change versions only during release, together in `sonara/Cargo.toml`, `sonara-python/Cargo.toml` and `pyproject.toml`. Wheels target abi3 `cp310`; repo tooling needs Python ≥ 3.11. The fork pins Symphonia to `=0.6.1` and uses a patched vendored Hound. Update `BUILD-METADATA.md` only for a published fork release. |
 | Adding files | Follow upstream layout for code, bindings and tests. Keep the library description in `README.md`, user documentation in `docs/` and `docs/ru/`, and shipped changes in `CHANGELOG.md`. Put fork development materials in `dev-docs/`, including plans and benchmark harnesses with their datasets. Never introduce `locals/` or a root `benchmarks/`. |
 
